@@ -1,0 +1,48 @@
+# Gradle
+.gradle/
+build/
+*/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Kotlin
+.kotlin/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+*/out/
+
+# Local environment variables
+.env
+.env.*
+!.env.example
+
+# Spring local config
+application-local.yml
+application-local.yaml
+application-*.local.yml
+application-*.local.yaml
+bootstrap/src/main/resources/application-local.yml
+bootstrap/src/main/resources/application-local.yaml
+
+# Secrets / credentials
+*.pem
+*.key
+*.p12
+*.jks
+*serviceAccount*.json
+*firebase-adminsdk*.json
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AGENTS
+AGENTS.md

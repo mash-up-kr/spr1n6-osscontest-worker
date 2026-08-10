@@ -1,0 +1,1 @@
+rootProject.name = "spr1n6-osscontest-worker"
