@@ -11,6 +11,7 @@ import org.mockito.kotlin.whenever
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Primary
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.context.bean.override.mockito.MockitoBean
 import org.springframework.test.context.jdbc.Sql
@@ -39,6 +40,7 @@ class IndexingPipelineRunnerIntegrationTest(
     @TestConfiguration
     class FakeIndexingProcessorConfig {
         @Bean
+        @Primary
         fun indexingProcessor(indexingJobRepository: IndexingJobRepository): IndexingProcessor =
             FakeIndexingProcessor(indexingJobRepository)
     }
@@ -54,7 +56,7 @@ class IndexingPipelineRunnerIntegrationTest(
     @Sql(
         statements = [
             "INSERT INTO tenant (id, name) VALUES (900001, 'integration-test-tenant')",
-            "INSERT INTO document (id, tenant_id, owner_principal_id, title, latest_version_no) " +
+            "INSERT INTO document (id, tenant_id, owner_principal_id, title, latest_upload_version_no) " +
                 "VALUES (900001, 900001, 'test-user', 'integration test doc', 1)",
             "INSERT INTO document_version " +
                 "(id, document_id, version_no, source_object_key, original_filename, mime_type, " +
@@ -87,7 +89,7 @@ class IndexingPipelineRunnerIntegrationTest(
     @Sql(
         statements = [
             "INSERT INTO tenant (id, name) VALUES (900002, 'integration-test-tenant-2')",
-            "INSERT INTO document (id, tenant_id, owner_principal_id, title, latest_version_no) " +
+            "INSERT INTO document (id, tenant_id, owner_principal_id, title, latest_upload_version_no) " +
                 "VALUES (900002, 900002, 'test-user', 'integration test doc 2', 1)",
             "INSERT INTO document_version " +
                 "(id, document_id, version_no, source_object_key, original_filename, mime_type, " +
@@ -118,7 +120,7 @@ class IndexingPipelineRunnerIntegrationTest(
     @Sql(
         statements = [
             "INSERT INTO tenant (id, name) VALUES (900003, 'integration-test-tenant-3')",
-            "INSERT INTO document (id, tenant_id, owner_principal_id, title, latest_version_no) " +
+            "INSERT INTO document (id, tenant_id, owner_principal_id, title, latest_upload_version_no) " +
                 "VALUES (900003, 900003, 'test-user', 'integration test doc 3', 1)",
             "INSERT INTO document_version " +
                 "(id, document_id, version_no, source_object_key, original_filename, mime_type, " +

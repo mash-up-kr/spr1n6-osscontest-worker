@@ -48,9 +48,9 @@ class DocumentChunkRepositoryIntegrationTest(
         jdbcTemplate.update(
             """
             INSERT INTO document_version
-                (id, document_id, version_no, source_object_key, original_filename, mime_type, file_size, content_hash, created_by_principal_id)
+                (id, document_id, version_no, embedding_version_no, source_object_key, original_filename, mime_type, file_size, content_hash, created_by_principal_id)
             VALUES
-                (?, ?, 1, ?, ?, 'application/pdf', 100, ?, 'owner')
+                (?, ?, 1, 1, ?, ?, 'application/pdf', 100, ?, 'owner')
             """.trimIndent(),
             id, documentId, "test-object-key-$id", "test.pdf".toByteArray(), "test-content-hash-$id",
         )
@@ -64,9 +64,9 @@ class DocumentChunkRepositoryIntegrationTest(
         jdbcTemplate.update(
             """
             INSERT INTO document_chunk
-                (document_version_id, document_id, chunk_no, content, content_hash, embedding, embedded_at)
+                (tenant_id, document_version_id, document_id, chunk_no, content, content_hash, embedding, embedded_at)
             VALUES
-                (?, ?, ?, 'test content', ?, ?::vector, CURRENT_TIMESTAMP)
+                (1, ?, ?, ?, 'test content', ?, ?::vector, CURRENT_TIMESTAMP)
             """.trimIndent(),
             documentVersionId, documentId, chunkNo, "chunk-hash-$documentVersionId-$chunkNo", zeroVector,
         )

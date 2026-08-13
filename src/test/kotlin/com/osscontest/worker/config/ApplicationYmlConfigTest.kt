@@ -15,4 +15,14 @@ class ApplicationYmlConfigTest {
         assertThat(props.getProperty("spring.kafka.consumer.properties.max.poll.interval.ms"))
             .isEqualTo("900000")
     }
+
+    @Test
+    fun `임베딩 차원은 DB vector 타입과 같은 1536으로 고정한다`() {
+        val factory = YamlPropertiesFactoryBean()
+        factory.setResources(ClassPathResource("application.yml"))
+        val props = factory.getObject()!!
+
+        assertThat(props.getProperty("spring.ai.openai.embedding.dimensions"))
+            .isEqualTo("1536")
+    }
 }

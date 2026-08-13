@@ -18,12 +18,11 @@ class IndexingFailureService(
      * §3.8: next_retry_at = now() + base_delay * attempt_count (선형 백오프).
      *
      * permanent=true면(호출자가 이미 "재시도해도 항상 같은 결과"라고 판단한 예외) attempt_count와
-     * 무관하게 즉시 FAILED로 종결한다. permanent=false면 기존과 동일하게 attempt_count가
-     * maxAttempts 미만인 동안은 RETRY_WAIT, 도달하면 FAILED다.
+     * 무관하게 즉시 FAILED로 종결한다. permanent=false면 attempt_count가 maxAttempts 미만인 동안은
+     * RETRY_WAIT, 도달하면 FAILED다.
      *
-     * 호출자가 nextRetryAt을 미리 계산해 넘기지 않고 baseDelay만 넘기는 이유는, 곱해야 할
-     * attempt_count를 실제로 알고 있는 곳이 여기이기 때문이다 — 이 메서드가 잠금과 함께 읽는
-     * job.attemptCount는 IndexingJobRepository.start()가 이미 증가시킨 "이번 시도 회차"다.
+     * 곱해야 할 attempt_count를 실제로 아는 곳은 잠금과 함께 Job을 읽는 이 메서드다.
+     * attempt_count는 IndexingJobRepository.start()가 이미 증가시킨 이번 시도 회차다.
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     fun recordFailure(

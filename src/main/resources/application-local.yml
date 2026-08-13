@@ -1,4 +1,7 @@
 spring:
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:test-key}
   datasource:
     url: jdbc:postgresql://localhost:5432/aidocs
     username: aidocs

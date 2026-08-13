@@ -9,6 +9,8 @@ import com.osscontest.worker.indexing.chunking.service.TotalTokenLimitExceededEx
 import com.osscontest.worker.indexing.consumer.IndexingEventValidator
 import com.osscontest.worker.indexing.consumer.IndexingRequestedEvent
 import com.osscontest.worker.indexing.consumer.InvalidEventException
+import com.osscontest.worker.indexing.embedding.service.EmbeddingRequestRejectedException
+import com.osscontest.worker.indexing.embedding.service.InvalidEmbeddingException
 import com.osscontest.worker.indexing.parsing.CorruptedFileException
 import com.osscontest.worker.indexing.parsing.DocumentParserRegistry
 import com.osscontest.worker.indexing.parsing.ParsingTimeoutGuard
@@ -175,6 +177,8 @@ class IndexingPipelineRunner(
             is UnsupportedMimeTypeException -> false
             is FileTooLargeException -> false
             is CorruptedFileException -> false
+            is EmbeddingRequestRejectedException -> false
+            is InvalidEmbeddingException -> false
             else -> true
         }
 
@@ -191,6 +195,8 @@ class IndexingPipelineRunner(
             is UnsupportedMimeTypeException -> e.code
             is FileTooLargeException -> e.code
             is CorruptedFileException -> e.code
+            is EmbeddingRequestRejectedException -> e.code
+            is InvalidEmbeddingException -> e.code
             else -> e::class.simpleName ?: "INDEXING_ERROR"
         }
 

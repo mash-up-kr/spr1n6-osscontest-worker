@@ -19,6 +19,22 @@ interface DocumentChunkRepository : JpaRepository<DocumentChunkEntity, Long> {
         @Param("documentId") documentId: Long,
     ): Int
 
+    @Modifying
+    @Query(
+        value = """
+            DELETE FROM document_chunk
+            WHERE document_version_id = :documentVersionId
+              AND chunk_no > :lastChunkNo
+        """,
+        nativeQuery = true,
+    )
+    fun deleteTrailingChunks(
+        @Param("documentVersionId") documentVersionId: Long,
+        @Param("lastChunkNo") lastChunkNo: Int,
+    ): Int
+
+    fun countByDocumentVersionId(documentVersionId: Long): Long
+
     // 스윕 대상: 삭제됐는데 워커 쪽 chunk가 아직 남은 문서. chunk가 없어지면 다음 스윕에서
     // 자연히 더 이상 안 잡힌다 — 별도 완료 마커(purged_at 등)가 없어도 스스로 종료된다.
     // ORDER BY d.deleted_at: 배치가 다 못 치우는 백로그가 생겨도 오래 삭제된 문서부터
