@@ -22,6 +22,7 @@ out/
 
 # Spring local config
 application-local.yml
+!src/main/resources/application-local.yml
 application-local.yaml
 application-*.local.yml
 application-*.local.yaml
@@ -46,3 +47,5 @@ Thumbs.db
 
 # AGENTS
 AGENTS.md
+docs/superpowers
+.env
