@@ -66,23 +66,39 @@ class IndexingPipelineRunnerTest {
             chunkingStrategy = strategy,
         )
 
+    // 이전 버전으로 되돌리기 기능이 그 버전의 청크/임베딩이 실제로 저장돼 있어야 성립하므로,
+    // embeddingVersionNo가 현재 searchable 버전보다 낮다고 해서 임베딩 자체를 건너뛰면 안 된다.
+    // "최신 아닌 버전이 검색을 덮어쓰지 않는다"는 §1.4-(3)의 승격 UPDATE(IndexingProcessor 내부)가
+    // 맡고, IndexingPipelineRunner는 그 판단 없이 항상 끝까지 처리한다.
     @Test
-    fun `이미 더 최신 버전이 searchable이면 다운로드하지 않고 완료 처리한다`() {
+    fun `이미 더 최신 버전이 searchable이어도 임베딩까지 끝까지 처리한다`() {
+        val bytes = "hello world".toByteArray()
         val documentVersion =
             DocumentVersionEntity(
                 id = 1001L, documentId = 42L, versionNo = 1L,
-                sourceObjectKey = "k", mimeType = "text/plain", contentHash = "h",
+                sourceObjectKey = "k", mimeType = "text/plain", contentHash = sha256Hex(bytes),
                 embeddingVersionNo = 3L,
             )
         stubActiveJobAcquisition(documentVersion)
-        whenever(documentRepository.findSearchableEmbeddingVersionNo(42L)).thenReturn(5L) // 3보다 큼 → STALE
+        whenever(downloadClient.download("k")).thenReturn(bytes)
+
+        val parser: DocumentParser = mock()
+        val block = ParsedBlock(order = 0, type = BlockType.PARAGRAPH, text = "hello world", pageNo = null, headingPath = emptyList())
+        whenever(parser.parse(any())).thenReturn(sequenceOf(block))
+        whenever(parserRegistry.findParser("text/plain")).thenReturn(parser)
+
+        val chunk = Chunk(
+            chunkNo = 0, content = "hello world", contentHash = "ch", tokenCount = 2,
+            pageFrom = null, pageTo = null, sectionPath = null, metadata = null,
+        )
+        whenever(chunkingService.chunk(eq(listOf(block)), eq(ChunkingStrategy.FIXED_TOKEN))).thenReturn(listOf(chunk))
 
         runner.run(sampleEvent())
 
-        verify(downloadClient, never()).download(any())
-        assertThat(indexingProcessor.calls).isEmpty()
-        verify(indexingJobRepository).complete(5001L)
-        verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any())
+        verify(downloadClient).download("k")
+        assertThat(indexingProcessor.calls).hasSize(1)
+        verify(indexingJobRepository, never()).complete(any())
+        verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any(), any())
     }
 
     @Test
@@ -95,8 +111,6 @@ class IndexingPipelineRunnerTest {
                 embeddingVersionNo = 3L,
             )
         stubActiveJobAcquisition(documentVersion)
-        // searchable이 없거나(null) 현재 버전보다 낮음 → STALE 아님 → 정상 진행
-        whenever(documentRepository.findSearchableEmbeddingVersionNo(42L)).thenReturn(null)
         whenever(downloadClient.download("k")).thenReturn(bytes)
 
         val parser: DocumentParser = mock()
@@ -121,7 +135,7 @@ class IndexingPipelineRunnerTest {
         assertThat(chunks).containsExactly(chunk)
         verify(chunkGuard).assertValid(listOf(chunk))
         verify(indexingJobRepository, never()).complete(any())
-        verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any())
+        verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any(), any())
     }
 
     @Test
@@ -134,7 +148,6 @@ class IndexingPipelineRunnerTest {
                 embeddingVersionNo = 3L,
             )
         stubActiveJobAcquisition(documentVersion)
-        whenever(documentRepository.findSearchableEmbeddingVersionNo(42L)).thenReturn(null)
         whenever(downloadClient.download("k")).thenReturn(bytes)
 
         val parser: DocumentParser = mock()
@@ -149,8 +162,12 @@ class IndexingPipelineRunnerTest {
         whenever(chunkingService.chunk(eq(listOf(block)), eq(ChunkingStrategy.FIXED_TOKEN))).thenReturn(listOf(chunk))
 
         indexingProcessor.throwOnNextCall = RuntimeException("simulated failure")
-        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any()))
-            .thenReturn(com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.RETRY_WAIT)
+        // RuntimeException은 영구 실패 화이트리스트에 없으므로 permanent=false로 재시도 가능
+        // 취급된다. 여기서는 recordFailure 인자 검증이 목적이라 FAILED로 스텁해 루프를
+        // 한 번에 끝낸다(RETRY_WAIT을 스텁하면 findById가 안 되어 있어 두 번째 루프에서
+        // NoSuchElementException이 나거나 start()가 두 번 불려 다른 검증이 깨진다).
+        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
+            .thenReturn(com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.FAILED)
 
         // 예외가 밖으로 새어나가지 않아야 한다.
         runner.run(sampleEvent())
@@ -159,6 +176,7 @@ class IndexingPipelineRunnerTest {
             eq(5001L),
             eq("RuntimeException"),
             eq("simulated failure"),
+            eq(false),
             eq(maxAttempts),
             // 선형 백오프 계산은 recordFailure가 담당한다 — 러너는 base delay만 그대로 넘긴다.
             eq(baseDelay),
@@ -176,11 +194,11 @@ class IndexingPipelineRunnerTest {
                 embeddingVersionNo = 3L,
             )
         stubActiveJobAcquisition(documentVersion)
-        whenever(documentRepository.findSearchableEmbeddingVersionNo(42L)).thenReturn(null)
         // 다운로드된 바이트가 documentVersion.contentHash와 일치하지 않도록 다른 내용을 반환한다.
         whenever(downloadClient.download("k")).thenReturn("corrupted content".toByteArray())
-        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any()))
-            .thenReturn(IndexingJobStatus.RETRY_WAIT)
+        // ContentIntegrityException은 영구 실패 화이트리스트에 있으므로 permanent=true.
+        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
+            .thenReturn(IndexingJobStatus.FAILED)
 
         runner.run(sampleEvent())
 
@@ -188,6 +206,7 @@ class IndexingPipelineRunnerTest {
             eq(5001L),
             eq("HASH_MISMATCH"),
             any(),
+            eq(true),
             eq(maxAttempts),
             eq(baseDelay),
             any(),
@@ -211,8 +230,9 @@ class IndexingPipelineRunnerTest {
         )
         whenever(eventValidator.validate(any()))
             .thenThrow(InvalidEventException("DOCUMENT_VERSION_NOT_FOUND", "document_version 1001 does not exist"))
-        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any()))
-            .thenReturn(IndexingJobStatus.RETRY_WAIT)
+        // InvalidEventException은 영구 실패 화이트리스트에 있으므로 permanent=true.
+        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
+            .thenReturn(IndexingJobStatus.FAILED)
 
         runner.run(sampleEvent())
 
@@ -222,6 +242,7 @@ class IndexingPipelineRunnerTest {
             eq(5001L),
             eq("DOCUMENT_VERSION_NOT_FOUND"),
             eq("document_version 1001 does not exist"),
+            eq(true),
             eq(maxAttempts),
             eq(baseDelay),
             any(),
@@ -241,7 +262,7 @@ class IndexingPipelineRunnerTest {
         )
         whenever(documentRepository.findById(42L))
             .thenReturn(Optional.of(DocumentEntity(id = 42L, tenantId = 999L, searchableVersionId = null, deletedAt = null)))
-        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any()))
+        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(IndexingJobStatus.FAILED)
 
         runner.run(sampleEvent())
@@ -251,6 +272,7 @@ class IndexingPipelineRunnerTest {
             eq(5001L),
             eq("TENANT_MISMATCH"),
             any(),
+            eq(true),
             eq(maxAttempts),
             eq(baseDelay),
             any(),
@@ -266,7 +288,7 @@ class IndexingPipelineRunnerTest {
 
         verify(indexingJobRepository, never()).insertIfAbsent(any(), any(), any(), anyOrNull())
         verify(indexingJobRepository, never()).start(any(), any(), any())
-        verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any())
+        verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any(), any())
         assertThat(indexingProcessor.calls).isEmpty()
     }
 
@@ -280,7 +302,6 @@ class IndexingPipelineRunnerTest {
                 embeddingVersionNo = 3L,
             )
         stubActiveJobAcquisition(documentVersion)
-        whenever(documentRepository.findSearchableEmbeddingVersionNo(42L)).thenReturn(null)
         whenever(downloadClient.download("k")).thenReturn(bytes)
 
         val parser: DocumentParser = mock()
@@ -319,7 +340,7 @@ class IndexingPipelineRunnerTest {
         verify(indexingJobRepository, never()).start(any(), any(), any())
         verify(downloadClient, never()).download(any())
         assertThat(indexingProcessor.calls).isEmpty()
-        verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any())
+        verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any(), any())
     }
 
     @Test
@@ -338,7 +359,7 @@ class IndexingPipelineRunnerTest {
         verify(indexingJobRepository).failIfAttemptsExceeded(5001L, maxAttempts)
         verify(downloadClient, never()).download(any())
         assertThat(indexingProcessor.calls).isEmpty()
-        verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any())
+        verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any(), any())
     }
 
     /** eventValidator/insertIfAbsent/findBySourceEventId/documentRepository.findById/start를 표준 성공 값으로 스텁한다. */

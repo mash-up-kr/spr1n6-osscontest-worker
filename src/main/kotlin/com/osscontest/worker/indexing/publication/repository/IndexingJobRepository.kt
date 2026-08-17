@@ -36,19 +36,8 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
         @Param("traceId") traceId: String?,
     ): Int
 
-    // §1.4-(1): 크래시 재획득(PENDING/PROCESSING) + §3.8: RETRY_WAIT 재시도 재획득을 하나로 처리.
-    // attempt_count 상한을 넘으면 재획득 자체가 안 된다(크래시 루프 방어).
-    //
-    // 트레이드오프 (accepted, not a bug): 이 메서드는 크래시 재획득(Kafka 재배달 —
-    // 컨슈머 그룹의 파티션 소유권이 상호 배제를 보장한다)과 재시도 폴러 재획득(Task 17,
-    // IndexingRetryScheduler) 양쪽에서 공유된다. 크래시 재획득 쪽은 Kafka 컨슈머 그룹이
-    // 동일 파티션을 두 인스턴스가 동시에 못 읽게 막아주지만, 재시도 폴러 쪽은 그런 인스턴스 간
-    // 상호 배제 장치가 없다 — 여러 워커가 동시에 폴링하면 같은 RETRY_WAIT Job을 둘 다 start()로
-    // 획득해 중복 처리(불필요한 S3 다운로드/처리, attempt_count 이중 증가)가 발생할 수 있다.
-    // 청킹이 결정적이고 저장이 UPSERT 기반(멱등)이라 데이터가 깨지지는 않는다는 전제로 이 상태를
-    // 감수한다 — 최초 처리와 재시도 처리를 같은 코드 경로에 태워 결정성을 실질적으로 보장한다는
-    // §3.6 목표를 위한 트레이드오프다. 나중에 중복 S3 egress 비용 등 운영 비용이 실제 문제가
-    // 되면, 재시도 전용으로 RETRY_WAIT 상태만 대상으로 하는 별도 조건부 UPDATE 쿼리를 분리해야 한다.
+    // §1.4-(1): 크래시 재획득(PENDING/PROCESSING) + §3.8: RETRY_WAIT 인프로세스 재시도 재획득을
+    // 하나로 처리. attempt_count 상한을 넘으면 재획득 자체가 안 된다(크래시 루프 방어).
     @Modifying
     @Transactional
     @Query(
@@ -126,20 +115,6 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
     fun findByIdForUpdate(
         @Param("jobId") jobId: Long,
     ): IndexingJobEntity?
-
-    @Query(
-        value = """
-            SELECT id FROM indexing_job
-            WHERE status = 'RETRY_WAIT' AND next_retry_at <= :now
-            ORDER BY next_retry_at
-            LIMIT :limit
-        """,
-        nativeQuery = true,
-    )
-    fun findRetryWaitDue(
-        @Param("now") now: java.time.LocalDateTime,
-        @Param("limit") limit: Int,
-    ): List<Long>
 
     // §3.9-(1): 재시도 폴러가 삭제된 문서의 Job을 다시 집지 못하게, 활성 Job을 먼저 종결시킨다.
     // PROCESSING 중인 Job은 이 시점에 즉시 인터럽트되진 않지만(§3.9), 그 뒤 완료돼도

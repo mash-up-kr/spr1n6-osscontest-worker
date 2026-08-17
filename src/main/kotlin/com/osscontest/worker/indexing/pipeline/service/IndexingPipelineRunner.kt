@@ -54,20 +54,25 @@ class IndexingPipelineRunner(
     // 필요 없다 (같은 클래스 안에서 자기 자신을 호출하는 메서드에 @Transactional을 붙여도 Spring AOP
     // 프록시를 안 타서 어차피 무시된다 — self-invocation 문제). acquireJobId()에도 동일하게 적용된다.
     /**
-     * Kafka 리스너와 재시도 폴러가 공유하는 단일 진입점.
+     * Kafka 배치 리스너가 documentId 그룹마다 부르는 단일 진입점(§3.1, §3.8).
+     *
+     * 예외를 잡으면 영구 실패(재시도해도 항상 같은 결과)인지 재시도 가능인지 분류해서
+     * indexingFailureService.recordFailure에 permanent로 넘긴다. RETRY_WAIT이 나오면
+     * next_retry_at까지 이 함수 안에서 Thread.sleep한 뒤 같은 함수 안에서 다시 시도한다
+     * (별도 스케줄러 없음 — RETRY_WAIT은 관측/크래시 재획득용으로만 DB에 남는다, §3.8 참고).
+     * FAILED가 나오면 그대로 종결한다.
      *
      * 순서가 중요하다: Job 획득(acquireJobId + start)이 **검증보다 먼저** 일어난다.
      * 검증을 먼저 하면, 재시도 경로에서 검증 실패가 발생했을 때 start()에 도달하지 못해
-     * attempt_count가 영원히 늘지 않고 — 이미 RETRY_WAIT이고 next_retry_at도 지난 Job이라 —
-     * 폴러가 매 폴링마다 같은 Job을 다시 집는 무한 핫 루프가 된다. 검증 실패는 재시도해도
-     * 절대 성공할 수 없는 부류이므로, start()로 attempt_count를 올린 뒤 catch에서
-     * recordFailure()가 상한 도달 시 FAILED로 종결하게 해 루프를 끊는다.
+     * attempt_count가 영원히 늘지 않는다. 검증 실패는 재시도해도 절대 성공할 수 없는
+     * 부류이므로, start()로 attempt_count를 올린 뒤 catch에서 permanent=true로 FAILED
+     * 종결시킨다.
      */
     fun run(event: IndexingRequestedEvent) {
         // 유일하게 Job 자체를 만들 수 없는 경우다 — indexing_job.document_version_id가 NOT NULL FK라
-        // 어떤 Job 행도 존재할 수 없다. 재시도 경로에서는 발생할 수 없다(RetryEventSource는 항상
-        // DB의 Job 행에서 non-null document_version_id를 읽어 이벤트를 재구성한다). 따라서
-        // 이 조기 반환은 무한 루프 위험이 없는, 최초 수신 1회성 케이스다.
+        // 어떤 Job 행도 존재할 수 없다. 재시도 경로에서는 발생할 수 없다(재시도는 이 함수 안 루프에서
+        // 같은 event를 그대로 재사용한다). 따라서 이 조기 반환은 무한 루프 위험이 없는, 최초 수신
+        // 1회성 케이스다.
         val documentVersionId = event.documentVersionId
         if (documentVersionId == null) {
             log.error(
@@ -79,48 +84,75 @@ class IndexingPipelineRunner(
 
         val jobId = acquireJobId(event, documentVersionId) ?: return
 
-        val acquired = indexingJobRepository.start(jobId, workerId, maxAttempts)
-        if (acquired != 1) {
-            // 상한 초과인지, 이미 완료됐는지 구분해서 상한 초과라면 종결한다.
-            indexingJobRepository.failIfAttemptsExceeded(jobId, maxAttempts)
-            log.info("job {} not acquired (already handled or attempts exceeded)", jobId)
-            return
-        }
-
-        try {
-            val documentVersion = eventValidator.validate(event)
-            val document =
-                documentRepository.findById(event.documentId).orElseThrow {
-                    InvalidEventException("DOCUMENT_NOT_FOUND", "document ${event.documentId} does not exist")
-                }
-            if (document.tenantId != event.tenantId) {
-                throw InvalidEventException(
-                    "TENANT_MISMATCH",
-                    "event tenantId=${event.tenantId} but document belongs to tenant ${document.tenantId}",
-                )
+        while (true) {
+            val acquired = indexingJobRepository.start(jobId, workerId, maxAttempts)
+            if (acquired != 1) {
+                // 상한 초과인지, 이미 완료됐는지 구분해서 상한 초과라면 종결한다.
+                indexingJobRepository.failIfAttemptsExceeded(jobId, maxAttempts)
+                log.info("job {} not acquired (already handled or attempts exceeded)", jobId)
+                return
             }
 
-            processAcquiredJob(jobId, event, documentVersion)
-        } catch (e: Exception) {
-            // Track A 자체 실패(검증/다운로드/파싱/청킹)와 IndexingProcessor 내부 실패를 여기서 동일하게
-            // 기록한다(§1.4-(4)). IndexingProcessor가 이미 자체적으로 기록한 예외가 다시 올라온 경우는
-            // recordFailure 내부의 "status != PROCESSING이면 조용히 반환" 가드 덕분에 중복 기록되지 않는다.
-            val resultStatus =
-                indexingFailureService.recordFailure(
-                    jobId = jobId,
-                    errorCode = errorCodeOf(e),
-                    errorMessage = e.message ?: "indexing failed",
-                    maxAttempts = maxAttempts,
-                    // §3.8 선형 백오프 — 실제 곱셈은 attempt_count를 알고 있는 recordFailure가 한다.
-                    baseDelay = baseDelay,
-                    failedAt = LocalDateTime.now(),
-                )
-            when (resultStatus) {
-                IndexingJobStatus.RETRY_WAIT -> log.warn("job {} failed, will retry", jobId, e)
-                else -> log.error("job {} failed terminally", jobId, e)
+            try {
+                val documentVersion = eventValidator.validate(event)
+                val document =
+                    documentRepository.findById(event.documentId).orElseThrow {
+                        InvalidEventException("DOCUMENT_NOT_FOUND", "document ${event.documentId} does not exist")
+                    }
+                if (document.tenantId != event.tenantId) {
+                    throw InvalidEventException(
+                        "TENANT_MISMATCH",
+                        "event tenantId=${event.tenantId} but document belongs to tenant ${document.tenantId}",
+                    )
+                }
+
+                processAcquiredJob(jobId, event, documentVersion)
+                return
+            } catch (e: Exception) {
+                // Track A 자체 실패(검증/다운로드/파싱/청킹)와 IndexingProcessor 내부 실패를 여기서
+                // 동일하게 기록한다(§1.4-(4)). IndexingProcessor가 이미 자체적으로 기록한 예외가
+                // 다시 올라온 경우는 recordFailure 내부의 "status != PROCESSING이면 조용히 반환"
+                // 가드 덕분에 중복 기록되지 않는다.
+                val status =
+                    indexingFailureService.recordFailure(
+                        jobId = jobId,
+                        errorCode = errorCodeOf(e),
+                        errorMessage = e.message ?: "indexing failed",
+                        permanent = !isRetryable(e),
+                        maxAttempts = maxAttempts,
+                        // §3.8 선형 백오프 — 실제 곱셈은 attempt_count를 알고 있는 recordFailure가 한다.
+                        baseDelay = baseDelay,
+                        failedAt = LocalDateTime.now(),
+                    )
+                if (status != IndexingJobStatus.RETRY_WAIT) {
+                    // FAILED(영구 실패 또는 상한 도달)이거나, 다른 워커가 이미 COMPLETED로 끝냈다.
+                    log.warn("job {} resolved to {}", jobId, status, e)
+                    return
+                }
+                val nextRetryAt = indexingJobRepository.findById(jobId).orElseThrow().nextRetryAt!!
+                val waitMillis = Duration.between(LocalDateTime.now(), nextRetryAt).toMillis().coerceAtLeast(0)
+                log.warn("job {} in RETRY_WAIT, retrying in-process after {}ms", jobId, waitMillis, e)
+                Thread.sleep(waitMillis)
+                // 루프 재진입 — start()가 RETRY_WAIT 재획득 분기(§1.4-(1))로 다시 PROCESSING으로
+                // 되돌리고 attempt_count를 증가시킨다. next_retry_at은 이미 지났으므로 즉시 재획득된다.
             }
         }
     }
+
+    // 같은 입력이면 재시도해도 항상 같은 결과가 나오는 예외만 영구 실패로 분류한다.
+    // 그 외(현재는 대부분 미지의 예외, 향후 IndexingProcessor의 임베딩 API 호출 실패 포함)는
+    // 기본적으로 재시도 가능으로 취급한다 — 새 예외 타입이 추가돼도 이 목록에 없으면
+    // 자동으로 재시도 대상이 되므로, 태성님이 임베딩 예외를 추가할 때 이 파일을 안 고쳐도 된다.
+    private fun isRetryable(e: Exception): Boolean =
+        when (e) {
+            is InvalidEventException -> false
+            is ContentIntegrityException -> false
+            is EmptyExtractionException -> false
+            is ChunkLimitExceededException -> false
+            is TotalTokenLimitExceededException -> false
+            is UnsupportedMimeTypeException -> false
+            else -> true
+        }
 
     // 의도적으로 .code를 갖고 있는 예외는 그 코드를 그대로 쓰고(SCREAMING_SNAKE 규약 —
     // last_error_code에 SQL 리터럴로 쓰이는 MAX_ATTEMPTS_EXCEEDED/DOCUMENT_DELETED와 같은 형식),
@@ -141,17 +173,13 @@ class IndexingPipelineRunner(
         event: IndexingRequestedEvent,
         documentVersion: DocumentVersionEntity,
     ) {
-        // 조기 fencing 판정 (§3.1) — 임베딩은커녕 다운로드도 하지 않는다.
-        val searchableVersionNo = documentRepository.findSearchableEmbeddingVersionNo(event.documentId)
-        if (searchableVersionNo != null && documentVersion.embeddingVersionNo < searchableVersionNo) {
-            log.info(
-                "job {} is stale (embeddingVersionNo={} < searchable={}), completing without processing",
-                jobId, documentVersion.embeddingVersionNo, searchableVersionNo,
-            )
-            indexingJobRepository.complete(jobId)
-            return
-        }
-
+        // 여기서 searchable 버전과 비교해 미리 건너뛰지 않는다 — 이전 버전으로 되돌리기 기능이
+        // 그 버전의 청크/임베딩이 실제로 저장돼 있어야 성립하므로, embedding_version_no가 더
+        // 작다고 해서 임베딩 자체를 스킵하면 안 된다(되돌릴 때마다 처음부터 재인덱싱해야 함).
+        // "최신 아닌 버전이 검색을 덮어쓰지 않는다"는 보장은 여기가 아니라 §1.4-(3)의
+        // searchable_version_id 승격 UPDATE(embedding_version_no 비교 후 조건부 갱신)에서
+        // 맡는다 — 그 UPDATE는 IndexingProcessor.process() 안에서 일어난다. 즉 "항상 임베딩은
+        // 하되 승격만 안 한다"가 여기의 계약이다.
         val bytes = downloadClient.download(documentVersion.sourceObjectKey)
         val actualHash = "sha256:" + sha256Hex(bytes)
         if (actualHash != documentVersion.contentHash) {

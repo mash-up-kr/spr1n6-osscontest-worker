@@ -15,6 +15,10 @@ class IndexingFailureService(
     /**
      * §3.8: next_retry_at = now() + base_delay * attempt_count (선형 백오프).
      *
+     * permanent=true면(호출자가 이미 "재시도해도 항상 같은 결과"라고 판단한 예외) attempt_count와
+     * 무관하게 즉시 FAILED로 종결한다. permanent=false면 기존과 동일하게 attempt_count가
+     * maxAttempts 미만인 동안은 RETRY_WAIT, 도달하면 FAILED다.
+     *
      * 호출자가 nextRetryAt을 미리 계산해 넘기지 않고 baseDelay만 넘기는 이유는, 곱해야 할
      * attempt_count를 실제로 알고 있는 곳이 여기이기 때문이다 — 이 메서드가 잠금과 함께 읽는
      * job.attemptCount는 IndexingJobRepository.start()가 이미 증가시킨 "이번 시도 회차"다.
@@ -24,6 +28,7 @@ class IndexingFailureService(
         jobId: Long,
         errorCode: String,
         errorMessage: String,
+        permanent: Boolean,
         maxAttempts: Int,
         baseDelay: Duration,
         failedAt: LocalDateTime,
@@ -41,15 +46,15 @@ class IndexingFailureService(
         job.lastErrorMessage = errorMessage.take(MAX_ERROR_MESSAGE_LENGTH)
         job.updatedAt = failedAt
 
-        return if (job.attemptCount >= maxAttempts) {
+        return if (permanent || job.attemptCount >= maxAttempts) {
             job.status = IndexingJobStatus.FAILED
             job.nextRetryAt = null
             job.completedAt = failedAt
             IndexingJobStatus.FAILED
         } else {
             job.status = IndexingJobStatus.RETRY_WAIT
-            // attemptCount는 start()를 거쳤다면 항상 1 이상이지만, 0이면 지연이 0이 되어 폴러가
-            // 즉시 다시 집는 핫 루프가 되므로 최소 1회차로 보정한다.
+            // attemptCount는 start()를 거쳤다면 항상 1 이상이지만, 0이면 지연이 0이 되어 즉시
+            // 재시도하는 핫 루프가 되므로 최소 1회차로 보정한다.
             val multiplier = job.attemptCount.coerceAtLeast(1).toLong()
             job.nextRetryAt = failedAt.plus(baseDelay.multipliedBy(multiplier))
             job.completedAt = null
