@@ -4,10 +4,14 @@ import com.osscontest.worker.indexing.pipeline.service.IndexingPipelineRunner
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
+import org.springframework.beans.factory.annotation.Value
+import org.springframework.dao.DataAccessException
 import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.kafka.support.Acknowledgment
 import org.springframework.stereotype.Component
 import tools.jackson.databind.ObjectMapper
+import java.time.Duration
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 
 // 토픽 이름은 이벤트 타입에 종속되지 않게 짓는다("indexing.requested"가 아니라 "indexing") —
@@ -19,6 +23,8 @@ class IndexingKafkaListener(
     private val deletionHandler: DocumentDeletionHandler,
     private val objectMapper: ObjectMapper,
     @Qualifier("indexingBatchExecutor") private val executor: ExecutorService,
+    @Value("\${indexing.db-health-gate.pause-nack-delay:PT5S}")
+    private val nackDelay: Duration = Duration.ofSeconds(5),
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -31,18 +37,44 @@ class IndexingKafkaListener(
         records: List<ConsumerRecord<String, String>>,
         ack: Acknowledgment,
     ) {
-        records
-            .groupBy { it.key() }
-            .values
-            .map { sameKeyRecords -> executor.submit { sameKeyRecords.forEach(::processRecord) } }
-            .forEach { it.get() }
+        val futures =
+            records
+                .groupBy { it.key() }
+                .values
+                .map { sameKeyRecords -> executor.submit { sameKeyRecords.forEach(::processRecord) } }
+
+        // P0-5: DB에 아무것도 기록하지 못한 실패는 ack이 아니라 nack한다 — always-ack 원칙의
+        // 유일한 예외(FAULT_TOLERANCE.md §3 P0-5-(c)). 배치 안 다른 documentId 그룹이 아직 처리
+        // 중일 수 있으므로, DB 장애를 감지해도 즉시 반환하지 않고 나머지 future도 전부 기다린다 —
+        // 그래야 아직 실행 중인 작업이 고아로 남지 않고, 다른 그룹의 실패도 로그에서 안 사라진다.
+        var dbFailure: Throwable? = null
+        for (future in futures) {
+            try {
+                future.get()
+            } catch (e: ExecutionException) {
+                if (e.cause is DataAccessException) {
+                    if (dbFailure == null) dbFailure = e.cause
+                    log.warn("DB unavailable while processing batch", e.cause)
+                } else {
+                    // 예상 못 한 실패(DataAccessException 아님)는 기존과 동일하게 즉시 전파해
+                    // 컨테이너가 배치를 통째로 재전달받게 한다. 나머지 future를 기다리지 않는다 —
+                    // 워커가 불안정하면 최대한 빨리 벗어나는 게 낫다는 기존 판단을 그대로 유지한다.
+                    throw e
+                }
+            }
+        }
+
+        if (dbFailure != null) {
+            // 배치 리스너라 레코드 하나가 아니라 배치 전체(인덱스 0부터)가 되감긴다.
+            // 이미 성공적으로 처리된 다른 documentId 그룹까지 재전달되지만,
+            // UPSERT 수렴(§1.4-(2))으로 무해하다.
+            ack.nack(0, nackDelay)
+            return
+        }
         ack.acknowledge()
     }
 
     private fun processRecord(record: ConsumerRecord<String, String>) {
-        // 역직렬화가 성공한 뒤부터는 이후 catch 블록에서도 event.eventId/documentId를 로그에
-        // 남길 수 있도록 try 바깥에 선언한다. DeserializationException 쪽은 애초에 event가
-        // 없으므로 null로 남는다.
         var event: IndexingRequestedEvent? = null
         try {
             event = deserialize(record.value())
@@ -55,6 +87,10 @@ class IndexingKafkaListener(
                         "eventType=${event.eventType} is not recognized",
                     )
             }
+        } catch (e: DataAccessException) {
+            // 여기서 삼키지 않는다 — onMessage()의 futures.forEach { it.get() }가
+            // ExecutionException으로 다시 던지도록 그대로 전파한다(P0-5).
+            throw e
         } catch (e: DeserializationException) {
             log.error("event schema invalid: partition={} offset={}", record.partition(), record.offset(), e)
         } catch (e: InvalidEventException) {

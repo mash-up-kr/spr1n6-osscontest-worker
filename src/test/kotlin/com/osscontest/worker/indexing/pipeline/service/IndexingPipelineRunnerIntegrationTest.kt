@@ -14,6 +14,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.context.bean.override.mockito.MockitoBean
 import org.springframework.test.context.jdbc.Sql
+import java.nio.file.Files
 import java.time.Instant
 import java.util.UUID
 
@@ -64,7 +65,9 @@ class IndexingPipelineRunnerIntegrationTest(
         ],
     )
     fun `재시도 가능한 오류는 인프로세스로 재시도하다가 성공하면 COMPLETED로 끝난다`() {
-        whenever(downloadClient.download("docs/900001/v1.txt")).thenReturn("hello world".toByteArray())
+        val tempFile1 = Files.createTempFile("integration-test-", ".tmp")
+        Files.write(tempFile1, "hello world".toByteArray())
+        whenever(downloadClient.download("docs/900001/v1.txt")).thenReturn(tempFile1)
         val event = sampleEvent(documentId = 900001L, documentVersionId = 900001L)
 
         // 처음 두 번은 실패(재시도 가능한 RuntimeException), 세 번째는 성공하도록 설정.
@@ -76,6 +79,7 @@ class IndexingPipelineRunnerIntegrationTest(
         assertThat(job).isNotNull
         assertThat(job!!.status).isEqualTo(IndexingJobStatus.COMPLETED)
         assertThat(job.attemptCount).isEqualTo(3)
+        assertThat(job.phase).isEqualTo("EMBEDDING")
     }
 
     @Test
@@ -93,7 +97,9 @@ class IndexingPipelineRunnerIntegrationTest(
         ],
     )
     fun `재시도 가능한 오류가 상한만큼 계속되면 FAILED로 종결한다`() {
-        whenever(downloadClient.download("docs/900002/v1.txt")).thenReturn("hello world".toByteArray())
+        val tempFile2 = Files.createTempFile("integration-test-", ".tmp")
+        Files.write(tempFile2, "hello world".toByteArray())
+        whenever(downloadClient.download("docs/900002/v1.txt")).thenReturn(tempFile2)
         val event = sampleEvent(documentId = 900002L, documentVersionId = 900002L)
 
         fakeIndexingProcessor.failuresBeforeSuccess = Int.MAX_VALUE // 계속 실패
@@ -123,7 +129,9 @@ class IndexingPipelineRunnerIntegrationTest(
     fun `영구 실패(콘텐츠 무결성 오류)는 재시도 없이 즉시 FAILED로 종결한다`() {
         // content_hash가 실제 다운로드 바이트와 다르게 만들어 ContentIntegrityException을 유발한다 —
         // 같은 입력이면 항상 같은 결과이므로 재시도할 필요가 없는 영구 실패 케이스다.
-        whenever(downloadClient.download("docs/900003/v1.txt")).thenReturn("different content".toByteArray())
+        val tempFile3 = Files.createTempFile("integration-test-", ".tmp")
+        Files.write(tempFile3, "different content".toByteArray())
+        whenever(downloadClient.download("docs/900003/v1.txt")).thenReturn(tempFile3)
         val event = sampleEvent(documentId = 900003L, documentVersionId = 900003L)
 
         pipelineRunner.run(event)

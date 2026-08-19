@@ -15,7 +15,7 @@ spring:
       auto-offset-reset: earliest
       max-poll-records: ${INDEXING_BATCH_SIZE:10}
       properties:
-        max.poll.interval.ms: 600000
+        max.poll.interval.ms: 900000
         session.timeout.ms: 45000
         heartbeat.interval.ms: 3000
     listener:
@@ -30,6 +30,12 @@ indexing:
     max-attempts: ${INDEXING_MAX_ATTEMPTS:5}
     # 선형 백오프의 기준 간격 — Thread.sleep(base-delay * attempt_count), §3.8.
     base-delay: ${INDEXING_RETRY_BASE_DELAY:PT30S}
+  db-health-gate:
+    check-interval-ms: ${INDEXING_DB_HEALTH_CHECK_INTERVAL_MS:5000}
+    pause-nack-delay: ${INDEXING_DB_HEALTH_PAUSE_NACK_DELAY:PT5S}
+  limits:
+    max-file-size-bytes: ${INDEXING_MAX_FILE_SIZE_BYTES:209715200}
+    parse-timeout: ${INDEXING_PARSE_TIMEOUT:PT60S}
   chunking:
     # FIXED_TOKEN | PARAGRAPH | PARAGRAPH_OVERLAP
     strategy: ${INDEXING_CHUNKING_STRATEGY:FIXED_TOKEN}

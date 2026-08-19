@@ -2,6 +2,7 @@ package com.osscontest.worker.indexing.publication.service
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
+import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.annotation.Transactional
@@ -11,6 +12,7 @@ import java.time.LocalDateTime
 @Service
 class IndexingFailureService(
     private val indexingJobRepository: IndexingJobRepository,
+    private val meterRegistry: MeterRegistry,
 ) {
     /**
      * §3.8: next_retry_at = now() + base_delay * attempt_count (선형 백오프).
@@ -50,6 +52,8 @@ class IndexingFailureService(
             job.status = IndexingJobStatus.FAILED
             job.nextRetryAt = null
             job.completedAt = failedAt
+            // P1-2: DLQ가 없는 이 설계에서 실패를 감지하는 핵심 지표(FAULT_TOLERANCE.md §3 P1-2).
+            meterRegistry.counter("indexing_job_failed_total", "errorCode", job.lastErrorCode!!).increment()
             IndexingJobStatus.FAILED
         } else {
             job.status = IndexingJobStatus.RETRY_WAIT

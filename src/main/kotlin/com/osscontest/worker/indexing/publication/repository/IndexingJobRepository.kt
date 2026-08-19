@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.transaction.annotation.Transactional
+import java.time.LocalDateTime
 import java.util.UUID
 
 interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
@@ -138,4 +139,23 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
     fun failActiveJobsForDocument(
         @Param("documentId") documentId: Long,
     ): Int
+
+    // P1-1: 진행률 노출. 완료 후가 아니라 각 단계 "진입 직전"에 호출해야 사용자가 가장 오래
+    // 걸리는 구간(특히 EMBEDDING)에서도 멈춘 것처럼 보이지 않는다.
+    @Modifying
+    @Transactional
+    @Query(
+        value = "UPDATE indexing_job SET phase = :phase, updated_at = CURRENT_TIMESTAMP WHERE id = :jobId",
+        nativeQuery = true,
+    )
+    fun updatePhase(
+        @Param("jobId") jobId: Long,
+        @Param("phase") phase: String,
+    ): Int
+
+    // P2-2: recordFailure()가 next_retry_at을 계산할 때 애플리케이션 시각이 아니라 DB 시각을
+    // 쓰도록 한다 — start()의 재획득 비교(next_retry_at <= CURRENT_TIMESTAMP)도 DB 시각이라
+    // 두 시각의 출처를 맞춰야 NTP 오차로 인한 크래시 재획득 타이밍 어긋남이 없다(B-Gap-5).
+    @Query(value = "SELECT CURRENT_TIMESTAMP", nativeQuery = true)
+    fun currentDbTimestamp(): LocalDateTime
 }

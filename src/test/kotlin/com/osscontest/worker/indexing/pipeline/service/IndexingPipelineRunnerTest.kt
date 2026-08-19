@@ -7,8 +7,10 @@ import com.osscontest.worker.indexing.chunking.service.ChunkingStrategy
 import com.osscontest.worker.indexing.consumer.IndexingEventValidator
 import com.osscontest.worker.indexing.consumer.IndexingRequestedEvent
 import com.osscontest.worker.indexing.consumer.InvalidEventException
+import com.osscontest.worker.indexing.parsing.CorruptedFileException
 import com.osscontest.worker.indexing.parsing.DocumentParser
 import com.osscontest.worker.indexing.parsing.DocumentParserRegistry
+import com.osscontest.worker.indexing.parsing.ParsingTimeoutGuard
 import com.osscontest.worker.indexing.parsing.domain.BlockType
 import com.osscontest.worker.indexing.parsing.domain.ParsedBlock
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
@@ -19,14 +21,19 @@ import com.osscontest.worker.indexing.publication.repository.DocumentRepository
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
 import com.osscontest.worker.indexing.publication.service.IndexingFailureService
 import com.osscontest.worker.indexing.retrieval.DocumentDownloadClient
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.eq
+import org.mockito.kotlin.inOrder
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
+import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
+import java.nio.file.Files
+import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
@@ -40,12 +47,15 @@ class IndexingPipelineRunnerTest {
     private val eventValidator: IndexingEventValidator = mock()
     private val downloadClient: DocumentDownloadClient = mock()
     private val parserRegistry: DocumentParserRegistry = mock()
+    private val parsingTimeoutGuard: ParsingTimeoutGuard = mock()
     private val chunkingService: ChunkingService = mock()
     private val chunkGuard: ChunkGuard = mock()
     private val indexingProcessor = FakeIndexingProcessor()
     private val indexingFailureService: IndexingFailureService = mock()
+    private val meterRegistry = SimpleMeterRegistry()
     private val maxAttempts = 5
     private val baseDelay: Duration = Duration.ofSeconds(30)
+    private val maxFileSizeBytes = 209_715_200L // 200MB — 스펙 기본값
 
     private val runner = newRunner()
 
@@ -56,6 +66,7 @@ class IndexingPipelineRunnerTest {
             eventValidator = eventValidator,
             downloadClient = downloadClient,
             parserRegistry = parserRegistry,
+            parsingTimeoutGuard = parsingTimeoutGuard,
             chunkingService = chunkingService,
             chunkGuard = chunkGuard,
             indexingProcessor = indexingProcessor,
@@ -63,7 +74,9 @@ class IndexingPipelineRunnerTest {
             workerId = "worker-test",
             maxAttempts = maxAttempts,
             baseDelay = baseDelay,
+            maxFileSizeBytes = maxFileSizeBytes,
             chunkingStrategy = strategy,
+            meterRegistry = meterRegistry,
         )
 
     // 이전 버전으로 되돌리기 기능이 그 버전의 청크/임베딩이 실제로 저장돼 있어야 성립하므로,
@@ -80,12 +93,12 @@ class IndexingPipelineRunnerTest {
                 embeddingVersionNo = 3L,
             )
         stubActiveJobAcquisition(documentVersion)
-        whenever(downloadClient.download("k")).thenReturn(bytes)
+        whenever(downloadClient.download("k")).thenReturn(tempFileOf(bytes))
 
         val parser: DocumentParser = mock()
-        val block = ParsedBlock(order = 0, type = BlockType.PARAGRAPH, text = "hello world", pageNo = null, headingPath = emptyList())
-        whenever(parser.parse(any())).thenReturn(sequenceOf(block))
         whenever(parserRegistry.findParser("text/plain")).thenReturn(parser)
+        val block = ParsedBlock(order = 0, type = BlockType.PARAGRAPH, text = "hello world", pageNo = null, headingPath = emptyList())
+        whenever(parsingTimeoutGuard.parse(eq(parser), any(), eq("text/plain"))).thenReturn(listOf(block))
 
         val chunk = Chunk(
             chunkNo = 0, content = "hello world", contentHash = "ch", tokenCount = 2,
@@ -111,12 +124,12 @@ class IndexingPipelineRunnerTest {
                 embeddingVersionNo = 3L,
             )
         stubActiveJobAcquisition(documentVersion)
-        whenever(downloadClient.download("k")).thenReturn(bytes)
+        whenever(downloadClient.download("k")).thenReturn(tempFileOf(bytes))
 
         val parser: DocumentParser = mock()
-        val block = ParsedBlock(order = 0, type = BlockType.PARAGRAPH, text = "hello world", pageNo = null, headingPath = emptyList())
-        whenever(parser.parse(any())).thenReturn(sequenceOf(block))
         whenever(parserRegistry.findParser("text/plain")).thenReturn(parser)
+        val block = ParsedBlock(order = 0, type = BlockType.PARAGRAPH, text = "hello world", pageNo = null, headingPath = emptyList())
+        whenever(parsingTimeoutGuard.parse(eq(parser), any(), eq("text/plain"))).thenReturn(listOf(block))
 
         val chunk = Chunk(
             chunkNo = 0, content = "hello world", contentHash = "ch", tokenCount = 2,
@@ -136,6 +149,13 @@ class IndexingPipelineRunnerTest {
         verify(chunkGuard).assertValid(listOf(chunk))
         verify(indexingJobRepository, never()).complete(any())
         verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any(), any())
+
+        val order = inOrder(indexingJobRepository)
+        order.verify(indexingJobRepository).updatePhase(5001L, "DOWNLOADING")
+        order.verify(indexingJobRepository).updatePhase(5001L, "PARSING")
+        order.verify(indexingJobRepository).updatePhase(5001L, "CHUNKING")
+        order.verify(indexingJobRepository).updatePhase(5001L, "EMBEDDING")
+        verify(indexingJobRepository, times(4)).updatePhase(any(), any())
     }
 
     @Test
@@ -148,12 +168,12 @@ class IndexingPipelineRunnerTest {
                 embeddingVersionNo = 3L,
             )
         stubActiveJobAcquisition(documentVersion)
-        whenever(downloadClient.download("k")).thenReturn(bytes)
+        whenever(downloadClient.download("k")).thenReturn(tempFileOf(bytes))
 
         val parser: DocumentParser = mock()
-        val block = ParsedBlock(order = 0, type = BlockType.PARAGRAPH, text = "hello world", pageNo = null, headingPath = emptyList())
-        whenever(parser.parse(any())).thenReturn(sequenceOf(block))
         whenever(parserRegistry.findParser("text/plain")).thenReturn(parser)
+        val block = ParsedBlock(order = 0, type = BlockType.PARAGRAPH, text = "hello world", pageNo = null, headingPath = emptyList())
+        whenever(parsingTimeoutGuard.parse(eq(parser), any(), eq("text/plain"))).thenReturn(listOf(block))
 
         val chunk = Chunk(
             chunkNo = 0, content = "hello world", contentHash = "ch", tokenCount = 2,
@@ -182,6 +202,7 @@ class IndexingPipelineRunnerTest {
             eq(baseDelay),
             any(),
         )
+        verify(indexingJobRepository).currentDbTimestamp()
         verify(indexingJobRepository, never()).complete(any())
     }
 
@@ -195,7 +216,7 @@ class IndexingPipelineRunnerTest {
             )
         stubActiveJobAcquisition(documentVersion)
         // 다운로드된 바이트가 documentVersion.contentHash와 일치하지 않도록 다른 내용을 반환한다.
-        whenever(downloadClient.download("k")).thenReturn("corrupted content".toByteArray())
+        whenever(downloadClient.download("k")).thenReturn(tempFileOf("corrupted content".toByteArray()))
         // ContentIntegrityException은 영구 실패 화이트리스트에 있으므로 permanent=true.
         whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(IndexingJobStatus.FAILED)
@@ -213,6 +234,32 @@ class IndexingPipelineRunnerTest {
         )
         assertThat(indexingProcessor.calls).isEmpty()
         verify(indexingJobRepository, never()).complete(any())
+    }
+
+    @Test
+    fun `파싱 중 손상된 파일이면 CORRUPTED_FILE로 recordFailure를 호출한다`() {
+        val bytes = "hello world".toByteArray()
+        val documentVersion =
+            DocumentVersionEntity(
+                id = 1001L, documentId = 42L, versionNo = 1L,
+                sourceObjectKey = "k", mimeType = "text/plain", contentHash = sha256Hex(bytes),
+                embeddingVersionNo = 3L,
+            )
+        stubActiveJobAcquisition(documentVersion)
+        whenever(downloadClient.download("k")).thenReturn(tempFileOf(bytes))
+        val parser: DocumentParser = mock()
+        whenever(parserRegistry.findParser("text/plain")).thenReturn(parser)
+        whenever(parsingTimeoutGuard.parse(eq(parser), any(), eq("text/plain")))
+            .thenThrow(CorruptedFileException("text/plain", java.io.IOException("bad file")))
+        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
+            .thenReturn(IndexingJobStatus.FAILED)
+
+        runner.run(sampleEvent())
+
+        verify(indexingFailureService).recordFailure(
+            eq(5001L), eq("CORRUPTED_FILE"), any(), eq(true), eq(maxAttempts), eq(baseDelay), any(),
+        )
+        assertThat(indexingProcessor.calls).isEmpty()
     }
 
     // Fix 1 회귀 방지: 검증 실패가 Job 획득 "이후"에 일어나야 attempt_count가 올라가고,
@@ -302,12 +349,12 @@ class IndexingPipelineRunnerTest {
                 embeddingVersionNo = 3L,
             )
         stubActiveJobAcquisition(documentVersion)
-        whenever(downloadClient.download("k")).thenReturn(bytes)
+        whenever(downloadClient.download("k")).thenReturn(tempFileOf(bytes))
 
         val parser: DocumentParser = mock()
-        val block = ParsedBlock(order = 0, type = BlockType.PARAGRAPH, text = "hello world", pageNo = null, headingPath = emptyList())
-        whenever(parser.parse(any())).thenReturn(sequenceOf(block))
         whenever(parserRegistry.findParser("text/plain")).thenReturn(parser)
+        val block = ParsedBlock(order = 0, type = BlockType.PARAGRAPH, text = "hello world", pageNo = null, headingPath = emptyList())
+        whenever(parsingTimeoutGuard.parse(eq(parser), any(), eq("text/plain"))).thenReturn(listOf(block))
 
         val chunk = Chunk(
             chunkNo = 0, content = "hello world", contentHash = "ch", tokenCount = 2,
@@ -362,6 +409,71 @@ class IndexingPipelineRunnerTest {
         verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any(), any())
     }
 
+    @Test
+    fun `문서 크기가 상한을 넘으면 다운로드 전에 FILE_TOO_LARGE로 종결한다`() {
+        val documentVersion =
+            DocumentVersionEntity(
+                id = 1001L, documentId = 42L, versionNo = 1L,
+                sourceObjectKey = "k", mimeType = "text/plain", contentHash = "h",
+                embeddingVersionNo = 3L, fileSize = maxFileSizeBytes + 1,
+            )
+        stubActiveJobAcquisition(documentVersion)
+        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
+            .thenReturn(IndexingJobStatus.FAILED)
+
+        runner.run(sampleEvent())
+
+        verify(indexingFailureService).recordFailure(
+            eq(5001L), eq("FILE_TOO_LARGE"), any(), eq(true), eq(maxAttempts), eq(baseDelay), any(),
+        )
+        verify(downloadClient, never()).download(any())
+        assertThat(indexingProcessor.calls).isEmpty()
+    }
+
+    @Test
+    fun `재시도 가능한 실패마다 indexing_inline_retry_total이 loop_attempt 태그로 증가한다`() {
+        val documentVersion =
+            DocumentVersionEntity(
+                id = 1001L, documentId = 42L, versionNo = 1L,
+                sourceObjectKey = "k", mimeType = "text/plain", contentHash = "h",
+                embeddingVersionNo = 3L,
+            )
+        stubActiveJobAcquisition(documentVersion)
+        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
+            .thenReturn(IndexingJobStatus.FAILED)
+        whenever(eventValidator.validate(any()))
+            .thenThrow(InvalidEventException("DOCUMENT_VERSION_NOT_FOUND", "not found"))
+
+        runner.run(sampleEvent())
+
+        assertThat(meterRegistry.get("indexing_inline_retry_total").tag("loop_attempt", "1").counter().count())
+            .isEqualTo(1.0)
+    }
+
+    @Test
+    fun `성공하면 indexing_job_duration_seconds가 phase=total 태그로 기록된다`() {
+        val bytes = "hello world".toByteArray()
+        val documentVersion =
+            DocumentVersionEntity(
+                id = 1001L, documentId = 42L, versionNo = 1L,
+                sourceObjectKey = "k", mimeType = "text/plain", contentHash = sha256Hex(bytes),
+                embeddingVersionNo = 3L,
+            )
+        stubActiveJobAcquisition(documentVersion)
+        whenever(downloadClient.download("k")).thenReturn(tempFileOf(bytes))
+        val parser: DocumentParser = mock()
+        whenever(parserRegistry.findParser("text/plain")).thenReturn(parser)
+        val block = ParsedBlock(order = 0, type = BlockType.PARAGRAPH, text = "hello world", pageNo = null, headingPath = emptyList())
+        whenever(parsingTimeoutGuard.parse(eq(parser), any(), eq("text/plain"))).thenReturn(listOf(block))
+        val chunk = Chunk(chunkNo = 0, content = "hello world", contentHash = "ch", tokenCount = 2, pageFrom = null, pageTo = null, sectionPath = null, metadata = null)
+        whenever(chunkingService.chunk(eq(listOf(block)), eq(ChunkingStrategy.FIXED_TOKEN))).thenReturn(listOf(chunk))
+
+        runner.run(sampleEvent())
+
+        assertThat(meterRegistry.get("indexing_job_duration_seconds").tag("phase", "total").timer().count())
+            .isEqualTo(1L)
+    }
+
     /** eventValidator/insertIfAbsent/findBySourceEventId/documentRepository.findById/start를 표준 성공 값으로 스텁한다. */
     private fun stubActiveJobAcquisition(documentVersion: DocumentVersionEntity) {
         whenever(eventValidator.validate(any())).thenReturn(documentVersion)
@@ -379,6 +491,9 @@ class IndexingPipelineRunnerTest {
         whenever(indexingJobRepository.start(5001L, "worker-test", maxAttempts)).thenReturn(1)
         whenever(documentRepository.findById(42L))
             .thenReturn(Optional.of(DocumentEntity(id = 42L, tenantId = 7L, searchableVersionId = 2001L, deletedAt = null)))
+        // P2-2: recordFailure()가 DB 시각을 쓰도록 바뀌었으므로, unstub 상태(mock 기본값 null)로
+        // 인해 recordFailure(...) 검증의 any() 매처가 null 인자와 불일치하지 않도록 스텁한다.
+        whenever(indexingJobRepository.currentDbTimestamp()).thenReturn(LocalDateTime.now())
     }
 
     private fun sampleEvent() =
@@ -389,6 +504,12 @@ class IndexingPipelineRunnerTest {
 
     private fun sha256Hex(bytes: ByteArray): String =
         "sha256:" + MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun tempFileOf(bytes: ByteArray): Path {
+        val path = Files.createTempFile("test-download-", ".tmp")
+        Files.write(path, bytes)
+        return path
+    }
 
     private fun <T> anyOrNull(): T? = org.mockito.kotlin.any()
 }
