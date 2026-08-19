@@ -44,3 +44,6 @@ indexing:
     sweep-interval-ms: ${INDEXING_DELETION_SWEEP_INTERVAL_MS:60000}
     batch-size: ${INDEXING_DELETION_BATCH_SIZE:50}
     initial-delay-ms: ${INDEXING_DELETION_INITIAL_DELAY_MS:60000}
+  flyway:
+    enabled: false
+    clean-disabled: true

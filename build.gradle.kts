@@ -52,6 +52,12 @@ dependencies {
     // 토크나이저 (OpenAI cl100k_base 호환, FIXED_TOKEN 청킹에 사용)
     implementation("com.knuddels:jtokkit:1.1.0")
 
+    // flyway
+    implementation("org.flywaydb:flyway-core")
+    runtimeOnly("org.flywaydb:flyway-database-postgresql")
+
+    implementation("org.jetbrains.kotlin:kotlin-reflect")
+
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     // Boot 4.1은 테스트 슬라이스 어노테이션(@DataJpaTest, @AutoConfigureTestDatabase)을
     // spring-boot-starter-test에서 분리해 이 스타터로 옮겼다
