@@ -26,7 +26,7 @@ Track A는 **"정합성이 깨지지 않는 파이프라인"**을 목표로 했�
 | A-2 | 리밸런스 중 같은 이벤트 중복 소비 | `source_event_id UNIQUE` + `uq_indexing_job_active_version` + `UNIQUE(document_version_id, chunk_no)` UPSERT | 스펙 §1.1 |
 | A-3 | 두 워커가 동시에 같은 Job 소유 | 배제하지 않고 수렴 — 청킹 결정성(§3.6) + UPSERT | 스펙 §1.2, 부록 원칙 4 |
 | A-4 | poison pill 크래시 루프 | 재획득 쿼리의 `attempt_count < :maxAttempts` 캡 → `FAILED('MAX_ATTEMPTS_EXCEEDED')` | 스펙 §1.4-(1), plan Task 3 |
-| A-5 | 실패 시 ack 보류로 인한 hot loop | `finally { ack.acknowledge() }` — 성공/실패 무관 항상 ack | 스펙 §3.1, plan Task 11 |
+| A-5 | 실패 시 ack 보류로 인한 hot loop | `finally { ack.acknowledge() }` — Job이 최종 상태(success/failed) 도달 시 항상 ack | 스펙 §3.1, plan Task 11 |
 | A-6 | 잘못된 이벤트의 무한 재시도 | `IndexingEventValidator` → `InvalidEventException` 즉시 종결 + ack | 스펙 §0.3, plan Task 5 |
 | A-7 | 역직렬화 실패 메시지가 파티션을 막는 것 | `DeserializationException` catch → 로그 + ack | plan Task 11 |
 | A-8 | 오래된 업로드가 최신 업로드를 덮어씀 | `document_version.embedding_version_no` fencing 비교 | 스펙 §1.3 문제2, §1.4-(3) |
@@ -37,8 +37,8 @@ Track A는 **"정합성이 깨지지 않는 파이프라인"**을 목표로 했�
 | A-13 | 대용량 문서 청크 폭발 | `max-chunks-per-document: 5000` 상한 | 스펙 §3.6 |
 | A-14 | 손상/변조된 원문 인덱싱 | 다운로드 후 SHA-256 vs `content_hash` 비교 | 스펙 §3.3 |
 | A-15 | Storage 무응답으로 워커 스레드 영구 잠김 | 다운로드 타임아웃 30초 | 스펙 §3.3 |
-| A-16 | 비즈니스 예외 후 재시도 경로 없음 | (Track A) `RETRY_WAIT` + 폴러 → **(Track B) 인라인 재시도로 대체(§3 P0-4)** | 스펙 §1.4-(4), §3.8 |
-| A-17 | 여러 폴러 인스턴스의 중복 재시도 | 조건부 UPDATE | 스펙 §3.8 <br>**※ 폴러 제거로 무의미해짐** |
+| A-16 | 비즈니스 예외 후 재시도 경로 없음 | `RETRY_WAIT` + `IndexingPipelineRunner.run()` 안 인라인 재시도 루프(`5f52bd5`) | 스펙 §1.4-(4), §3.8 |
+| A-17 | 여러 폴러 인스턴스의 중복 재시도 | 해당 없음 — 폴러 자체가 없다(`5f52bd5`) | 스펙 §3.8 |
 | A-18 | 삭제된 문서의 유령 청크가 검색에 노출 | `DOCUMENT_DELETED` 처리 + `document_chunk` 삭제 | 스펙 §3.9 |
 | A-19 | 삭제 이벤트 유실 시 청크 잔존 | 정리 스윕 스케줄러 | 스펙 §3.9 |
 | A-20 | 삭제된 문서를 재시도 폴러가 되살림 | `failActiveJobsForDocument()` | 스펙 §3.9, plan Task 19 |
@@ -82,7 +82,7 @@ Kafka 브로커는 파티션당 offset 숫자 하나만 기억한다. "ack이 �
 
 **★ 지점 이후로 그 Job에 대응하는 Kafka 메시지가 사라진다.** 폴러가 집어 `PROCESSING`으로 바꾼 직후 워커가 죽으면 되감을 메시지가 없고, 폴러는 `RETRY_WAIT`만 조회하니 아무도 회수하지 못한다.
 
-**구멍의 원인은 "재시도를 ack 이후로 미룬 것" 하나다.** Track B는 여기를 고친다.
+**구멍의 원인은 "재시도를 ack 이후로 미룬 것" 하나다.** Track A는 이후 `5f52bd5` 커밋에서 폴러(`IndexingRetryScheduler`/`RetryEventSource`/`findRetryWaitDue()`)를 제거하고 인라인 재시도(`IndexingPipelineRunner.run()` 안 루프)로 전환해서 이 구멍을 자체적으로 없앴다. 아래 §3 P0-4는 그 전환의 설계 근거다.
 
 ---
 
@@ -112,7 +112,7 @@ Kafka 브로커는 파티션당 offset 숫자 하나만 기억한다. "ack이 �
 
 ---
 
-**B-Gap-2. `uq_indexing_job_active_version` 위반 시 이벤트가 조용히 사라진다.**
+**B-Gap-2. `uq_indexing_job_active_version` 위반 시 이벤트는 조용히 종결된다 — 의도된 요청 병합(coalescing)이다.**
 
 ```kotlin
 insertIfAbsent(...)                          // ON CONFLICT DO NOTHING
@@ -123,9 +123,9 @@ if (job == null) {
 }
 ```
 
-같은 `document_version_id`를 가리키는 활성 Job이 이미 있으면 이 이벤트는 로그 한 줄 남기고 종결된다. 앞선 Job이 `FAILED`로 끝나면 뒤늦게 온 이 이벤트는 이미 ack되어 사라진 뒤라 재처리 트리거가 없다.
+같은 `document_version_id`를 가리키는 활성 Job이 이미 있으면 이 이벤트는 로그 한 줄 남기고 종결된다. 이건 유실이 아니다 — 버려지는 이벤트가 요청하는 작업(이 `document_version_id`를 인덱싱하는 것)은 이미 활성 상태인 Job이 수행 중이고, 그 Job은 §1 불변조건에 의해 결국 `COMPLETED`/`FAILED` 중 하나로 수렴한다. 즉 버려지는 이벤트가 대표하는 작업은 이미 진행 중인 Job이 대신 끝까지 책임진다. 앞선 Job이 이미 `FAILED`로 끝난 뒤에 도착한 이벤트라면 `uq_indexing_job_active_version`(활성 상태에만 걸리는 부분 인덱스)에 걸리지 않으므로 정상적으로 새 Job이 만들어진다.
 
-**대응**: 별도 저장소를 새로 만들지 않는다. P1-3(Outbox 보정 배치)이 "발행됐는데 Job이 없는" 케이스를 이미 조회하므로, 이 경우도 그 쿼리에 걸린다. 완전히 커버되진 않지만(같은 문서의 활성 Job이 있던 시점엔 outbox 쪽 published_at 기준 창을 벗어날 수 있음), 별도 테이블을 두는 비용보다 낫다고 판단했다.
+**대응**: 없음 — 별도 보정 장치가 필요하지 않다.
 
 ---
 
@@ -202,6 +202,8 @@ DB가 내려간 상태에서도 리스너는 계속 소비하고 매번 ack한�
 
 인라인 구조에서는 이게 **리스너의 분기 조건 자체**다. `PermanentIndexingException`이면 재시도 없이 즉시 종결, 아니면 인라인 재시도(P0-4)를 탄다.
 
+`FAILED` 종결 시 원인을 설명하는 필드는 `indexing_job.last_error_code`/`last_error_message`로 이미 있다 — Track A 구현 시점부터 `IndexingJobEntity`에 존재하고 `IndexingFailureService.recordFailure()`가 채운다. 아래 에러 코드 매핑표가 이 컬럼에 들어가는 값이다.
+
 ```kotlin
 sealed class IndexingException(val code: String, message: String, cause: Throwable? = null)
     : RuntimeException(message, cause) { abstract val permanent: Boolean }
@@ -224,8 +226,9 @@ class TransientIndexingException(...) : IndexingException(...) { override val pe
 | Transient | `PARSE_TIMEOUT` | P0-2 |
 | (별도) | `DB_CONNECTION_LOST` | → `nack`(P0-5). 재시도 예산을 쓰지 않는다 |
 
-**429의 `Retry-After`가 인라인 백오프 예산보다 크면**, 남은 재시도를 포기하고 즉시 `FAILED`로 종결한다 — 예산 안에 못 들어가는 대기를 리스너에서 버티지 않는다.
+임베딩 API는 429 응답에 `Retry-After`를 실어주지 않는다. 그래서 `Retry-After` 기반 조기종료 로직은 두지 않는다 — 429도 다른 `TransientIndexingException`과 동일하게 기존 선형 백오프로 재시도한다.
 
+실제 구현(`IndexingPipelineRunner.isRetryable()`)은 위 `PermanentIndexingException`/`TransientIndexingException` sealed 클래스 대신, 기존 예외 타입(`InvalidEventException`, `ContentIntegrityException`, `EmptyExtractionException` 등)을 화이트리스트로 `when`에 나열하는 방식으로 분류한다. sealed 클래스로 마이그레이션할지, 화이트리스트에 새 예외만 계속 추가할지는 착수 전 결정 필요.
 
 ---
 
@@ -265,7 +268,7 @@ indexing:
     max-file-size-bytes: 209715200      # 200MB
     parse-timeout: PT60S
     download-timeout: PT30S
-    embedding-timeout: PT30S            # 태성 협업
+    embedding-timeout: PT30S            # 협업
 ```
 
 세 타임아웃 합(120초)이 P0-3의 "1회 처리 시간" 상한과 일치해야 한다.
@@ -282,43 +285,36 @@ indexing:
 
 **막는 장애**: 인라인 재시도가 poll 간격을 넘겨 발생하는 리밸런스 폭풍
 
-**"배치를 병렬로 돌리면 예산 문제가 풀린다"는 오해를 정리한다.** 병렬화는 Job들의 합을 줄일 뿐, **Job 하나가 혼자 쓰는 시간**은 못 줄인다. 그리고 리밸런스를 유발하는 건 후자다.
+배치/병렬 처리를 도입한 이유는 ACK 시간을 줄이기 위해서가 아니라, 한 번에 하나씩 순차 처리하는 구조에서 한 Job이 재시도에 들어가면 그 재시도가 끝날 때까지 배치 안 다른 문서의 Job들이 대기하는 문제를 완화하기 위해서다(`documentId`별 병렬 처리, `d4ff1e6`).
+
+**단, "배치를 병렬로 돌리면 예산 문제가 풀린다"는 오해는 정리해야 한다.** 병렬화는 서로 다른 Job들이 동시에 진행되게 할 뿐, **Job 하나가 혼자 쓰는 시간**은 못 줄인다. 그리고 리밸런스를 유발하는 건 후자다.
 
 ```
 처리시간 × 시도횟수 + 백오프 총합 + 마진 < max.poll.interval.ms
 ```
 
-**재시도 횟수는 5회로 고정한다.** 대신 백오프를 짧게 잡고, `max.poll.interval.ms`를 한 단계 올려서 예산을 확보한다.
-**->재시도 횟수와 백오프 관해서는 결정 필요하다**
+**재시도 횟수는 5회로 고정한다.** 백오프는 **선형**(`base-delay × attempt_count`)이다 — `IndexingFailureService.recordFailure()`에 구현돼 있다. 지수 백오프는 채택하지 않고, 필요성이 실측으로 확인되면 그때 "추후 고도화" 항목으로 검토한다.
 
 | 항목 | 값 | 근거 |
 |---|---|---|
-| 1회 처리 시간 상한 | 120초 | 다운로드 30s + 파싱 60s + 임베딩 30s (P0-2가 보장) |
-| 인라인 재시도 횟수 | **5회** | Track A와 동일 |
-| 백오프 | 5s→10s→20s→40s (지수, 40초 cap), 합 75초 | 재시도 4번의 대기 구간(마지막 시도는 대기 없음) |
+| 1회 처리 시간 상한 | 120초 | 다운로드 30s + 파싱 60s + 임베딩 30s (P0-2가 보장, 미구현) |
+| 인라인 재시도 횟수 | **5회** | Track A와 동일(`INDEXING_MAX_ATTEMPTS` 기본값 5) |
+| 백오프 | **선형** `base-delay(기본 30s) × attempt_count` → 30/60/90/120초, 합 300초 | `IndexingFailureService.recordFailure()` |
 | 처리 합계 | 120 × 5 = 600초 | |
-| **총합** | **675초** | |
-| `max.poll.interval.ms` | **900초** (600초에서 상향) | 마진 확보 |
-| 마진 | 225초 (25%) | |
+| **총합** | **900초** | |
+| `max.poll.interval.ms` | **900초로 상향 필요 — 현재 코드는 아직 600000(600초)** | 지금 이대로면 예산 초과로 리밸런스 위험 |
+| 마진 | 0초 (상향 전까지는 마이너스) | 상향이 선행되지 않으면 위험 |
 
 ```yaml
 indexing:
   retry:
-    max-inline-attempts: 5
-    inline-backoff-base: PT5S
-    inline-backoff-cap: PT40S
-    inline-backoff-jitter: 0.5        # 0.5~1.0배
+    max-attempts: 5              # 이미 구현됨(INDEXING_MAX_ATTEMPTS, 기본값 5)
+    base-delay: PT30S            # 이미 구현됨(INDEXING_RETRY_BASE_DELAY, 선형 백오프 기준 간격)
   consumer:
-    max-poll-interval-ms: 900000      # 10분 → 15분
+    max-poll-interval-ms: 900000 # 미반영 — 아직 600000(600초)
 ```
 
-```kotlin
-fun backoffMillis(attempt: Int): Long {
-    val base = 5_000L
-    val capped = minOf(base shl (attempt - 1), 40_000L)
-    return (capped * ThreadLocalRandom.current().nextDouble(0.5, 1.0)).toLong()
-}
-```
+> 위 표의 "총합 900초"는 선형 백오프(합 300초) + 처리 5회(600초) 기준 재계산치다. `max.poll.interval.ms`를 900초로 올리지 않으면 마진이 없다 — P0-2(리소스 가드)로 1회 처리 시간이 실제로 120초 안에 들어오는지 보장되기 전까지는 이 계산 자체도 낙관적 상한이라는 점에 유의.
 
 **`max.poll.interval.ms`를 올려도 진짜 크래시 감지 속도는 그대로다.** 워커 생사 판정은 `session.timeout.ms`(45초, heartbeat 기반)가 담당하는 별개 축이라, poll 간격을 늘리는 건 "느리지만 살아있는 컨슈머"를 더 오래 봐주는 것뿐이다.
 
@@ -334,47 +330,47 @@ fun backoffMillis(attempt: Int): Long {
 
 재시도를 ack 이전으로 옮긴다. Job이 최종 상태에 도달할 때까지 대응하는 Kafka 메시지가 계속 미커밋 상태로 남으므로, 어느 시점에 죽든 리밸런스가 회수한다.
 
-```kotlin
-@KafkaListener(topics = ["indexing"], id = "indexing")
-fun onMessage(record: ConsumerRecord<String, String>, ack: Acknowledgment) {
-    val event = deserialize(record.value())
+Kafka 리스너는 배치로 레코드를 받아 `documentId`로 그룹핑한 뒤, 그룹마다 `IndexingPipelineRunner.run()`을 한 번 호출한다. 재시도는 이 `run()` 안의 루프가 전담하고, ack은 배치 전체(모든 그룹)가 끝난 뒤 한 번만 호출된다:
 
-    for (attempt in 1..properties.maxInlineAttempts) {          // 5
+```kotlin
+fun run(event: IndexingRequestedEvent) {
+    val jobId = acquireJobId(event, documentVersionId) ?: return
+
+    while (true) {
+        val acquired = indexingJobRepository.start(jobId, workerId, maxAttempts)  // PROCESSING 전환 + attempt_count += 1
+        if (acquired != 1) {
+            indexingJobRepository.failIfAttemptsExceeded(jobId, maxAttempts)
+            return
+        }
         try {
-            pipelineRunner.run(event)          // 성공 시 내부에서 COMPLETED 기록
-            ack.acknowledge()
-            return
-        } catch (e: PermanentIndexingException) {
-            // run() 내부에서 이미 FAILED로 기록됨(P0-1) — 재시도 없이 즉시 종결
-            ack.acknowledge()
-            return
-        } catch (e: DataAccessResourceFailureException) {
-            ack.nack(Duration.ofSeconds(5))    // DB 장애 → Kafka로 되돌림(P0-5)
-            return
+            processAcquiredJob(jobId, event, documentVersion)   // 검증→다운로드→파싱→청킹→임베딩
+            return                                              // 성공 → COMPLETED
         } catch (e: Exception) {
-            log.warn("attempt {} failed, jobId related to eventId={}", attempt, event.eventId, e)
-            if (attempt < properties.maxInlineAttempts) {
-                Thread.sleep(backoffMillis(attempt))
-            }
-            // 마지막 시도였다면 run() 내부에서 attempt_count 상한 도달 → FAILED로 이미 기록됨
+            val status = indexingFailureService.recordFailure(
+                jobId, errorCode = errorCodeOf(e), permanent = !isRetryable(e),
+                maxAttempts = maxAttempts, baseDelay = baseDelay, failedAt = LocalDateTime.now(),
+            )
+            if (status != IndexingJobStatus.RETRY_WAIT) return   // FAILED, 또는 다른 워커가 이미 COMPLETED
+            val nextRetryAt = indexingJobRepository.findById(jobId).orElseThrow().nextRetryAt!!
+            val waitMillis = Duration.between(LocalDateTime.now(), nextRetryAt).toMillis().coerceAtLeast(0)
+            Thread.sleep(waitMillis)
+            // 루프 재진입 — start()가 RETRY_WAIT을 PROCESSING으로 되돌리며 attempt_count를 다시 올린다
         }
     }
-    ack.acknowledge()   // 5회 소진 → FAILED. 복구는 기존 재인덱싱 API로
 }
 ```
 
-**제거되는 것**
+`next_retry_at`은 `attempt_count` 기반 **선형** 백오프로 계산된다(`IndexingFailureService.recordFailure()`):
 
-| 제거 대상 | 이유 |
-|---|---|
-| `IndexingRetryScheduler` (plan Task 17) | 재시도가 리스너 안에서 끝난다 |
-| `RetryEventSource` (plan Task 17) | 원본 메시지가 이미 손에 있어 DB 재구성이 필요 없다 |
-| `findRetryWaitDue()` 쿼리 | 폴링 대상이 없다 |
+```
+next_retry_at = failedAt + base_delay × attempt_count
+```
 
-**유지되는 것**
+예를 들어 `base_delay = 30s`이고 이번 실패로 `attempt_count`가 3이 됐다면 `next_retry_at = failedAt + 90s`다. `Thread.sleep`은 그 시각까지 남은 시간만큼만 대기하고, 깨어나면 같은 루프 안에서 `start()`를 다시 호출해 `attempt_count`를 4로 올리며 재시도한다 — 별도 폴러나 스케줄러 없이 이 스레드 하나가 대기와 재시도를 모두 담당한다.
 
-- `RETRY_WAIT` 상태값과 `next_retry_at` — **관측용으로만** 남긴다. 인라인 재시도 대기 중임을 진행률 API(P1-1)에서 보여줄 때 쓴다. 다만 이 값을 읽어 깨우는 주체는 없다.
-- `start()`의 재획득 조건에 `RETRY_WAIT` 포함 — 인라인 재시도 대기(sleep) 중 워커가 죽으면 재전달된 메시지가 `RETRY_WAIT` 상태의 Job을 만나기 때문이다. 이 경우도 같은 `attempt_count`를 그대로 증가시킨다(별도 카운터를 두지 않기로 함, §2 개정 3).
+**제거된 것**: `IndexingRetryScheduler`, `RetryEventSource`, `findRetryWaitDue()` 쿼리 — 재시도가 리스너 호출 스레드 안에서 끝나므로 존재하지 않는다.
+
+**`RETRY_WAIT`/`next_retry_at`의 역할**: 단순 관측용이 아니라, 위 루프가 대기 시간을 계산하는 데 직접 쓰인다. 추가로 인라인 대기(`Thread.sleep`) 중 워커가 죽으면, 재전달된 메시지를 받은 다른 워커의 `run()`이 `start()`를 호출해 `RETRY_WAIT` 상태의 Job을 재획득한다 — 이때도 같은 `attempt_count`를 그대로 증가시킨다(별도 카운터 없음).
 
 ---
 
@@ -417,9 +413,11 @@ class DbHealthGate(
 
 **(c) always-ack 원칙의 예외**: DB에 아무것도 기록하지 못한 실패는 ack하지 않고 `nack`한다.
 
+**배치 리스너 기준 주의**: 리스너가 배치로 전환되면서(§0) `nack`은 레코드 하나가 아니라 **배치 전체** 단위로 걸린다. 배치 안 한 레코드에서 DB 장애가 나면, 같은 배치의 다른 문서(정상 처리 가능했던 Job들)까지 통째로 되감긴다는 트레이드오프를 감수한다. `processRecord()`는 아직 `DataAccessResourceFailureException`을 구분하지 않고 다른 예외와 동일하게 로그만 남기고 삼키므로, 이 절 전체가 미구현 상태다 — 선행 조건이 없어 바로 착수 가능한 최우선 작업이다.
+
 ---
 
-### P1-1. 진행률 API / SSE (B-Gap-7, B-Gap-8)
+### P1-1. 진행률 API (B-Gap-7, B-Gap-8)
 
 ```sql
 ALTER TABLE indexing_job ADD COLUMN phase            VARCHAR(30);   -- DOWNLOADING/PARSING/CHUNKING/EMBEDDING/PUBLISHING
@@ -429,8 +427,7 @@ ALTER TABLE indexing_job ADD COLUMN processed_chunks INTEGER;
 
 인라인 재시도가 리스너 안에서 도는 동안 외부에는 아무것도 안 보이므로, `phase`와 재시도 상태를 노출하지 않으면 사용자는 멈춘 것으로 인식한다.
 
-- `GET .../indexing` — 폴링
-- `GET .../indexing/events` — SSE
+워커는 위 컬럼을 채우는 것까지만 담당한다. 노출은 API 서버가 `indexing_job`을 폴링 조회해서 처리한다 — SSE는 두지 않는다(워커→클라이언트 직접 연결 구조가 아니고, 워커→API 서버로 상태를 실시간 전달하는 경로도 없으므로 API 서버가 폴링하는 것과 실질적으로 다르지 않다).
 
 버전 목록 응답에 `searchable: boolean` + `indexingStatus`를 노출해 "최신 버전을 올렸지만 실패해서 이전 버전이 검색된다"는 상태를 보이게 한다. `FAILED` 상태는 재인덱싱 버튼과 함께 노출한다.
 
@@ -444,7 +441,7 @@ ALTER TABLE indexing_job ADD COLUMN processed_chunks INTEGER;
 | `kafka_rebalance_total` | Counter | **즉시** | 재시도 예산이 poll 간격을 넘고 있다(P0-3 실패 신호) |
 | `indexing_inline_retry_total{attempt}` | Counter | 급증 시 | 어느 시도에서 성공/실패하나. 예산 튜닝 근거 |
 | `indexing_job_duration_seconds{phase}` | Histogram | p99 감시 | 1회 처리 120초 가정이 유효한지 검증 |
-| `outbox_reconciled_total` | Counter | **즉시** | Kafka 경로 유실(B-Gap-2도 일부 포함) |
+| `outbox_reconciled_total` | Counter | **즉시** | 릴레이 서버의 Kafka 발행 실패로 인한 유실 감지 |
 | `kafka_consumer_lag{partition}` | Gauge | 지속 증가 | 파티션 hot spot, 배치 블로킹 |
 | `db_health_gate_paused_total` | Counter | **즉시** | DB가 흔들리고 있다 |
 | `parse_thread_leaked` | Gauge | 임계 초과 | P0-2의 취소 실패 누적 |
@@ -455,7 +452,7 @@ ALTER TABLE indexing_job ADD COLUMN processed_chunks INTEGER;
 
 ### P1-3. Outbox 보정 배치
 
-**막는 장애**: Kafka 브로커 장애로 "`PUBLISHED`인데 아무도 처리 안 함", 그리고 B-Gap-2의 일부
+**막는 장애**: 릴레이 서버가 Kafka 발행 자체에 실패해서, outbox엔 `PUBLISHED`로 기록됐는데 실제로는 메시지가 나가지 않은 경우. 이 케이스는 `doc-relay` 담당(@Junhyukkkk) 확인 필요 — 릴레이 서버가 실제로 이런 실패 경로를 갖고 있는지부터 확인한다.
 
 ```sql
 SELECT e.* FROM outbox_event e
@@ -543,23 +540,21 @@ ALTER TABLE document ADD COLUMN chunk_purge_failed_count INTEGER NOT NULL DEFAUL
 
 ## 4. 구현 순서
 
-| 순서 | 항목 | 선행 | 이유 |
+| 순서 | 항목 | 선행 | 상태 / 이유 |
 |---|---|---|---|
-| 1 | **P0-1 에러 분류** | — | 인라인 리스너의 분기 조건 자체 |
-| 2 | **P0-2 리소스 가드** | 1 | "1회 처리 ≤120초" 상한이 있어야 P0-3 예산이 성립 |
-| 3 | **P0-3 재시도 예산 확정** | 1, 2 | 숫자를 확정해야 P0-4 코드를 쓸 수 있다 |
-| 4 | **P0-4 인라인 재시도 전환** | 1~3 | 앞의 셋이 있어야 안전하게 전환된다 |
-| 5 | **P0-5 컨슈머 게이트 + `nack`** | 4 | 리스너 구조가 바뀐 뒤에 얹는 게 충돌이 적다 |
-| 6 | **P1-2 메트릭** | 4, 5 | 전환이 실제로 안전한지 확인할 유일한 수단 |
-| 7 | **P1-1 진행률 API/SSE** | 스키마 3컬럼 | 인라인 재시도 가시성 + FAILED 노출 |
-| 8 | **P1-3 Outbox 보정** | doc-relay 합의 | 경계를 넘음 |
-| 9 | **P2-1 DB 페일오버** | 4, 5 | 4·5의 재활용 + 인프라 선행 |
-| 10 | **P2-2 시각 통일** | — | 미루면 재현 안 되는 버그로 돌아온다 |
-| 11 | **P2-4 삭제 스윕 방어** | — | |
-| 12 | **P2-5 트레이싱** | API 서버 `SET LOCAL` | 외부 의존 |
-| 13 | **P2-3 파티션 튜닝** | 6 | 실측 후에만 |
-
-**4번(전환)을 1~3번 뒤에 두는 이유**: 에러 분류 없이 전환하면 영구 실패에도 재시도로 파티션이 막히고, 리소스 가드 없이 전환하면 처리 시간 상한이 없어 예산이 무너진다.
+| — | **P0-4 인라인 재시도 전환** | — | **완료**(`5f52bd5`, `d4ff1e6`) |
+| 1 | **P0-5 컨슈머 게이트 + `nack`** | — | 선행 없음, 최우선 — 미구현 상태라 지금도 DB 장애 시 데이터가 조용히 사라질 수 있다 |
+| 2 | **P0-1 에러 분류** | — | 인라인 리스너의 분기 조건 정교화 |
+| 3 | **P0-2 리소스 가드** | 2 | "1회 처리 ≤120초" 상한 확보 |
+| 4 | **P0-3 재시도 예산 확정** | 2, 3 | `max.poll.interval.ms`를 900초로 상향, 선형 백오프 기준 재계산 |
+| 5 | **P1-2 메트릭** | 1~4 | 지금 상태가 실제로 안전한지 확인할 유일한 수단 |
+| 6 | **P1-1 진행률 API** | 스키마 3컬럼 | 인라인 재시도 가시성 + FAILED 노출 |
+| 7 | **P1-3 Outbox 보정** | doc-relay 합의 | 경계를 넘음 |
+| 8 | **P2-1 DB 페일오버** | 1 | 재활용 + 인프라 선행 |
+| 9 | **P2-2 시각 통일** | — | 미루면 재현 안 되는 버그로 돌아온다 |
+| 10 | **P2-4 삭제 스윕 방어** | — | |
+| 11 | **P2-5 트레이싱** | API 서버 `SET LOCAL` | 외부 의존 |
+| 12 | **P2-3 파티션 튜닝** | 5 | 실측 후에만 |
 
 ---
 
@@ -584,13 +579,13 @@ SELECT status, attempt_count FROM indexing_job WHERE id = :jobId;
 
 ### 5.2 ★ 재시도 예산 경계 검증 — 가장 중요
 
-**정상 예산**: 1회 처리 120초 × 5회 재시도(전부 실패 후 마지막에 성공)로도 총 675초 < 900초.
+**정상 예산**: 1회 처리 120초 × 5회 + 선형 백오프(30+60+90+120=300초) = 900초. `max.poll.interval.ms`를 900초로 올린 뒤 테스트한다 — 현재 설정(600000)으로는 이 시나리오 자체가 예산 초과다.
 ```sql
 SELECT status FROM indexing_job WHERE id = :jobId;  -- COMPLETED
 ```
 **기대**: `kafka_rebalance_total` **증가하지 않음.**
 
-**예산 초과**: 1회 처리를 250초로 늘려 5회 재시도 유발(1250초 + 백오프 > 900초).
+**예산 초과**: 1회 처리를 250초로 늘려 5회 재시도 유발(처리 1250초 + 백오프 300초 > 900초).
 **기대**: `kafka_rebalance_total`이 증가하고 파티션이 재할당된다. **이 테스트는 "실패해야 정상"이 아니라 예산 계산이 맞는지 확인하는 경계 테스트다.**
 
 ### 5.3 ★ 재시도 대기 중 크래시 — 고아가 안 생긴다
@@ -607,7 +602,7 @@ docker kill -s SIGKILL worker-1   # 인라인 백오프 sleep 중
 | 0바이트 PDF | `attempt_count = 1`에서 즉시 `FAILED('CORRUPTED_FILE')`. 재시도 없음 |
 | 스캔 PDF | 즉시 `FAILED('EMPTY_EXTRACTION')`, **검색 버전 전환 안 됨** |
 | 300MB 파일 | 다운로드 전에 `FAILED('FILE_TOO_LARGE')` — S3 트래픽 0 |
-| 429 + `Retry-After: 300` | 인라인 백오프 예산(최대 75초)보다 크므로 남은 재시도 포기 → 즉시 `FAILED` |
+| 429 계속 발생 | `Retry-After`를 안 주므로 다른 `TransientIndexingException`과 동일하게 선형 백오프로 5회 재시도 후 `FAILED` |
 | 임베딩 계속 실패 | 5회 모두 실패 → `FAILED`. `indexing_job_failed_total` 증가. 재인덱싱 API로 복구 확인 |
 
 ### 5.5 DB 장애 → `nack` (P0-5)
@@ -691,7 +686,7 @@ HAVING j.total_chunks <> count(c.id);
 
 ### 7.1 태성님 (`IndexingProcessor`)
 
-- 임베딩 실패를 `TransientIndexingException`/`PermanentIndexingException`으로 감싸기. 429의 `Retry-After` 값도 실어주기
+- 임베딩 실패를 `TransientIndexingException`/`PermanentIndexingException`으로 감싸기
 - 임베딩 호출에 타임아웃 30초 — P0-3 예산의 구성 요소
 - `indexing_job.processed_chunks` 갱신(P1-1)
 - 벡터 차원 불일치는 `Permanent`
