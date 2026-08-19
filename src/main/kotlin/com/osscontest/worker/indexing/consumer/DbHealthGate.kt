@@ -23,7 +23,7 @@ class DbHealthGate(
         val healthy = runCatching { jdbcTemplate.queryForObject("SELECT 1", Int::class.java) }.isSuccess
         val container = registry.getListenerContainer(LISTENER_ID) ?: return
         when {
-            !healthy && container.isRunning -> {
+            !healthy && container.isRunning && !container.isPauseRequested -> {
                 container.pause()
                 meterRegistry.counter("db_health_gate_paused_total").increment()
                 log.warn("DB down — consumer paused")

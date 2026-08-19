@@ -3,6 +3,7 @@ package com.osscontest.worker.indexing.consumer
 import com.osscontest.worker.indexing.pipeline.service.IndexingPipelineRunner
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.slf4j.LoggerFactory
+import org.slf4j.MDC
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.dao.DataAccessException
@@ -78,6 +79,7 @@ class IndexingKafkaListener(
         var event: IndexingRequestedEvent? = null
         try {
             event = deserialize(record.value())
+            MDC.put("traceId", event.traceId ?: "-")
             when (event.eventType) {
                 "INDEXING_REQUESTED" -> pipelineRunner.run(event)
                 "DOCUMENT_DELETED" -> deletionHandler.handle(event)
@@ -107,6 +109,8 @@ class IndexingKafkaListener(
                 "indexing failed: eventId={} documentId={} partition={} offset={}",
                 event?.eventId, event?.documentId, record.partition(), record.offset(), e,
             )
+        } finally {
+            MDC.remove("traceId")
         }
     }
 

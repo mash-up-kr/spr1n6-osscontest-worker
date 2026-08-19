@@ -24,6 +24,7 @@ import com.osscontest.worker.indexing.retrieval.DocumentDownloadClient
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertTimeoutPreemptively
 import org.mockito.kotlin.any
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.inOrder
@@ -431,7 +432,42 @@ class IndexingPipelineRunnerTest {
     }
 
     @Test
-    fun `재시도 가능한 실패마다 indexing_inline_retry_total이 loop_attempt 태그로 증가한다`() {
+    fun `RETRY_WAIT으로 인라인 재시도할 때만 indexing_inline_retry_total이 attempt 태그로 증가한다`() {
+        val documentVersion =
+            DocumentVersionEntity(
+                id = 1001L, documentId = 42L, versionNo = 1L,
+                sourceObjectKey = "k", mimeType = "text/plain", contentHash = "h",
+                embeddingVersionNo = 3L,
+            )
+        stubActiveJobAcquisition(documentVersion)
+        val failedAt = LocalDateTime.of(2099, 1, 1, 0, 0)
+        val nextRetryAt = failedAt.plusSeconds(30)
+        val retryWaitJob =
+            IndexingJobEntity(
+                id = 5001L, sourceEventId = UUID.randomUUID(), documentId = 42L, documentVersionId = 1001L,
+                status = IndexingJobStatus.RETRY_WAIT, attemptCount = 1, nextRetryAt = nextRetryAt,
+                workerId = "worker-test", lastErrorCode = "RuntimeException", lastErrorMessage = "temporary",
+                traceId = null, startedAt = failedAt, completedAt = null, updatedAt = failedAt,
+            )
+        whenever(indexingJobRepository.start(5001L, "worker-test", maxAttempts)).thenReturn(1, 0)
+        whenever(indexingJobRepository.currentDbTimestamp()).thenReturn(failedAt, nextRetryAt)
+        whenever(indexingJobRepository.findById(5001L)).thenReturn(Optional.of(retryWaitJob))
+        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
+            .thenReturn(IndexingJobStatus.RETRY_WAIT)
+        whenever(eventValidator.validate(any()))
+            .thenThrow(RuntimeException("temporary"))
+
+        // nextRetryAt은 실제 앱 시각보다 먼 미래지만 DB 기준 현재 시각과는 같다. 앱 시각을
+        // 사용하면 장시간 sleep하므로, 제한시간 안에 끝나는지가 DB 시각 사용의 회귀 검증이다.
+        assertTimeoutPreemptively(Duration.ofSeconds(1)) { runner.run(sampleEvent()) }
+
+        assertThat(meterRegistry.get("indexing_inline_retry_total").tag("attempt", "1").counter().count())
+            .isEqualTo(1.0)
+        verify(indexingJobRepository, times(2)).currentDbTimestamp()
+    }
+
+    @Test
+    fun `영구 실패로 종결하면 indexing_inline_retry_total이 증가하지 않는다`() {
         val documentVersion =
             DocumentVersionEntity(
                 id = 1001L, documentId = 42L, versionNo = 1L,
@@ -446,8 +482,7 @@ class IndexingPipelineRunnerTest {
 
         runner.run(sampleEvent())
 
-        assertThat(meterRegistry.get("indexing_inline_retry_total").tag("loop_attempt", "1").counter().count())
-            .isEqualTo(1.0)
+        assertThat(meterRegistry.find("indexing_inline_retry_total").counters()).isEmpty()
     }
 
     @Test

@@ -32,7 +32,6 @@ import java.nio.file.Path
 import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.time.Duration
-import java.time.LocalDateTime
 
 @Component
 class IndexingPipelineRunner(
@@ -96,11 +95,6 @@ class IndexingPipelineRunner(
 
         val jobId = acquireJobId(event, documentVersionId) ?: return
         val sample = Timer.start(meterRegistry)
-        // P1-2: 인프로세스 재시도 루프 안에서 몇 번째 시도인지 — 예산 튜닝 근거
-        // (FAULT_TOLERANCE.md §3 P1-2). DB의 attempt_count와 별개로, 이 run() 호출 하나가
-        // 겪은 루프 회차를 1부터 센다.
-        var attempt = 0
-
         while (true) {
             val acquired = indexingJobRepository.start(jobId, workerId, maxAttempts)
             if (acquired != 1) {
@@ -110,8 +104,6 @@ class IndexingPipelineRunner(
                 sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
                 return
             }
-            attempt++
-
             try {
                 val documentVersion = eventValidator.validate(event)
                 val document =
@@ -133,6 +125,7 @@ class IndexingPipelineRunner(
                 // 동일하게 기록한다(§1.4-(4)). IndexingProcessor가 이미 자체적으로 기록한 예외가
                 // 다시 올라온 경우는 recordFailure 내부의 "status != PROCESSING이면 조용히 반환"
                 // 가드 덕분에 중복 기록되지 않는다.
+                val failedAt = indexingJobRepository.currentDbTimestamp()
                 val status =
                     indexingFailureService.recordFailure(
                         jobId = jobId,
@@ -142,18 +135,24 @@ class IndexingPipelineRunner(
                         maxAttempts = maxAttempts,
                         // §3.8 선형 백오프 — 실제 곱셈은 attempt_count를 알고 있는 recordFailure가 한다.
                         baseDelay = baseDelay,
-                        failedAt = indexingJobRepository.currentDbTimestamp(),
+                        failedAt = failedAt,
                     )
-                // P1-2: 어느 시도에서 실패하는지 — 예산 튜닝 근거(FAULT_TOLERANCE.md §3 P1-2).
-                meterRegistry.counter("indexing_inline_retry_total", "loop_attempt", attempt.toString()).increment()
                 if (status != IndexingJobStatus.RETRY_WAIT) {
                     // FAILED(영구 실패 또는 상한 도달)이거나, 다른 워커가 이미 COMPLETED로 끝냈다.
                     log.warn("job {} resolved to {}", jobId, status, e)
                     sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
                     return
                 }
-                val nextRetryAt = indexingJobRepository.findById(jobId).orElseThrow().nextRetryAt!!
-                val waitMillis = Duration.between(LocalDateTime.now(), nextRetryAt).toMillis().coerceAtLeast(0)
+                val job = indexingJobRepository.findById(jobId).orElseThrow()
+                // P1-2: 실제로 인라인 재시도에 진입한 실패만 센다. 영구 실패나 상한 도달은
+                // indexing_job_failed_total의 몫이며 inline retry로 집계하지 않는다.
+                meterRegistry.counter("indexing_inline_retry_total", "attempt", job.attemptCount.toString()).increment()
+                val nextRetryAt = job.nextRetryAt!!
+                // P2-2: next_retry_at과 남은 대기 시간의 기준 시각을 모두 DB 시계로 통일한다.
+                // 앱 시계가 DB보다 빠를 때 너무 일찍 start()를 호출하면 RETRY_WAIT을 재획득하지
+                // 못한 채 메시지가 ack될 수 있으므로 LocalDateTime.now()를 사용하면 안 된다.
+                val retryClock = indexingJobRepository.currentDbTimestamp()
+                val waitMillis = Duration.between(retryClock, nextRetryAt).toMillis().coerceAtLeast(0)
                 log.warn("job {} in RETRY_WAIT, retrying in-process after {}ms", jobId, waitMillis, e)
                 Thread.sleep(waitMillis)
                 // 루프 재진입 — start()가 RETRY_WAIT 재획득 분기(§1.4-(1))로 다시 PROCESSING으로

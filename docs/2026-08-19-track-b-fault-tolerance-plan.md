@@ -37,7 +37,7 @@
 
 ### P2-2 범위 조정 — 왜 `LocalDateTime`→`Instant` 전면 전환은 제외했는가
 
-실제로 시계가 어긋날 수 있는 지점은 `IndexingJobRepository.start()`의 `next_retry_at <= CURRENT_TIMESTAMP`(DB 시각) 비교뿐이다 — 이 값과 비교되는 `next_retry_at`이 애플리케이션 시각(`LocalDateTime.now()`)으로 계산되면, 워커 서버와 DB 서버의 NTP 오차만큼 크래시 재획득 타이밍이 어긋날 수 있다(B-Gap-5). 반면 `IndexingPipelineRunner.run()` 안에서 같은 스레드가 쓰고 곧바로 읽는 `Duration.between(LocalDateTime.now(), nextRetryAt)`(대기 시간 계산용)은 양쪽 다 앱 시각이라 애초에 어긋날 일이 없다. `LocalDateTime`을 `Instant`/`OffsetDateTime`으로 전면 교체하려면 엔티티·리포지토리·서비스 전체와 (외부 관리라 이 repo에서 확인 불가능한) DB 컬럼 타입(`TIMESTAMP` vs `TIMESTAMPTZ`)까지 맞춰야 해서 위험 대비 효과가 낮다. Task 9는 실제 버그(`recordFailure`가 쓰는 `failedAt`을 DB 시각으로 바꾸는 것)만 좁게 고친다.
+시계가 어긋날 수 있는 지점은 `IndexingJobRepository.start()`의 `next_retry_at <= CURRENT_TIMESTAMP` 비교뿐 아니라 인라인 재시도의 남은 대기 시간 계산도 포함한다. `next_retry_at`을 DB 시각 기준으로 기록한 뒤 `Duration.between(LocalDateTime.now(), nextRetryAt)`처럼 앱 시각과 비교하면, 워커 시계가 빠른 경우 재시도 시각 전에 `start()`가 호출되어 `RETRY_WAIT`을 재획득하지 못하고 메시지만 ack될 수 있다. 따라서 Task 9는 실패 기록 시각과 인라인 대기 계산 시각을 모두 `currentDbTimestamp()`로 가져와 DB 시계로 통일한다. 다만 `LocalDateTime`을 `Instant`/`OffsetDateTime`으로 전면 교체하려면 엔티티·리포지토리·서비스 전체와 (외부 관리라 이 repo에서 확인 불가능한) DB 컬럼 타입(`TIMESTAMP` vs `TIMESTAMPTZ`)까지 맞춰야 하므로 이번 범위에서는 제외한다.
 
 ---
 
@@ -359,7 +359,7 @@ class DbHealthGate(
         val healthy = runCatching { jdbcTemplate.queryForObject("SELECT 1", Int::class.java) }.isSuccess
         val container = registry.getListenerContainer(LISTENER_ID) ?: return
         when {
-            !healthy && container.isRunning -> {
+            !healthy && container.isRunning && !container.isPauseRequested -> {
                 container.pause()
                 log.warn("DB down — consumer paused")
             }
@@ -1113,10 +1113,14 @@ Expected: PASS (11개 전부)
 을 아래로 바꾼다(파일 상단 import에 `java.nio.file.Files` 추가):
 
 ```kotlin
-        val tempFile = Files.createTempFile("integration-test-", ".tmp")
-        Files.write(tempFile, "hello world".toByteArray())
-        whenever(downloadClient.download("docs/900001/v1.txt")).thenReturn(tempFile)
+        whenever(downloadClient.download("docs/900001/v1.txt")).thenAnswer {
+            Files.createTempFile("integration-test-", ".tmp")
+                .also { Files.write(it, "hello world".toByteArray()) }
+        }
 ```
+
+러너는 매 시도 후 임시 파일을 삭제하므로, 인라인 재시도를 검증하는 mock도 실제 다운로드
+클라이언트처럼 호출할 때마다 새 파일을 반환해야 한다.
 
 Run: `./gradlew compileTestKotlin`
 Expected: 컴파일 성공(이 테스트는 `@Tag("integration")`이라 실제 Postgres 없이는 실행까지는 안 되지만, 최소한 컴파일은 통과해야 한다).
@@ -1368,9 +1372,16 @@ Expected: PASS
             )
         stubActiveJobAcquisition(documentVersion)
         whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
-            .thenReturn(IndexingJobStatus.FAILED)
+            .thenReturn(IndexingJobStatus.RETRY_WAIT)
         whenever(eventValidator.validate(any()))
-            .thenThrow(InvalidEventException("DOCUMENT_VERSION_NOT_FOUND", "not found"))
+            .thenThrow(RuntimeException("temporary"))
+
+        val retryWaitJob: IndexingJobEntity = mock()
+        whenever(retryWaitJob.attemptCount).thenReturn(1)
+        whenever(retryWaitJob.nextRetryAt).thenReturn(LocalDateTime.now())
+        whenever(indexingJobRepository.findById(any())).thenReturn(Optional.of(retryWaitJob))
+        whenever(indexingJobRepository.start(any(), any(), any())).thenReturn(1, 0)
+        whenever(indexingJobRepository.currentDbTimestamp()).thenReturn(LocalDateTime.now())
 
         runner.run(sampleEvent())
 
@@ -1457,6 +1468,7 @@ Expected: FAIL — 생성자에 `meterRegistry` 파라미터가 없어 컴파일
                 sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
                 return
             } catch (e: Exception) {
+                val failedAt = indexingJobRepository.currentDbTimestamp()
                 val status =
                     indexingFailureService.recordFailure(
                         jobId = jobId,
@@ -1465,7 +1477,7 @@ Expected: FAIL — 생성자에 `meterRegistry` 파라미터가 없어 컴파일
                         permanent = !isRetryable(e),
                         maxAttempts = maxAttempts,
                         baseDelay = baseDelay,
-                        failedAt = LocalDateTime.now(),
+                        failedAt = failedAt,
                     )
                 if (status != IndexingJobStatus.RETRY_WAIT) {
                     log.warn("job {} resolved to {}", jobId, status, e)
@@ -1476,7 +1488,8 @@ Expected: FAIL — 생성자에 `meterRegistry` 파라미터가 없어 컴파일
                 // P1-2: 어느 시도에서 실패/성공하는지 — 예산 튜닝 근거(FAULT_TOLERANCE.md §3 P1-2).
                 meterRegistry.counter("indexing_inline_retry_total", "attempt", job.attemptCount.toString()).increment()
                 val nextRetryAt = job.nextRetryAt!!
-                val waitMillis = Duration.between(LocalDateTime.now(), nextRetryAt).toMillis().coerceAtLeast(0)
+                val retryClock = indexingJobRepository.currentDbTimestamp()
+                val waitMillis = Duration.between(retryClock, nextRetryAt).toMillis().coerceAtLeast(0)
                 log.warn("job {} in RETRY_WAIT, retrying in-process after {}ms", jobId, waitMillis, e)
                 Thread.sleep(waitMillis)
             }
@@ -1546,7 +1559,7 @@ class DbHealthGate(
         val healthy = runCatching { jdbcTemplate.queryForObject("SELECT 1", Int::class.java) }.isSuccess
         val container = registry.getListenerContainer(LISTENER_ID) ?: return
         when {
-            !healthy && container.isRunning -> {
+            !healthy && container.isRunning && !container.isPauseRequested -> {
                 container.pause()
                 meterRegistry.counter("db_health_gate_paused_total").increment()
                 log.warn("DB down — consumer paused")
@@ -1967,6 +1980,7 @@ Expected: FAIL — `IndexingJobRepository.currentDbTimestamp()`가 없어 컴파
 `IndexingPipelineRunner.kt`의 `run()`에서 `recordFailure(...)` 호출의 `failedAt = LocalDateTime.now()`를 바꾼다:
 
 ```kotlin
+                val failedAt = indexingJobRepository.currentDbTimestamp()
                 val status =
                     indexingFailureService.recordFailure(
                         jobId = jobId,
@@ -1975,11 +1989,21 @@ Expected: FAIL — `IndexingJobRepository.currentDbTimestamp()`가 없어 컴파
                         permanent = !isRetryable(e),
                         maxAttempts = maxAttempts,
                         baseDelay = baseDelay,
-                        failedAt = indexingJobRepository.currentDbTimestamp(),
+                        failedAt = failedAt,
                     )
 ```
 
-`Duration.between(LocalDateTime.now(), nextRetryAt)`(대기 시간 계산부)은 그대로 둔다 — 이 값은 같은 스레드가 곧바로 다시 읽으므로 애초에 어긋날 일이 없다("P2-2 범위 조정" 절 참고).
+`RETRY_WAIT`이면 `nextRetryAt`을 읽은 뒤 DB 현재 시각을 다시 조회해 남은 시간을 계산한다:
+
+```kotlin
+                val job = indexingJobRepository.findById(jobId).orElseThrow()
+                val nextRetryAt = job.nextRetryAt!!
+                val retryClock = indexingJobRepository.currentDbTimestamp()
+                val waitMillis = Duration.between(retryClock, nextRetryAt).toMillis().coerceAtLeast(0)
+```
+
+이렇게 해야 앱 시계가 DB보다 빠른 경우에도 재시도 시각 전에 `start()`가 실행되어 Job이
+`RETRY_WAIT`에 고립되는 경로가 생기지 않는다.
 
 - [ ] **Step 4: 테스트 통과 확인**
 

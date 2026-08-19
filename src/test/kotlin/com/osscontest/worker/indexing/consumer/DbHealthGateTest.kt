@@ -56,7 +56,7 @@ class DbHealthGateTest {
     }
 
     @Test
-    fun `pause와 resume 전이마다 db_health_gate_paused_total이 증가한다`() {
+    fun `pause 전이 때 db_health_gate_paused_total이 증가한다`() {
         whenever(registry.getListenerContainer("indexing")).thenReturn(container)
         whenever(jdbcTemplate.queryForObject("SELECT 1", Int::class.java))
             .thenThrow(RuntimeException("down"))
@@ -65,6 +65,20 @@ class DbHealthGateTest {
         gate.check()
 
         assertThat(meterRegistry.get("db_health_gate_paused_total").counter().count()).isEqualTo(1.0)
+    }
+
+    @Test
+    fun `DB가 계속 비정상이어도 이미 pause 요청 상태면 다시 pause하거나 메트릭을 증가시키지 않는다`() {
+        whenever(registry.getListenerContainer("indexing")).thenReturn(container)
+        whenever(jdbcTemplate.queryForObject("SELECT 1", Int::class.java))
+            .thenThrow(RuntimeException("down"))
+        whenever(container.isRunning).thenReturn(true)
+        whenever(container.isPauseRequested).thenReturn(true)
+
+        gate.check()
+
+        verify(container, never()).pause()
+        assertThat(meterRegistry.find("db_health_gate_paused_total").counters()).isEmpty()
     }
 
     @Test

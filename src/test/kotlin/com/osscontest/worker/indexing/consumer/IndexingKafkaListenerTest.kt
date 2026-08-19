@@ -3,6 +3,7 @@ package com.osscontest.worker.indexing.consumer
 import com.osscontest.worker.indexing.pipeline.service.IndexingPipelineRunner
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.doThrow
@@ -12,6 +13,7 @@ import org.mockito.kotlin.never
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
+import org.slf4j.MDC
 import org.springframework.dao.DataAccessResourceFailureException
 import org.springframework.kafka.support.Acknowledgment
 import tools.jackson.module.kotlin.jacksonObjectMapper
@@ -23,9 +25,14 @@ class IndexingKafkaListenerTest {
     private val runner: IndexingPipelineRunner = mock()
     private val deletionHandler: DocumentDeletionHandler = mock()
     private val objectMapper = jacksonObjectMapper()
-    private val executor = Executors.newFixedThreadPool(4)
+    private val executor = Executors.newSingleThreadExecutor()
     private val listener = IndexingKafkaListener(runner, deletionHandler, objectMapper, executor)
     private val ack: Acknowledgment = mock()
+
+    @AfterEach
+    fun tearDown() {
+        executor.shutdownNow()
+    }
 
     @Test
     fun `배치 안의 모든 INDEXING_REQUESTED를 PipelineRunner로 보내고 마지막에 한 번만 ack한다`() {
@@ -134,6 +141,28 @@ class IndexingKafkaListenerTest {
         verify(ack, never()).nack(any(), any())
     }
 
+    @Test
+    fun `이벤트 처리 중에는 traceId가 MDC에 설정되고 처리 후 worker thread에서 제거된다`() {
+        var capturedDuringCall: String? = null
+        whenever(runner.run(any())).thenAnswer {
+            capturedDuringCall = MDC.get("traceId")
+            null
+        }
+        val records =
+            listOf(
+                record(
+                    key = "1",
+                    value = indexingRequestedJson(documentId = 1, traceId = "abc-123"),
+                ),
+            )
+
+        listener.onMessage(records, ack)
+        val capturedAfterCall = executor.submit<String?> { MDC.get("traceId") }.get()
+
+        assertThat(capturedDuringCall).isEqualTo("abc-123")
+        assertThat(capturedAfterCall).isNull()
+    }
+
     private fun argThatVersionIs(documentVersionId: Long) =
         org.mockito.kotlin.argThat<IndexingRequestedEvent> { this.documentVersionId == documentVersionId }
 
@@ -145,10 +174,11 @@ class IndexingKafkaListenerTest {
     private fun indexingRequestedJson(
         documentId: Long,
         documentVersionId: Long = 1001,
+        traceId: String? = null,
     ) = """
         {"eventId":"${java.util.UUID.randomUUID()}","eventType":"INDEXING_REQUESTED",
          "eventSchemaVersion":1,"tenantId":7,"documentId":$documentId,"documentVersionId":$documentVersionId,
-         "occurredAt":"2026-08-16T09:14:22Z","traceId":null}
+         "occurredAt":"2026-08-16T09:14:22Z","traceId":${traceId?.let { "\"$it\"" } ?: "null"}}
         """.trimIndent()
 
     private fun documentDeletedJson() =
