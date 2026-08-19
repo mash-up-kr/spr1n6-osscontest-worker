@@ -59,7 +59,9 @@ dependencies {
     implementation("org.flywaydb:flyway-core")
     runtimeOnly("org.flywaydb:flyway-database-postgresql")
 
-    implementation("org.jetbrains.kotlin:kotlin-reflect")
+    // 임베딩
+    implementation(platform("org.springframework.ai:spring-ai-bom:2.0.0"))
+    implementation("org.springframework.ai:spring-ai-starter-model-openai")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     // Boot 4.1은 테스트 슬라이스 어노테이션(@DataJpaTest, @AutoConfigureTestDatabase)을
@@ -86,7 +88,7 @@ tasks.test {
 
 tasks.register<Test>("integrationTest") {
     group = "verification"
-    description = "Runs tests that need a real Postgres (docker-compose)."
+    description = "Runs tests that need external services such as Postgres or OpenAI."
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
     useJUnitPlatform {

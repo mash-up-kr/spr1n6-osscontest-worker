@@ -4,6 +4,9 @@ import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.Id
 import jakarta.persistence.Table
+import org.hibernate.annotations.JdbcTypeCode
+import org.hibernate.type.SqlTypes
+import java.time.LocalDateTime
 
 @Entity
 @Table(name = "document_version")
@@ -24,4 +27,11 @@ class DocumentVersionEntity(
     var embeddingVersionNo: Long,
     @Column(name = "file_size", nullable = false)
     var fileSize: Long = 0,
+    @Column(name = "chunk_count")
+    var chunkCount: Int? = null,
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "extracted_metadata", columnDefinition = "jsonb")
+    var extractedMetadata: Map<String, Any>? = null,
+    @Column(name = "indexed_at")
+    var indexedAt: LocalDateTime? = null,
 )

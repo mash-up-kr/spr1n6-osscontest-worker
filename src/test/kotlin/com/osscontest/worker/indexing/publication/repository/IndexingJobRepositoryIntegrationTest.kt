@@ -39,9 +39,9 @@ class IndexingJobRepositoryIntegrationTest(
         jdbcTemplate.update(
             """
             INSERT INTO document_version
-                (id, document_id, version_no, source_object_key, original_filename, mime_type, file_size, content_hash, created_by_principal_id)
+                (id, document_id, version_no, embedding_version_no, source_object_key, original_filename, mime_type, file_size, content_hash, created_by_principal_id)
             VALUES
-                (1, 1, 1, 'test-object-key', ?, 'application/pdf', 100, 'test-content-hash', 'owner')
+                (1, 1, 1, 1, 'test-object-key', ?, 'application/pdf', 100, 'test-content-hash', 'owner')
             """,
             "test.pdf".toByteArray(),
         )
@@ -222,11 +222,12 @@ class IndexingJobRepositoryIntegrationTest(
             jdbcTemplate.update(
                 """
                 INSERT INTO document_version
-                    (id, document_id, version_no, source_object_key, original_filename, mime_type, file_size, content_hash, created_by_principal_id)
+                    (id, document_id, version_no, embedding_version_no, source_object_key, original_filename, mime_type, file_size, content_hash, created_by_principal_id)
                 VALUES
-                    (?, 1, ?, ?, ?, 'application/pdf', 100, ?, 'owner')
+                    (?, 1, ?, ?, ?, ?, 'application/pdf', 100, ?, 'owner')
                 """.trimIndent(),
                 versionNo.toLong(),
+                versionNo,
                 versionNo,
                 "test-object-key-$versionNo",
                 "test.pdf".toByteArray(),

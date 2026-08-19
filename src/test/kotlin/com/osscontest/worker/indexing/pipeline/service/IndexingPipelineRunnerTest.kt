@@ -7,6 +7,7 @@ import com.osscontest.worker.indexing.chunking.service.ChunkingStrategy
 import com.osscontest.worker.indexing.consumer.IndexingEventValidator
 import com.osscontest.worker.indexing.consumer.IndexingRequestedEvent
 import com.osscontest.worker.indexing.consumer.InvalidEventException
+import com.osscontest.worker.indexing.embedding.service.EmbeddingRequestRejectedException
 import com.osscontest.worker.indexing.parsing.CorruptedFileException
 import com.osscontest.worker.indexing.parsing.DocumentParser
 import com.osscontest.worker.indexing.parsing.DocumentParserRegistry
@@ -205,6 +206,49 @@ class IndexingPipelineRunnerTest {
         )
         verify(indexingJobRepository).currentDbTimestamp()
         verify(indexingJobRepository, never()).complete(any())
+    }
+
+    @Test
+    fun `임베딩 요청이 공급자에게 거부되면 재시도 없이 영구 실패로 기록한다`() {
+        val bytes = "hello world".toByteArray()
+        val documentVersion =
+            DocumentVersionEntity(
+                id = 1001L, documentId = 42L, versionNo = 1L,
+                sourceObjectKey = "k", mimeType = "text/plain", contentHash = sha256Hex(bytes),
+                embeddingVersionNo = 3L,
+            )
+        stubActiveJobAcquisition(documentVersion)
+        whenever(downloadClient.download("k")).thenReturn(tempFileOf(bytes))
+
+        val parser: DocumentParser = mock()
+        whenever(parserRegistry.findParser("text/plain")).thenReturn(parser)
+        val block = ParsedBlock(order = 0, type = BlockType.PARAGRAPH, text = "hello world", pageNo = null, headingPath = emptyList())
+        whenever(parsingTimeoutGuard.parse(eq(parser), any(), eq("text/plain"))).thenReturn(listOf(block))
+
+        val chunk = Chunk(
+            chunkNo = 0, content = "hello world", contentHash = "ch", tokenCount = 2,
+            pageFrom = null, pageTo = null, sectionPath = null, metadata = null,
+        )
+        whenever(chunkingService.chunk(eq(listOf(block)), eq(ChunkingStrategy.FIXED_TOKEN))).thenReturn(listOf(chunk))
+
+        indexingProcessor.throwOnNextCall =
+            EmbeddingRequestRejectedException(IllegalArgumentException("maximum input tokens exceeded"))
+        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
+            .thenReturn(IndexingJobStatus.FAILED)
+
+        runner.run(sampleEvent())
+
+        verify(indexingFailureService).recordFailure(
+            eq(5001L),
+            eq("EMBEDDING_REQUEST_REJECTED"),
+            eq("Embedding request rejected by provider: maximum input tokens exceeded"),
+            eq(true),
+            eq(maxAttempts),
+            eq(baseDelay),
+            any(),
+        )
+        verify(indexingJobRepository, times(1)).start(5001L, "worker-test", maxAttempts)
+        assertThat(meterRegistry.find("indexing_inline_retry_total").counters()).isEmpty()
     }
 
     @Test

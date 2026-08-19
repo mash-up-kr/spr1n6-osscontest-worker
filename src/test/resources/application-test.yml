@@ -1,4 +1,7 @@
 spring:
+  ai:
+    openai:
+      api-key: test-key
   datasource:
     url: jdbc:h2:mem:testdb;MODE=PostgreSQL;DATABASE_TO_UPPER=FALSE
     username: sa

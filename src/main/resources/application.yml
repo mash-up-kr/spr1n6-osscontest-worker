@@ -7,6 +7,18 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: none
+  flyway:
+    enabled: false
+    clean-disabled: true
+  ai:
+    model:
+      embedding: openai
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      embedding:
+        model: text-embedding-3-small
+        dimensions: 1536
+        encoding-format: float
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
     consumer:
@@ -50,6 +62,3 @@ indexing:
     sweep-interval-ms: ${INDEXING_DELETION_SWEEP_INTERVAL_MS:60000}
     batch-size: ${INDEXING_DELETION_BATCH_SIZE:50}
     initial-delay-ms: ${INDEXING_DELETION_INITIAL_DELAY_MS:60000}
-  flyway:
-    enabled: false
-    clean-disabled: true
