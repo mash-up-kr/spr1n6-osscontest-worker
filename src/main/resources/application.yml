@@ -1,0 +1,46 @@
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
+    consumer:
+      group-id: indexing-worker
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      max-poll-records: ${INDEXING_BATCH_SIZE:10}
+      properties:
+        max.poll.interval.ms: 600000
+        session.timeout.ms: 45000
+        heartbeat.interval.ms: 3000
+    listener:
+      ack-mode: manual
+      type: batch
+
+indexing:
+  consumer:
+    supported-schema-versions: ${INDEXING_SUPPORTED_SCHEMA_VERSIONS:1}
+    concurrency: ${INDEXING_CONSUMER_CONCURRENCY:5}
+  retry:
+    max-attempts: ${INDEXING_MAX_ATTEMPTS:5}
+    # 선형 백오프의 기준 간격 — Thread.sleep(base-delay * attempt_count), §3.8.
+    base-delay: ${INDEXING_RETRY_BASE_DELAY:PT30S}
+  chunking:
+    # FIXED_TOKEN | PARAGRAPH | PARAGRAPH_OVERLAP
+    strategy: ${INDEXING_CHUNKING_STRATEGY:FIXED_TOKEN}
+    max-chunks-per-document: ${INDEXING_MAX_CHUNKS:5000}
+    max-total-tokens: ${INDEXING_MAX_TOTAL_TOKENS:2000000}
+  storage:
+    bucket: ${INDEXING_STORAGE_BUCKET}
+    endpoint: ${INDEXING_STORAGE_ENDPOINT:}
+    region: ${INDEXING_STORAGE_REGION:us-east-1}
+    download-timeout: PT30S
+  deletion:
+    sweep-interval-ms: ${INDEXING_DELETION_SWEEP_INTERVAL_MS:60000}
+    batch-size: ${INDEXING_DELETION_BATCH_SIZE:50}
+    initial-delay-ms: ${INDEXING_DELETION_INITIAL_DELAY_MS:60000}
