@@ -1,0 +1,12 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/aidocs
+    username: aidocs
+    password: aidocs
+  kafka:
+    bootstrap-servers: localhost:9092
+
+indexing:
+  storage:
+    bucket: aidocs-local
+    endpoint: http://localhost:9000
