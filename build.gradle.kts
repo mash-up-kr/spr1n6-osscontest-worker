@@ -27,6 +27,9 @@ dependencies {
     // 전혀 로드되지 않아 @KafkaListener(Task 11의 IndexingKafkaListener)가 동작하지 않는다.
     // spring-boot-starter-kafka로 바꿔야 spring-kafka 자체와 오토컨피그를 함께 가져온다.
     implementation("org.springframework.boot:spring-boot-starter-kafka")
+    // P1-2 메트릭 계측 — MeterRegistry 빈을 제공하고, Spring for Apache Kafka가 이를 감지해
+    // 컨슈머 클라이언트 메트릭(kafka_consumer_lag 포함)을 자동으로 Micrometer에 등록한다.
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
     // 같은 이유로 ObjectMapper 빈(Task 11의 IndexingKafkaListener가 생성자로 주입받음)도
     // spring-boot-starter-jackson 없이는 오토컨피그되지 않는다(Jackson 3 기준 모듈).
     implementation("org.springframework.boot:spring-boot-starter-jackson")

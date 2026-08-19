@@ -9,7 +9,9 @@ import com.osscontest.worker.indexing.chunking.service.TotalTokenLimitExceededEx
 import com.osscontest.worker.indexing.consumer.IndexingEventValidator
 import com.osscontest.worker.indexing.consumer.IndexingRequestedEvent
 import com.osscontest.worker.indexing.consumer.InvalidEventException
+import com.osscontest.worker.indexing.parsing.CorruptedFileException
 import com.osscontest.worker.indexing.parsing.DocumentParserRegistry
+import com.osscontest.worker.indexing.parsing.ParsingTimeoutGuard
 import com.osscontest.worker.indexing.parsing.UnsupportedMimeTypeException
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
@@ -19,12 +21,17 @@ import com.osscontest.worker.indexing.publication.repository.IndexingJobReposito
 import com.osscontest.worker.indexing.publication.service.IndexingFailureService
 import com.osscontest.worker.indexing.retrieval.ContentIntegrityException
 import com.osscontest.worker.indexing.retrieval.DocumentDownloadClient
+import com.osscontest.worker.indexing.retrieval.FileTooLargeException
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Timer
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
+import java.nio.file.Files
+import java.nio.file.Path
+import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.time.Duration
-import java.time.LocalDateTime
 
 @Component
 class IndexingPipelineRunner(
@@ -33,6 +40,7 @@ class IndexingPipelineRunner(
     private val eventValidator: IndexingEventValidator,
     private val downloadClient: DocumentDownloadClient,
     private val parserRegistry: DocumentParserRegistry,
+    private val parsingTimeoutGuard: ParsingTimeoutGuard,
     private val chunkingService: ChunkingService,
     private val chunkGuard: ChunkGuard,
     private val indexingProcessor: IndexingProcessor,
@@ -43,10 +51,13 @@ class IndexingPipelineRunner(
     private val maxAttempts: Int,
     @Value("\${indexing.retry.base-delay}")
     private val baseDelay: Duration,
+    @Value("\${indexing.limits.max-file-size-bytes}")
+    private val maxFileSizeBytes: Long,
     // 청킹 전략은 설정으로 바꿀 수 있다(기본값은 기존 동작과 같은 FIXED_TOKEN).
     // @Value는 String → enum 변환을 기본 ConversionService로 처리한다.
     @Value("\${indexing.chunking.strategy:FIXED_TOKEN}")
     private val chunkingStrategy: ChunkingStrategy = ChunkingStrategy.FIXED_TOKEN,
+    private val meterRegistry: MeterRegistry,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -83,16 +94,16 @@ class IndexingPipelineRunner(
         }
 
         val jobId = acquireJobId(event, documentVersionId) ?: return
-
+        val sample = Timer.start(meterRegistry)
         while (true) {
             val acquired = indexingJobRepository.start(jobId, workerId, maxAttempts)
             if (acquired != 1) {
                 // 상한 초과인지, 이미 완료됐는지 구분해서 상한 초과라면 종결한다.
                 indexingJobRepository.failIfAttemptsExceeded(jobId, maxAttempts)
                 log.info("job {} not acquired (already handled or attempts exceeded)", jobId)
+                sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
                 return
             }
-
             try {
                 val documentVersion = eventValidator.validate(event)
                 val document =
@@ -107,12 +118,14 @@ class IndexingPipelineRunner(
                 }
 
                 processAcquiredJob(jobId, event, documentVersion)
+                sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
                 return
             } catch (e: Exception) {
                 // Track A 자체 실패(검증/다운로드/파싱/청킹)와 IndexingProcessor 내부 실패를 여기서
                 // 동일하게 기록한다(§1.4-(4)). IndexingProcessor가 이미 자체적으로 기록한 예외가
                 // 다시 올라온 경우는 recordFailure 내부의 "status != PROCESSING이면 조용히 반환"
                 // 가드 덕분에 중복 기록되지 않는다.
+                val failedAt = indexingJobRepository.currentDbTimestamp()
                 val status =
                     indexingFailureService.recordFailure(
                         jobId = jobId,
@@ -122,15 +135,24 @@ class IndexingPipelineRunner(
                         maxAttempts = maxAttempts,
                         // §3.8 선형 백오프 — 실제 곱셈은 attempt_count를 알고 있는 recordFailure가 한다.
                         baseDelay = baseDelay,
-                        failedAt = LocalDateTime.now(),
+                        failedAt = failedAt,
                     )
                 if (status != IndexingJobStatus.RETRY_WAIT) {
                     // FAILED(영구 실패 또는 상한 도달)이거나, 다른 워커가 이미 COMPLETED로 끝냈다.
                     log.warn("job {} resolved to {}", jobId, status, e)
+                    sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
                     return
                 }
-                val nextRetryAt = indexingJobRepository.findById(jobId).orElseThrow().nextRetryAt!!
-                val waitMillis = Duration.between(LocalDateTime.now(), nextRetryAt).toMillis().coerceAtLeast(0)
+                val job = indexingJobRepository.findById(jobId).orElseThrow()
+                // P1-2: 실제로 인라인 재시도에 진입한 실패만 센다. 영구 실패나 상한 도달은
+                // indexing_job_failed_total의 몫이며 inline retry로 집계하지 않는다.
+                meterRegistry.counter("indexing_inline_retry_total", "attempt", job.attemptCount.toString()).increment()
+                val nextRetryAt = job.nextRetryAt!!
+                // P2-2: next_retry_at과 남은 대기 시간의 기준 시각을 모두 DB 시계로 통일한다.
+                // 앱 시계가 DB보다 빠를 때 너무 일찍 start()를 호출하면 RETRY_WAIT을 재획득하지
+                // 못한 채 메시지가 ack될 수 있으므로 LocalDateTime.now()를 사용하면 안 된다.
+                val retryClock = indexingJobRepository.currentDbTimestamp()
+                val waitMillis = Duration.between(retryClock, nextRetryAt).toMillis().coerceAtLeast(0)
                 log.warn("job {} in RETRY_WAIT, retrying in-process after {}ms", jobId, waitMillis, e)
                 Thread.sleep(waitMillis)
                 // 루프 재진입 — start()가 RETRY_WAIT 재획득 분기(§1.4-(1))로 다시 PROCESSING으로
@@ -151,6 +173,8 @@ class IndexingPipelineRunner(
             is ChunkLimitExceededException -> false
             is TotalTokenLimitExceededException -> false
             is UnsupportedMimeTypeException -> false
+            is FileTooLargeException -> false
+            is CorruptedFileException -> false
             else -> true
         }
 
@@ -165,14 +189,24 @@ class IndexingPipelineRunner(
             is ChunkLimitExceededException -> e.code
             is TotalTokenLimitExceededException -> e.code
             is UnsupportedMimeTypeException -> e.code
+            is FileTooLargeException -> e.code
+            is CorruptedFileException -> e.code
             else -> e::class.simpleName ?: "INDEXING_ERROR"
         }
 
+    // updatePhase() 호출도 이 메서드 안 다른 실패와 동일하게 run()의 catch(Exception)에서
+    // 잡힌다 — 진행률 기록 자체가 실패해도(예: DB 순간 장애) 재시도 예산을 하나 소모한다.
+    // 다운로드~청킹까지 이미 끝난 뒤라도 마찬가지다. 청킹 결정성 덕분에 재실행은 멱등하므로
+    // 감수 가능한 트레이드오프로 판단한다.
     private fun processAcquiredJob(
         jobId: Long,
         event: IndexingRequestedEvent,
         documentVersion: DocumentVersionEntity,
     ) {
+        if (documentVersion.fileSize > maxFileSizeBytes) {
+            throw FileTooLargeException(documentVersion.fileSize, maxFileSizeBytes)
+        }
+
         // 여기서 searchable 버전과 비교해 미리 건너뛰지 않는다 — 이전 버전으로 되돌리기 기능이
         // 그 버전의 청크/임베딩이 실제로 저장돼 있어야 성립하므로, embedding_version_no가 더
         // 작다고 해서 임베딩 자체를 스킵하면 안 된다(되돌릴 때마다 처음부터 재인덱싱해야 함).
@@ -180,28 +214,41 @@ class IndexingPipelineRunner(
         // searchable_version_id 승격 UPDATE(embedding_version_no 비교 후 조건부 갱신)에서
         // 맡는다 — 그 UPDATE는 IndexingProcessor.process() 안에서 일어난다. 즉 "항상 임베딩은
         // 하되 승격만 안 한다"가 여기의 계약이다.
-        val bytes = downloadClient.download(documentVersion.sourceObjectKey)
-        val actualHash = "sha256:" + sha256Hex(bytes)
-        if (actualHash != documentVersion.contentHash) {
-            throw ContentIntegrityException(documentVersion.contentHash, actualHash)
+        //
+        // 재시도 진입 시 phase는 여기서 항상 DOWNLOADING으로 리셋된다. 단, RETRY_WAIT 백오프
+        // 대기 중에는 직전 실패 시점의 phase(예: EMBEDDING)가 그대로 남아있다 — 이건 버그가
+        // 아니라 "마지막으로 도달한 단계"를 보여주는 의도된 동작이다. 폴링하는 외부 API는
+        // phase 값만으로 "지금 그 단계를 실행 중"이라고 단정하면 안 된다.
+        indexingJobRepository.updatePhase(jobId, "DOWNLOADING")
+        val tempFile = downloadClient.download(documentVersion.sourceObjectKey)
+        try {
+            val actualHash = "sha256:" + sha256HexOf(tempFile)
+            if (actualHash != documentVersion.contentHash) {
+                throw ContentIntegrityException(documentVersion.contentHash, actualHash)
+            }
+
+            indexingJobRepository.updatePhase(jobId, "PARSING")
+            val parser = parserRegistry.findParser(documentVersion.mimeType)
+            val blocks = parsingTimeoutGuard.parse(parser, tempFile, documentVersion.mimeType)
+
+            indexingJobRepository.updatePhase(jobId, "CHUNKING")
+            val chunks = chunkingService.chunk(blocks, chunkingStrategy)
+            chunkGuard.assertValid(chunks)
+
+            val context =
+                IndexingContext(
+                    jobId = jobId,
+                    documentId = event.documentId,
+                    documentVersionId = documentVersion.id,
+                    versionNo = documentVersion.versionNo,
+                    extractedMetadata = null,
+                )
+
+            indexingJobRepository.updatePhase(jobId, "EMBEDDING")
+            indexingProcessor.process(context, chunks)
+        } finally {
+            Files.deleteIfExists(tempFile)
         }
-
-        val parser = parserRegistry.findParser(documentVersion.mimeType)
-        val blocks = parser.parse(bytes.inputStream()).toList()
-
-        val chunks = chunkingService.chunk(blocks, chunkingStrategy)
-        chunkGuard.assertValid(chunks)
-
-        val context =
-            IndexingContext(
-                jobId = jobId,
-                documentId = event.documentId,
-                documentVersionId = documentVersion.id,
-                versionNo = documentVersion.versionNo,
-                extractedMetadata = null,
-            )
-
-        indexingProcessor.process(context, chunks)
     }
 
     // @Transactional 관련 근거는 run() 위 주석 참고 — 이 메서드도 동일하게 적용된다.
@@ -230,6 +277,14 @@ class IndexingPipelineRunner(
         return job.id
     }
 
-    private fun sha256Hex(bytes: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+    private fun sha256HexOf(path: Path): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        DigestInputStream(Files.newInputStream(path), digest).use { stream ->
+            val buffer = ByteArray(8192)
+            while (stream.read(buffer) != -1) {
+                // 읽기만 하면 DigestInputStream이 내부적으로 digest를 갱신한다.
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
 }

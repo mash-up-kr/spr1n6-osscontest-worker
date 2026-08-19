@@ -22,4 +22,6 @@ class DocumentVersionEntity(
     var contentHash: String,
     @Column(name = "embedding_version_no", nullable = false)
     var embeddingVersionNo: Long,
+    @Column(name = "file_size", nullable = false)
+    var fileSize: Long = 0,
 )

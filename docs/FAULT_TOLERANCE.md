@@ -32,7 +32,7 @@ Track A는 **"정합성이 깨지지 않는 파이프라인"**을 목표로 했�
 | A-8 | 오래된 업로드가 최신 업로드를 덮어씀 | `document_version.embedding_version_no` fencing 비교 | 스펙 §1.3 문제2, §1.4-(3) |
 | A-9 | STALE 버전에 임베딩 비용 낭비 | 다운로드 **이전** 조기 fencing 판정 → `COMPLETED(chunk_count=null)` | 스펙 §3.1, plan Task 10 |
 | A-10 | 실패 쓰기가 성공 결과를 덮어씀 | 실패 쓰기에만 `status = 'PROCESSING'` 가드 | 스펙 §1.4-(4) |
-| A-11 | 재청킹으로 청크 수가 줄었을 때 잔존 청크 | trailing DELETE(`chunk_no > :finalChunkCount`) | 스펙 §1.4-(2) |
+| A-11 | ~~재청킹으로 청크 수가 줄었을 때 잔존 청크~~ | ~~trailing DELETE(`chunk_no > :finalChunkCount`)~~ — PR #4 리뷰에서 제외(청킹 결정성상 발생 불가능한 시나리오로 판정, 이번 브랜치에서 요구사항·구현 모두 제거) | 스펙 §1.4-(2)(폐기 예정) |
 | A-12 | 스캔 PDF가 "성공"으로 위장 | `ChunkGuard.assertValid()` — 빈 청크 → `EMPTY_EXTRACTION` | 스펙 §3.6, plan Task 9 |
 | A-13 | 대용량 문서 청크 폭발 | `max-chunks-per-document: 5000` 상한 | 스펙 §3.6 |
 | A-14 | 손상/변조된 원문 인덱싱 | 다운로드 후 SHA-256 vs `content_hash` 비교 | 스펙 §3.3 |

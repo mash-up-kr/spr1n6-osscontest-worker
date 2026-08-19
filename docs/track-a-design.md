@@ -330,11 +330,10 @@ data class IndexingContext(
 
 1. `chunks[].content`를 임베딩 API에 전달해 벡터를 받는다.
 2. `document_chunk`에 `(document_version_id, chunk_no)` 기준 UPSERT로 저장한다.
-3. 이전 실행보다 청크 수가 줄었으면 잔존 청크를 trailing DELETE로 정리한다.
-4. `document_version.embedding_version_no`와 현재 `searchable_version_id`가 가리키는
+3. `document_version.embedding_version_no`와 현재 `searchable_version_id`가 가리키는
    버전의 값을 비교해, **더 큰 쪽만** `document.searchable_version_id`로 승격한다
    (`document.deleted_at IS NULL`인 경우에만).
-5. 실패하면 예외를 던지기만 하면 된다 — `indexing_job` 상태를 직접 갱신할 필요 없다.
+4. 실패하면 예외를 던지기만 하면 된다 — `indexing_job` 상태를 직접 갱신할 필요 없다.
    호출자(`IndexingPipelineRunner`)가 모든 예외에 대해 재시도 분류와 DB 기록을 대신
    한다.
 

@@ -39,6 +39,8 @@ class IndexingJobEntity(
     var lastErrorMessage: String?,
     @Column(name = "trace_id")
     var traceId: String?,
+    @Column(name = "phase")
+    var phase: String? = null,
     @Column(name = "started_at")
     var startedAt: LocalDateTime?,
     @Column(name = "completed_at")
