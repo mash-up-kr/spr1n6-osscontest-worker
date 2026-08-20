@@ -7,6 +7,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.doThrow
+import org.mockito.kotlin.eq
 import org.mockito.kotlin.inOrder
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
@@ -44,7 +45,7 @@ class IndexingKafkaListenerTest {
 
         listener.onMessage(records, ack)
 
-        verify(runner, times(2)).run(any())
+        verify(runner, times(2)).run(any(), any())
         verify(ack, times(1)).acknowledge()
     }
 
@@ -56,8 +57,8 @@ class IndexingKafkaListenerTest {
         listener.onMessage(listOf(v1, v2), ack)
 
         val order = inOrder(runner)
-        order.verify(runner).run(argThatVersionIs(1))
-        order.verify(runner).run(argThatVersionIs(2))
+        order.verify(runner).run(argThatVersionIs(1), any())
+        order.verify(runner).run(argThatVersionIs(2), any())
         verify(ack, times(1)).acknowledge()
     }
 
@@ -68,13 +69,13 @@ class IndexingKafkaListenerTest {
         listener.onMessage(listOf(record), ack)
 
         verify(deletionHandler, times(1)).handle(any())
-        verify(runner, never()).run(any())
+        verify(runner, never()).run(any(), any())
         verify(ack, times(1)).acknowledge()
     }
 
     @Test
     fun `배치 안 한 레코드가 예외를 던져도 나머지는 계속 처리하고 ack한다`() {
-        whenever(runner.run(any())).doThrow(RuntimeException("boom"))
+        whenever(runner.run(any(), any())).doThrow(RuntimeException("boom"))
         val records =
             listOf(
                 record(key = "1", value = indexingRequestedJson(documentId = 1)),
@@ -97,13 +98,13 @@ class IndexingKafkaListenerTest {
 
         listener.onMessage(records, ack)
 
-        verify(runner, times(1)).run(any())
+        verify(runner, times(1)).run(any(), any())
         verify(ack, times(1)).acknowledge()
     }
 
     @Test
     fun `DB 장애(DataAccessException)면 ack 대신 배치 전체를 nack한다`() {
-        whenever(runner.run(any())).thenThrow(DataAccessResourceFailureException("connection refused"))
+        whenever(runner.run(any(), any())).thenThrow(DataAccessResourceFailureException("connection refused"))
         val records = listOf(record(key = "1", value = indexingRequestedJson(documentId = 1)))
 
         listener.onMessage(records, ack)
@@ -115,8 +116,8 @@ class IndexingKafkaListenerTest {
     @Test
     fun `DB 장애가 일부 그룹에서만 나도 다른 그룹은 끝까지 처리된 뒤 nack한다`() {
         var otherGroupProcessed = false
-        whenever(runner.run(argThatVersionIs(1))).thenThrow(DataAccessResourceFailureException("connection refused"))
-        whenever(runner.run(argThatVersionIs(2))).thenAnswer { otherGroupProcessed = true; null }
+        whenever(runner.run(argThatVersionIs(1), any())).thenThrow(DataAccessResourceFailureException("connection refused"))
+        whenever(runner.run(argThatVersionIs(2), any())).thenAnswer { otherGroupProcessed = true; null }
         val records =
             listOf(
                 record(key = "1", value = indexingRequestedJson(documentId = 1, documentVersionId = 1)),
@@ -132,7 +133,7 @@ class IndexingKafkaListenerTest {
 
     @Test
     fun `DB 장애가 아닌 일반 예외는 여전히 ack한다`() {
-        whenever(runner.run(any())).thenThrow(RuntimeException("boom"))
+        whenever(runner.run(any(), any())).thenThrow(RuntimeException("boom"))
         val records = listOf(record(key = "1", value = indexingRequestedJson(documentId = 1)))
 
         listener.onMessage(records, ack)
@@ -144,7 +145,7 @@ class IndexingKafkaListenerTest {
     @Test
     fun `이벤트 처리 중에는 traceId가 MDC에 설정되고 처리 후 worker thread에서 제거된다`() {
         var capturedDuringCall: String? = null
-        whenever(runner.run(any())).thenAnswer {
+        whenever(runner.run(any(), any())).thenAnswer {
             capturedDuringCall = MDC.get("traceId")
             null
         }
@@ -163,13 +164,30 @@ class IndexingKafkaListenerTest {
         assertThat(capturedAfterCall).isNull()
     }
 
+    @Test
+    fun `INDEXING_REQUESTED의 Kafka record identity를 Runner에 전달한다`() {
+        val record =
+            record(
+                key = "1",
+                value = indexingRequestedJson(documentId = 1),
+                partition = 3,
+                offset = 99L,
+            )
+
+        listener.onMessage(listOf(record), ack)
+
+        verify(runner).run(any(), eq(KafkaRecordIdentity(topic = "indexing", partition = 3, offset = 99L)))
+    }
+
     private fun argThatVersionIs(documentVersionId: Long) =
         org.mockito.kotlin.argThat<IndexingRequestedEvent> { this.documentVersionId == documentVersionId }
 
     private fun record(
         key: String,
         value: String,
-    ) = ConsumerRecord<String, String>("indexing", 0, 0L, key, value)
+        partition: Int = 0,
+        offset: Long = 0L,
+    ) = ConsumerRecord<String, String>("indexing", partition, offset, key, value)
 
     private fun indexingRequestedJson(
         documentId: Long,

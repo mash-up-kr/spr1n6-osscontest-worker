@@ -44,8 +44,8 @@ class IndexingKafkaListener(
                 .values
                 .map { sameKeyRecords -> executor.submit { sameKeyRecords.forEach(::processRecord) } }
 
-        // P0-5: DB에 아무것도 기록하지 못한 실패는 ack이 아니라 nack한다 — always-ack 원칙의
-        // 유일한 예외(FAULT_TOLERANCE.md §3 P0-5-(c)). 배치 안 다른 documentId 그룹이 아직 처리
+        // P0-5: DB에 아무것도 기록하지 못한 실패는 ack이 아니라 nack한다. 배치 안 다른
+        // documentId 그룹이 아직 처리
         // 중일 수 있으므로, DB 장애를 감지해도 즉시 반환하지 않고 나머지 future도 전부 기다린다 —
         // 그래야 아직 실행 중인 작업이 고아로 남지 않고, 다른 그룹의 실패도 로그에서 안 사라진다.
         var dbFailure: Throwable? = null
@@ -57,7 +57,7 @@ class IndexingKafkaListener(
                     if (dbFailure == null) dbFailure = e.cause
                     log.warn("DB unavailable while processing batch", e.cause)
                 } else {
-                    // 예상 못 한 실패(DataAccessException 아님)는 기존과 동일하게 즉시 전파해
+                    // 예상 못 한 비-DB 실패는 기존과 동일하게 즉시 전파해
                     // 컨테이너가 배치를 통째로 재전달받게 한다. 나머지 future를 기다리지 않는다 —
                     // 워커가 불안정하면 최대한 빨리 벗어나는 게 낫다는 기존 판단을 그대로 유지한다.
                     throw e
@@ -81,7 +81,15 @@ class IndexingKafkaListener(
             event = deserialize(record.value())
             MDC.put("traceId", event.traceId ?: "-")
             when (event.eventType) {
-                "INDEXING_REQUESTED" -> pipelineRunner.run(event)
+                "INDEXING_REQUESTED" ->
+                    pipelineRunner.run(
+                        event,
+                        KafkaRecordIdentity(
+                            topic = record.topic(),
+                            partition = record.partition(),
+                            offset = record.offset(),
+                        ),
+                    )
                 "DOCUMENT_DELETED" -> deletionHandler.handle(event)
                 else ->
                     throw InvalidEventException(

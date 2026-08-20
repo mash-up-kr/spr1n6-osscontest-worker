@@ -1,6 +1,7 @@
 package com.osscontest.worker.indexing.pipeline.service
 
 import com.osscontest.worker.indexing.consumer.IndexingRequestedEvent
+import com.osscontest.worker.indexing.consumer.KafkaRecordIdentity
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
 import com.osscontest.worker.indexing.retrieval.DocumentDownloadClient
@@ -76,7 +77,7 @@ class IndexingPipelineRunnerIntegrationTest(
         // 처음 두 번은 실패(재시도 가능한 RuntimeException), 세 번째는 성공하도록 설정.
         fakeIndexingProcessor.failuresBeforeSuccess = 2
 
-        pipelineRunner.run(event)
+        pipelineRunner.run(event, recordIdentity(offset = 900001L))
 
         val job = indexingJobRepository.findBySourceEventId(event.eventId)
         assertThat(job).isNotNull
@@ -108,7 +109,7 @@ class IndexingPipelineRunnerIntegrationTest(
 
         fakeIndexingProcessor.failuresBeforeSuccess = Int.MAX_VALUE // 계속 실패
 
-        pipelineRunner.run(event)
+        pipelineRunner.run(event, recordIdentity(offset = 900002L))
 
         val job = indexingJobRepository.findBySourceEventId(event.eventId)
         assertThat(job).isNotNull
@@ -139,7 +140,7 @@ class IndexingPipelineRunnerIntegrationTest(
         }
         val event = sampleEvent(documentId = 900003L, documentVersionId = 900003L)
 
-        pipelineRunner.run(event)
+        pipelineRunner.run(event, recordIdentity(offset = 900003L))
 
         val job = indexingJobRepository.findBySourceEventId(event.eventId)
         assertThat(job).isNotNull
@@ -162,4 +163,7 @@ class IndexingPipelineRunnerIntegrationTest(
         occurredAt = Instant.now(),
         traceId = null,
     )
+
+    private fun recordIdentity(offset: Long) =
+        KafkaRecordIdentity(topic = "indexing", partition = 0, offset = offset)
 }

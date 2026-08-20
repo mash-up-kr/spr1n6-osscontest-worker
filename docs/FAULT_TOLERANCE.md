@@ -23,7 +23,7 @@ Track A는 **"정합성이 깨지지 않는 파이프라인"**을 목표로 했�
 | # | 장애 | 막은 장치 | 근거 |
 |---|---|---|---|
 | A-1 | 워커 프로세스 크래시(SIGKILL, OOM 킬) | **ack이 처리 완료 후이므로** offset 미커밋 → Kafka가 파티션을 재할당해 자동 재전달 + `status IN ('PENDING','PROCESSING')` 재획득 | 스펙 §1.3 문제1, §1.4-(1) |
-| A-2 | 리밸런스 중 같은 이벤트 중복 소비 | `source_event_id UNIQUE` + `uq_indexing_job_active_version` + `UNIQUE(document_version_id, chunk_no)` UPSERT | 스펙 §1.1 |
+| A-2 | 리밸런스 중 같은 이벤트 중복 소비 | `source_event_id UNIQUE` + Kafka topic/partition/offset 비교 + `uq_indexing_job_active_version` + `UNIQUE(document_version_id, chunk_no)` UPSERT | 스펙 §1.1, 현재 구현 문서 §5.1 |
 | A-3 | 두 워커가 동시에 같은 Job 소유 | 배제하지 않고 수렴 — 청킹 결정성(§3.6) + UPSERT | 스펙 §1.2, 부록 원칙 4 |
 | A-4 | poison pill 크래시 루프 | 재획득 쿼리의 `attempt_count < :maxAttempts` 캡 → `FAILED('MAX_ATTEMPTS_EXCEEDED')` | 스펙 §1.4-(1), plan Task 3 |
 | A-5 | 실패 시 ack 보류로 인한 hot loop | `finally { ack.acknowledge() }` — Job이 최종 상태(success/failed) 도달 시 항상 ack | 스펙 §3.1, plan Task 11 |
@@ -32,7 +32,7 @@ Track A는 **"정합성이 깨지지 않는 파이프라인"**을 목표로 했�
 | A-8 | 오래된 업로드가 최신 업로드를 덮어씀 | `document_version.embedding_version_no` fencing 비교 | 스펙 §1.3 문제2, §1.4-(3) |
 | A-9 | STALE 버전에 임베딩 비용 낭비 | 다운로드 **이전** 조기 fencing 판정 → `COMPLETED(chunk_count=null)` | 스펙 §3.1, plan Task 10 |
 | A-10 | 실패 쓰기가 성공 결과를 덮어씀 | 실패 쓰기에만 `status = 'PROCESSING'` 가드 | 스펙 §1.4-(4) |
-| A-11 | ~~재청킹으로 청크 수가 줄었을 때 잔존 청크~~ | ~~trailing DELETE(`chunk_no > :finalChunkCount`)~~ — PR #4 리뷰에서 제외(청킹 결정성상 발생 불가능한 시나리오로 판정, 이번 브랜치에서 요구사항·구현 모두 제거) | 스펙 §1.4-(2)(폐기 예정) |
+| A-11 | 재청킹으로 청크 수가 줄었을 때 잔존 청크 | 현재 구현은 trailing DELETE(`chunk_no > :lastChunkNo`)를 수행한다. 같은 코드·설정이면 청킹이 결정적이지만 배포 버전, 전략, parser/tokenizer 또는 과거 데이터가 다를 때를 방어한다 | 현재 구현 문서 §5.9 |
 | A-12 | 스캔 PDF가 "성공"으로 위장 | `ChunkGuard.assertValid()` — 빈 청크 → `EMPTY_EXTRACTION` | 스펙 §3.6, plan Task 9 |
 | A-13 | 대용량 문서 청크 폭발 | `max-chunks-per-document: 5000` 상한 | 스펙 §3.6 |
 | A-14 | 손상/변조된 원문 인덱싱 | 다운로드 후 SHA-256 vs `content_hash` 비교 | 스펙 §3.3 |
@@ -333,8 +333,8 @@ indexing:
 Kafka 리스너는 배치로 레코드를 받아 `documentId`로 그룹핑한 뒤, 그룹마다 `IndexingPipelineRunner.run()`을 한 번 호출한다. 재시도는 이 `run()` 안의 루프가 전담하고, ack은 배치 전체(모든 그룹)가 끝난 뒤 한 번만 호출된다:
 
 ```kotlin
-fun run(event: IndexingRequestedEvent) {
-    val jobId = acquireJobId(event, documentVersionId) ?: return
+fun run(event: IndexingRequestedEvent, recordIdentity: KafkaRecordIdentity) {
+    val jobId = acquireJobId(event, documentVersionId, recordIdentity) ?: return
 
     while (true) {
         val acquired = indexingJobRepository.start(jobId, workerId, maxAttempts)  // PROCESSING 전환 + attempt_count += 1
