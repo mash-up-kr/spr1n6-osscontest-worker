@@ -50,8 +50,8 @@ class IndexingJobRepositoryIntegrationTest(
     @Test
     fun `insertIfAbsent는 같은 sourceEventId로 두 번 호출해도 행이 하나만 생긴다`() {
         val eventId = UUID.randomUUID()
-        val firstInsert = indexingJobRepository.insertIfAbsent(eventId, 1L, 1L, null)
-        val secondInsert = indexingJobRepository.insertIfAbsent(eventId, 1L, 1L, null)
+        val firstInsert = indexingJobRepository.insertIfAbsent(eventId, 1L, 1L, null, "indexing", 2, 41L)
+        val secondInsert = indexingJobRepository.insertIfAbsent(eventId, 1L, 1L, null, "indexing", 2, 41L)
 
         // 두 번째 호출은 uk_indexing_job_source_event에 걸려 ON CONFLICT DO NOTHING으로
         // 조용히 스킵되므로 영향받은 행 수가 0이어야 한다 — 새 행이 추가되지 않았다는 직접 증거다.
@@ -66,6 +66,9 @@ class IndexingJobRepositoryIntegrationTest(
         val job = indexingJobRepository.findBySourceEventId(eventId)
         assertThat(job).isNotNull
         assertThat(job!!.sourceEventId).isEqualTo(eventId)
+        assertThat(job.kafkaTopic).isEqualTo("indexing")
+        assertThat(job.kafkaPartition).isEqualTo(2)
+        assertThat(job.kafkaOffset).isEqualTo(41L)
     }
 
     @Test
@@ -86,6 +89,9 @@ class IndexingJobRepositoryIntegrationTest(
                     startedAt = null,
                     completedAt = null,
                     updatedAt = LocalDateTime.now(),
+                    kafkaTopic = "indexing",
+                    kafkaPartition = 0,
+                    kafkaOffset = 10L,
                 ),
             )
 
@@ -112,6 +118,9 @@ class IndexingJobRepositoryIntegrationTest(
                     startedAt = LocalDateTime.now(),
                     completedAt = null,
                     updatedAt = LocalDateTime.now(),
+                    kafkaTopic = "indexing",
+                    kafkaPartition = 0,
+                    kafkaOffset = 11L,
                 ),
             )
 
@@ -138,6 +147,9 @@ class IndexingJobRepositoryIntegrationTest(
                     startedAt = LocalDateTime.now(),
                     completedAt = null,
                     updatedAt = LocalDateTime.now(),
+                    kafkaTopic = "indexing",
+                    kafkaPartition = 0,
+                    kafkaOffset = 12L,
                 ),
             )
 
@@ -172,6 +184,9 @@ class IndexingJobRepositoryIntegrationTest(
                     startedAt = LocalDateTime.now(),
                     completedAt = null,
                     updatedAt = LocalDateTime.now(),
+                    kafkaTopic = "indexing",
+                    kafkaPartition = 0,
+                    kafkaOffset = 13L,
                 ),
             )
 
@@ -202,6 +217,9 @@ class IndexingJobRepositoryIntegrationTest(
                     startedAt = LocalDateTime.now(),
                     completedAt = null,
                     updatedAt = LocalDateTime.now(),
+                    kafkaTopic = "indexing",
+                    kafkaPartition = 0,
+                    kafkaOffset = 14L,
                 ),
             )
 
@@ -259,6 +277,9 @@ class IndexingJobRepositoryIntegrationTest(
                         null
                     },
                 updatedAt = LocalDateTime.now(),
+                kafkaTopic = "indexing",
+                kafkaPartition = 0,
+                kafkaOffset = documentVersionId,
             ),
         )
 

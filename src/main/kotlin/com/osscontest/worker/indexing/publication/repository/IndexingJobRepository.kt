@@ -23,9 +23,31 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
     @Query(
         value = """
             INSERT INTO indexing_job
-                (source_event_id, document_id, document_version_id, status, attempt_count, trace_id, updated_at)
+                (
+                    source_event_id,
+                    document_id,
+                    document_version_id,
+                    status,
+                    attempt_count,
+                    trace_id,
+                    kafka_topic,
+                    kafka_partition,
+                    kafka_offset,
+                    updated_at
+                )
             VALUES
-                (:sourceEventId, :documentId, :documentVersionId, 'PENDING', 0, :traceId, CURRENT_TIMESTAMP)
+                (
+                    :sourceEventId,
+                    :documentId,
+                    :documentVersionId,
+                    'PENDING',
+                    0,
+                    :traceId,
+                    :kafkaTopic,
+                    :kafkaPartition,
+                    :kafkaOffset,
+                    CURRENT_TIMESTAMP
+                )
             ON CONFLICT DO NOTHING
         """,
         nativeQuery = true,
@@ -35,6 +57,9 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
         @Param("documentId") documentId: Long,
         @Param("documentVersionId") documentVersionId: Long,
         @Param("traceId") traceId: String?,
+        @Param("kafkaTopic") kafkaTopic: String,
+        @Param("kafkaPartition") kafkaPartition: Int,
+        @Param("kafkaOffset") kafkaOffset: Long,
     ): Int
 
     // §1.4-(1): 크래시 재획득(PENDING/PROCESSING) + §3.8: RETRY_WAIT 인프로세스 재시도 재획득을

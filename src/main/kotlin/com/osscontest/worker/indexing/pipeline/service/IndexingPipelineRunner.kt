@@ -9,6 +9,7 @@ import com.osscontest.worker.indexing.chunking.service.TotalTokenLimitExceededEx
 import com.osscontest.worker.indexing.consumer.IndexingEventValidator
 import com.osscontest.worker.indexing.consumer.IndexingRequestedEvent
 import com.osscontest.worker.indexing.consumer.InvalidEventException
+import com.osscontest.worker.indexing.consumer.KafkaRecordIdentity
 import com.osscontest.worker.indexing.embedding.service.EmbeddingRequestRejectedException
 import com.osscontest.worker.indexing.embedding.service.InvalidEmbeddingException
 import com.osscontest.worker.indexing.parsing.CorruptedFileException
@@ -18,6 +19,7 @@ import com.osscontest.worker.indexing.parsing.UnsupportedMimeTypeException
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.publication.entity.DocumentVersionEntity
+import com.osscontest.worker.indexing.publication.entity.IndexingJobEntity
 import com.osscontest.worker.indexing.publication.repository.DocumentRepository
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
 import com.osscontest.worker.indexing.publication.service.IndexingFailureService
@@ -34,6 +36,7 @@ import java.nio.file.Path
 import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.time.Duration
+import java.time.LocalDateTime
 
 @Component
 class IndexingPipelineRunner(
@@ -59,6 +62,7 @@ class IndexingPipelineRunner(
     // @Value는 String → enum 변환을 기본 ConversionService로 처리한다.
     @Value("\${indexing.chunking.strategy:FIXED_TOKEN}")
     private val chunkingStrategy: ChunkingStrategy = ChunkingStrategy.FIXED_TOKEN,
+    private val retryWaiter: RetryWaiter,
     private val meterRegistry: MeterRegistry,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -81,7 +85,10 @@ class IndexingPipelineRunner(
      * 부류이므로, start()로 attempt_count를 올린 뒤 catch에서 permanent=true로 FAILED
      * 종결시킨다.
      */
-    fun run(event: IndexingRequestedEvent) {
+    fun run(
+        event: IndexingRequestedEvent,
+        recordIdentity: KafkaRecordIdentity,
+    ) {
         // 유일하게 Job 자체를 만들 수 없는 경우다 — indexing_job.document_version_id가 NOT NULL FK라
         // 어떤 Job 행도 존재할 수 없다. 재시도 경로에서는 발생할 수 없다(재시도는 이 함수 안 루프에서
         // 같은 event를 그대로 재사용한다). 따라서 이 조기 반환은 무한 루프 위험이 없는, 최초 수신
@@ -95,13 +102,31 @@ class IndexingPipelineRunner(
             return
         }
 
-        val jobId = acquireJobId(event, documentVersionId) ?: return
+        val jobId = acquireJobId(event, documentVersionId, recordIdentity) ?: return
         val sample = Timer.start(meterRegistry)
         while (true) {
-            val acquired = indexingJobRepository.start(jobId, workerId, maxAttempts)
+            val acquired =
+                indexingJobRepository.start(
+                    jobId = jobId,
+                    workerId = workerId,
+                    maxAttempts = maxAttempts,
+                )
             if (acquired != 1) {
-                // 상한 초과인지, 이미 완료됐는지 구분해서 상한 초과라면 종결한다.
-                indexingJobRepository.failIfAttemptsExceeded(jobId, maxAttempts)
+                // 상한 초과인지, 이미 완료됐는지, 아직 due가 아닌 RETRY_WAIT인지 구분한다.
+                if (indexingJobRepository.failIfAttemptsExceeded(jobId, maxAttempts) == 1) {
+                    log.info("job {} reached max attempts", jobId)
+                    sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
+                    return
+                }
+                val job = indexingJobRepository.findById(jobId).orElse(null)
+                if (
+                    job != null &&
+                    job.status == IndexingJobStatus.RETRY_WAIT &&
+                    job.nextRetryAt != null
+                ) {
+                    waitUntilRetryDue(jobId, job.nextRetryAt!!)
+                    continue
+                }
                 log.info("job {} not acquired (already handled or attempts exceeded)", jobId)
                 sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
                 return
@@ -149,14 +174,7 @@ class IndexingPipelineRunner(
                 // P1-2: 실제로 인라인 재시도에 진입한 실패만 센다. 영구 실패나 상한 도달은
                 // indexing_job_failed_total의 몫이며 inline retry로 집계하지 않는다.
                 meterRegistry.counter("indexing_inline_retry_total", "attempt", job.attemptCount.toString()).increment()
-                val nextRetryAt = job.nextRetryAt!!
-                // P2-2: next_retry_at과 남은 대기 시간의 기준 시각을 모두 DB 시계로 통일한다.
-                // 앱 시계가 DB보다 빠를 때 너무 일찍 start()를 호출하면 RETRY_WAIT을 재획득하지
-                // 못한 채 메시지가 ack될 수 있으므로 LocalDateTime.now()를 사용하면 안 된다.
-                val retryClock = indexingJobRepository.currentDbTimestamp()
-                val waitMillis = Duration.between(retryClock, nextRetryAt).toMillis().coerceAtLeast(0)
-                log.warn("job {} in RETRY_WAIT, retrying in-process after {}ms", jobId, waitMillis, e)
-                Thread.sleep(waitMillis)
+                waitUntilRetryDue(jobId, job.nextRetryAt!!, e)
                 // 루프 재진입 — start()가 RETRY_WAIT 재획득 분기(§1.4-(1))로 다시 PROCESSING으로
                 // 되돌리고 attempt_count를 증가시킨다. next_retry_at은 이미 지났으므로 즉시 재획득된다.
             }
@@ -264,13 +282,18 @@ class IndexingPipelineRunner(
     fun acquireJobId(
         event: IndexingRequestedEvent,
         documentVersionId: Long,
+        recordIdentity: KafkaRecordIdentity,
     ): Long? {
-        indexingJobRepository.insertIfAbsent(
-            event.eventId,
-            event.documentId,
-            documentVersionId,
-            event.traceId,
-        )
+        val inserted =
+            indexingJobRepository.insertIfAbsent(
+                event.eventId,
+                event.documentId,
+                documentVersionId,
+                event.traceId,
+                recordIdentity.topic,
+                recordIdentity.partition,
+                recordIdentity.offset,
+            )
         val job = indexingJobRepository.findBySourceEventId(event.eventId)
         if (job == null) {
             // uq_indexing_job_active_version 위반 — 다른 이벤트가 이미 이 버전을 활성 처리 중이다.
@@ -280,8 +303,54 @@ class IndexingPipelineRunner(
             )
             return null
         }
+        if (inserted == 0 && !job.matches(recordIdentity)) {
+            log.info(
+                "duplicate publication ignored: eventId={} original={}-{}@{} duplicate={}-{}@{}",
+                event.eventId,
+                job.kafkaTopic,
+                job.kafkaPartition,
+                job.kafkaOffset,
+                recordIdentity.topic,
+                recordIdentity.partition,
+                recordIdentity.offset,
+            )
+            return null
+        }
+        if (inserted == 0) {
+            log.info(
+                "Kafka record redelivered: eventId={} topic={} partition={} offset={}",
+                event.eventId,
+                recordIdentity.topic,
+                recordIdentity.partition,
+                recordIdentity.offset,
+            )
+        }
         return job.id
     }
+
+    private fun waitUntilRetryDue(
+        jobId: Long,
+        nextRetryAt: LocalDateTime,
+        cause: Exception? = null,
+    ) {
+        // next_retry_at과 남은 대기 시간의 기준 시각을 모두 DB 시계로 통일한다.
+        val retryClock = indexingJobRepository.currentDbTimestamp()
+        val waitDuration =
+            Duration.ofMillis(
+                Duration.between(retryClock, nextRetryAt).toMillis().coerceAtLeast(0),
+            )
+        if (cause == null) {
+            log.info("job {} redelivered before retry due, waiting {}ms in-process", jobId, waitDuration.toMillis())
+        } else {
+            log.warn("job {} in RETRY_WAIT, retrying in-process after {}ms", jobId, waitDuration.toMillis(), cause)
+        }
+        retryWaiter.waitFor(waitDuration)
+    }
+
+    private fun IndexingJobEntity.matches(recordIdentity: KafkaRecordIdentity): Boolean =
+        kafkaTopic == recordIdentity.topic &&
+            kafkaPartition == recordIdentity.partition &&
+            kafkaOffset == recordIdentity.offset
 
     private fun sha256HexOf(path: Path): String {
         val digest = MessageDigest.getInstance("SHA-256")

@@ -47,4 +47,10 @@ class IndexingJobEntity(
     var completedAt: LocalDateTime?,
     @Column(name = "updated_at", nullable = false)
     var updatedAt: LocalDateTime,
+    @Column(name = "kafka_topic", nullable = false)
+    var kafkaTopic: String,
+    @Column(name = "kafka_partition", nullable = false)
+    var kafkaPartition: Int,
+    @Column(name = "kafka_offset", nullable = false)
+    var kafkaOffset: Long,
 )

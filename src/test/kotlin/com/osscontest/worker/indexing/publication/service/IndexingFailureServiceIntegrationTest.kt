@@ -87,6 +87,9 @@ class IndexingFailureServiceIntegrationTest(
                     startedAt = LocalDateTime.now(),
                     completedAt = if (status == IndexingJobStatus.COMPLETED) LocalDateTime.now() else null,
                     updatedAt = LocalDateTime.now(),
+                    kafkaTopic = "indexing",
+                    kafkaPartition = 0,
+                    kafkaOffset = 1L,
                 ),
             )
         return job.id!!

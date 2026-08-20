@@ -7,6 +7,7 @@ import com.osscontest.worker.indexing.chunking.service.ChunkingStrategy
 import com.osscontest.worker.indexing.consumer.IndexingEventValidator
 import com.osscontest.worker.indexing.consumer.IndexingRequestedEvent
 import com.osscontest.worker.indexing.consumer.InvalidEventException
+import com.osscontest.worker.indexing.consumer.KafkaRecordIdentity
 import com.osscontest.worker.indexing.embedding.service.EmbeddingRequestRejectedException
 import com.osscontest.worker.indexing.parsing.CorruptedFileException
 import com.osscontest.worker.indexing.parsing.DocumentParser
@@ -26,6 +27,8 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertTimeoutPreemptively
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.EnumSource
 import org.mockito.kotlin.any
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.inOrder
@@ -54,10 +57,12 @@ class IndexingPipelineRunnerTest {
     private val chunkGuard: ChunkGuard = mock()
     private val indexingProcessor = FakeIndexingProcessor()
     private val indexingFailureService: IndexingFailureService = mock()
+    private val retryWaiter: RetryWaiter = mock()
     private val meterRegistry = SimpleMeterRegistry()
     private val maxAttempts = 5
     private val baseDelay: Duration = Duration.ofSeconds(30)
     private val maxFileSizeBytes = 209_715_200L // 200MB — 스펙 기본값
+    private val recordIdentity = KafkaRecordIdentity(topic = "indexing", partition = 0, offset = 10L)
 
     private val runner = newRunner()
 
@@ -78,6 +83,7 @@ class IndexingPipelineRunnerTest {
             baseDelay = baseDelay,
             maxFileSizeBytes = maxFileSizeBytes,
             chunkingStrategy = strategy,
+            retryWaiter = retryWaiter,
             meterRegistry = meterRegistry,
         )
 
@@ -108,7 +114,7 @@ class IndexingPipelineRunnerTest {
         )
         whenever(chunkingService.chunk(eq(listOf(block)), eq(ChunkingStrategy.FIXED_TOKEN))).thenReturn(listOf(chunk))
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         verify(downloadClient).download("k")
         assertThat(indexingProcessor.calls).hasSize(1)
@@ -139,7 +145,7 @@ class IndexingPipelineRunnerTest {
         )
         whenever(chunkingService.chunk(eq(listOf(block)), eq(ChunkingStrategy.FIXED_TOKEN))).thenReturn(listOf(chunk))
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         assertThat(indexingProcessor.calls).hasSize(1)
         val (context, chunks) = indexingProcessor.calls.single()
@@ -192,7 +198,7 @@ class IndexingPipelineRunnerTest {
             .thenReturn(com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.FAILED)
 
         // 예외가 밖으로 새어나가지 않아야 한다.
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         verify(indexingFailureService).recordFailure(
             eq(5001L),
@@ -236,7 +242,7 @@ class IndexingPipelineRunnerTest {
         whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(IndexingJobStatus.FAILED)
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         verify(indexingFailureService).recordFailure(
             eq(5001L),
@@ -266,7 +272,7 @@ class IndexingPipelineRunnerTest {
         whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(IndexingJobStatus.FAILED)
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         verify(indexingFailureService).recordFailure(
             eq(5001L),
@@ -299,7 +305,7 @@ class IndexingPipelineRunnerTest {
         whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(IndexingJobStatus.FAILED)
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         verify(indexingFailureService).recordFailure(
             eq(5001L), eq("CORRUPTED_FILE"), any(), eq(true), eq(maxAttempts), eq(baseDelay), any(),
@@ -326,7 +332,7 @@ class IndexingPipelineRunnerTest {
         whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(IndexingJobStatus.FAILED)
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         // attempt_count를 올리는 start()가 먼저 실행돼야 한다.
         verify(indexingJobRepository).start(5001L, "worker-test", maxAttempts)
@@ -357,7 +363,7 @@ class IndexingPipelineRunnerTest {
         whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(IndexingJobStatus.FAILED)
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         verify(indexingJobRepository).start(5001L, "worker-test", maxAttempts)
         verify(indexingFailureService).recordFailure(
@@ -376,9 +382,9 @@ class IndexingPipelineRunnerTest {
     // 재시도 경로에서는 나올 수 없는 최초 수신 1회성 케이스라 조용히 버린다.
     @Test
     fun `documentVersionId가 없으면 Job을 만들지 않고 조용히 반환한다`() {
-        runner.run(sampleEvent().copy(documentVersionId = null))
+        runner.run(sampleEvent().copy(documentVersionId = null), recordIdentity)
 
-        verify(indexingJobRepository, never()).insertIfAbsent(any(), any(), any(), anyOrNull())
+        verify(indexingJobRepository, never()).insertIfAbsent(any(), any(), any(), anyOrNull(), any(), any(), any())
         verify(indexingJobRepository, never()).start(any(), any(), any())
         verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any(), any())
         assertThat(indexingProcessor.calls).isEmpty()
@@ -407,7 +413,7 @@ class IndexingPipelineRunnerTest {
         )
         whenever(chunkingService.chunk(eq(listOf(block)), eq(ChunkingStrategy.PARAGRAPH))).thenReturn(listOf(chunk))
 
-        newRunner(strategy = ChunkingStrategy.PARAGRAPH).run(sampleEvent())
+        newRunner(strategy = ChunkingStrategy.PARAGRAPH).run(sampleEvent(), recordIdentity)
 
         verify(chunkingService).chunk(listOf(block), ChunkingStrategy.PARAGRAPH)
         assertThat(indexingProcessor.calls).hasSize(1)
@@ -424,15 +430,90 @@ class IndexingPipelineRunnerTest {
         whenever(eventValidator.validate(any())).thenReturn(documentVersion)
         whenever(documentRepository.findById(42L))
             .thenReturn(Optional.of(DocumentEntity(id = 42L, tenantId = 7L, searchableVersionId = 2001L, deletedAt = null)))
-        whenever(indexingJobRepository.insertIfAbsent(any(), any(), any(), anyOrNull())).thenReturn(0)
+        whenever(indexingJobRepository.insertIfAbsent(any(), any(), any(), anyOrNull(), any(), any(), any())).thenReturn(0)
         whenever(indexingJobRepository.findBySourceEventId(any())).thenReturn(null)
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         verify(indexingJobRepository, never()).start(any(), any(), any())
         verify(downloadClient, never()).download(any())
         assertThat(indexingProcessor.calls).isEmpty()
         verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any(), any())
+    }
+
+    @Test
+    fun `같은 eventId가 다른 Kafka offset으로 다시 발행되면 중복 발행으로 무시한다`() {
+        val originalIdentity = recordIdentity.copy(offset = recordIdentity.offset - 1)
+        whenever(indexingJobRepository.insertIfAbsent(any(), any(), any(), anyOrNull(), any(), any(), any())).thenReturn(0)
+        whenever(indexingJobRepository.findBySourceEventId(any()))
+            .thenReturn(indexingJob(status = IndexingJobStatus.PROCESSING, identity = originalIdentity))
+
+        runner.run(sampleEvent(), recordIdentity)
+
+        verify(indexingJobRepository, never()).start(any(), any(), any())
+        verify(eventValidator, never()).validate(any())
+        assertThat(indexingProcessor.calls).isEmpty()
+    }
+
+    @Test
+    fun `같은 Kafka record가 PROCESSING 상태로 재전달되면 다시 획득한다`() {
+        whenever(indexingJobRepository.insertIfAbsent(any(), any(), any(), anyOrNull(), any(), any(), any())).thenReturn(0)
+        whenever(indexingJobRepository.findBySourceEventId(any()))
+            .thenReturn(indexingJob(status = IndexingJobStatus.PROCESSING, identity = recordIdentity))
+        whenever(indexingJobRepository.start(5001L, "worker-test", maxAttempts)).thenReturn(1)
+        whenever(eventValidator.validate(any()))
+            .thenThrow(InvalidEventException("DOCUMENT_VERSION_NOT_FOUND", "not found"))
+        whenever(indexingJobRepository.currentDbTimestamp()).thenReturn(LocalDateTime.now())
+        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
+            .thenReturn(IndexingJobStatus.FAILED)
+
+        runner.run(sampleEvent(), recordIdentity)
+
+        verify(indexingJobRepository).start(5001L, "worker-test", maxAttempts)
+        verify(indexingFailureService).recordFailure(
+            eq(5001L), eq("DOCUMENT_VERSION_NOT_FOUND"), eq("not found"), eq(true),
+            eq(maxAttempts), eq(baseDelay), any(),
+        )
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = IndexingJobStatus::class, names = ["COMPLETED", "FAILED"])
+    fun `같은 Kafka record의 종결 job은 다시 실행하지 않는다`(terminalStatus: IndexingJobStatus) {
+        val terminalJob = indexingJob(status = terminalStatus, identity = recordIdentity)
+        whenever(indexingJobRepository.insertIfAbsent(any(), any(), any(), anyOrNull(), any(), any(), any())).thenReturn(0)
+        whenever(indexingJobRepository.findBySourceEventId(any())).thenReturn(terminalJob)
+        whenever(indexingJobRepository.findById(5001L)).thenReturn(Optional.of(terminalJob))
+
+        runner.run(sampleEvent(), recordIdentity)
+
+        verify(indexingJobRepository).start(5001L, "worker-test", maxAttempts)
+        verify(eventValidator, never()).validate(any())
+        verify(retryWaiter, never()).waitFor(any())
+    }
+
+    @Test
+    fun `같은 Kafka record의 RETRY_WAIT이 due 전 재전달되면 대기 후 재획득한다`() {
+        val dbNow = LocalDateTime.of(2026, 8, 20, 12, 0)
+        val retryJob =
+            indexingJob(
+                status = IndexingJobStatus.RETRY_WAIT,
+                identity = recordIdentity,
+                nextRetryAt = dbNow.plusSeconds(30),
+            )
+        whenever(indexingJobRepository.insertIfAbsent(any(), any(), any(), anyOrNull(), any(), any(), any())).thenReturn(0)
+        whenever(indexingJobRepository.findBySourceEventId(any())).thenReturn(retryJob)
+        whenever(indexingJobRepository.start(5001L, "worker-test", maxAttempts)).thenReturn(0, 1)
+        whenever(indexingJobRepository.findById(5001L)).thenReturn(Optional.of(retryJob))
+        whenever(indexingJobRepository.currentDbTimestamp()).thenReturn(dbNow)
+        whenever(eventValidator.validate(any()))
+            .thenThrow(InvalidEventException("DOCUMENT_VERSION_NOT_FOUND", "not found"))
+        whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
+            .thenReturn(IndexingJobStatus.FAILED)
+
+        runner.run(sampleEvent(), recordIdentity)
+
+        verify(retryWaiter).waitFor(Duration.ofSeconds(30))
+        verify(indexingJobRepository, times(2)).start(5001L, "worker-test", maxAttempts)
     }
 
     @Test
@@ -446,7 +527,7 @@ class IndexingPipelineRunnerTest {
         stubActiveJobAcquisition(documentVersion)
         whenever(indexingJobRepository.start(5001L, "worker-test", maxAttempts)).thenReturn(0)
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         verify(indexingJobRepository).failIfAttemptsExceeded(5001L, maxAttempts)
         verify(downloadClient, never()).download(any())
@@ -466,7 +547,7 @@ class IndexingPipelineRunnerTest {
         whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(IndexingJobStatus.FAILED)
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         verify(indexingFailureService).recordFailure(
             eq(5001L), eq("FILE_TOO_LARGE"), any(), eq(true), eq(maxAttempts), eq(baseDelay), any(),
@@ -492,22 +573,25 @@ class IndexingPipelineRunnerTest {
                 status = IndexingJobStatus.RETRY_WAIT, attemptCount = 1, nextRetryAt = nextRetryAt,
                 workerId = "worker-test", lastErrorCode = "RuntimeException", lastErrorMessage = "temporary",
                 traceId = null, startedAt = failedAt, completedAt = null, updatedAt = failedAt,
+                kafkaTopic = recordIdentity.topic,
+                kafkaPartition = recordIdentity.partition,
+                kafkaOffset = recordIdentity.offset,
             )
-        whenever(indexingJobRepository.start(5001L, "worker-test", maxAttempts)).thenReturn(1, 0)
-        whenever(indexingJobRepository.currentDbTimestamp()).thenReturn(failedAt, nextRetryAt)
+        whenever(indexingJobRepository.start(5001L, "worker-test", maxAttempts)).thenReturn(1, 1)
+        whenever(indexingJobRepository.currentDbTimestamp()).thenReturn(failedAt, nextRetryAt, nextRetryAt)
         whenever(indexingJobRepository.findById(5001L)).thenReturn(Optional.of(retryWaitJob))
         whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
-            .thenReturn(IndexingJobStatus.RETRY_WAIT)
+            .thenReturn(IndexingJobStatus.RETRY_WAIT, IndexingJobStatus.FAILED)
         whenever(eventValidator.validate(any()))
             .thenThrow(RuntimeException("temporary"))
 
         // nextRetryAt은 실제 앱 시각보다 먼 미래지만 DB 기준 현재 시각과는 같다. 앱 시각을
         // 사용하면 장시간 sleep하므로, 제한시간 안에 끝나는지가 DB 시각 사용의 회귀 검증이다.
-        assertTimeoutPreemptively(Duration.ofSeconds(1)) { runner.run(sampleEvent()) }
+        assertTimeoutPreemptively(Duration.ofSeconds(1)) { runner.run(sampleEvent(), recordIdentity) }
 
         assertThat(meterRegistry.get("indexing_inline_retry_total").tag("attempt", "1").counter().count())
             .isEqualTo(1.0)
-        verify(indexingJobRepository, times(2)).currentDbTimestamp()
+        verify(indexingJobRepository, times(3)).currentDbTimestamp()
     }
 
     @Test
@@ -524,7 +608,7 @@ class IndexingPipelineRunnerTest {
         whenever(eventValidator.validate(any()))
             .thenThrow(InvalidEventException("DOCUMENT_VERSION_NOT_FOUND", "not found"))
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         assertThat(meterRegistry.find("indexing_inline_retry_total").counters()).isEmpty()
     }
@@ -547,7 +631,7 @@ class IndexingPipelineRunnerTest {
         val chunk = Chunk(chunkNo = 0, content = "hello world", contentHash = "ch", tokenCount = 2, pageFrom = null, pageTo = null, sectionPath = null, metadata = null)
         whenever(chunkingService.chunk(eq(listOf(block)), eq(ChunkingStrategy.FIXED_TOKEN))).thenReturn(listOf(chunk))
 
-        runner.run(sampleEvent())
+        runner.run(sampleEvent(), recordIdentity)
 
         assertThat(meterRegistry.get("indexing_job_duration_seconds").tag("phase", "total").timer().count())
             .isEqualTo(1L)
@@ -556,7 +640,7 @@ class IndexingPipelineRunnerTest {
     /** eventValidator/insertIfAbsent/findBySourceEventId/documentRepository.findById/start를 표준 성공 값으로 스텁한다. */
     private fun stubActiveJobAcquisition(documentVersion: DocumentVersionEntity) {
         whenever(eventValidator.validate(any())).thenReturn(documentVersion)
-        whenever(indexingJobRepository.insertIfAbsent(any(), any(), any(), anyOrNull())).thenReturn(1)
+        whenever(indexingJobRepository.insertIfAbsent(any(), any(), any(), anyOrNull(), any(), any(), any())).thenReturn(1)
         whenever(indexingJobRepository.findBySourceEventId(any()))
             .thenReturn(
                 IndexingJobEntity(
@@ -565,6 +649,9 @@ class IndexingPipelineRunnerTest {
                     attemptCount = 0, nextRetryAt = null, workerId = null, lastErrorCode = null,
                     lastErrorMessage = null, traceId = null, startedAt = null, completedAt = null,
                     updatedAt = LocalDateTime.now(),
+                    kafkaTopic = recordIdentity.topic,
+                    kafkaPartition = recordIdentity.partition,
+                    kafkaOffset = recordIdentity.offset,
                 ),
             )
         whenever(indexingJobRepository.start(5001L, "worker-test", maxAttempts)).thenReturn(1)
@@ -580,6 +667,30 @@ class IndexingPipelineRunnerTest {
             eventId = UUID.randomUUID(), eventType = "INDEXING_REQUESTED", eventSchemaVersion = 1, tenantId = 7L,
             documentId = 42L, documentVersionId = 1001L, occurredAt = Instant.now(), traceId = null,
         )
+
+    private fun indexingJob(
+        status: IndexingJobStatus,
+        identity: KafkaRecordIdentity,
+        nextRetryAt: LocalDateTime? = null,
+    ) = IndexingJobEntity(
+        id = 5001L,
+        sourceEventId = UUID.randomUUID(),
+        documentId = 42L,
+        documentVersionId = 1001L,
+        status = status,
+        attemptCount = 1,
+        nextRetryAt = nextRetryAt,
+        workerId = "worker-test",
+        lastErrorCode = null,
+        lastErrorMessage = null,
+        traceId = null,
+        startedAt = LocalDateTime.now(),
+        completedAt = null,
+        updatedAt = LocalDateTime.now(),
+        kafkaTopic = identity.topic,
+        kafkaPartition = identity.partition,
+        kafkaOffset = identity.offset,
+    )
 
     private fun sha256Hex(bytes: ByteArray): String =
         "sha256:" + MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
