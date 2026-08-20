@@ -33,10 +33,10 @@ class IndexingEventValidator
      * document_version 단위 검증만 담당한다(단일 책임 유지).
      */
     fun validate(event: IndexingRequestedEvent): DocumentVersionEntity {
-        if (event.eventSchemaVersion !in supportedVersions) {
+        if (event.schemaVersion !in supportedVersions) {
             throw InvalidEventException(
                 "UNSUPPORTED_SCHEMA_VERSION",
-                "eventSchemaVersion=${event.eventSchemaVersion} is not supported",
+                "schemaVersion=${event.schemaVersion} is not supported",
             )
         }
 

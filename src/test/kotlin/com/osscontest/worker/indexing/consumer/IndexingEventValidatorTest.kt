@@ -16,7 +16,7 @@ class IndexingEventValidatorTest {
 
     @Test
     fun `지원하지 않는 스키마 버전은 거부한다`() {
-        val event = sampleEvent(eventSchemaVersion = 99)
+        val event = sampleEvent(schemaVersion = 99)
 
         assertThatThrownBy { validator.validate(event) }
             .isInstanceOf(InvalidEventException::class.java)
@@ -84,12 +84,12 @@ class IndexingEventValidatorTest {
     }
 
     private fun sampleEvent(
-        eventSchemaVersion: Int = 1,
+        schemaVersion: Int = 1,
         documentVersionId: Long? = 1001L,
     ) = IndexingRequestedEvent(
         eventId = UUID.randomUUID(),
         eventType = "INDEXING_REQUESTED",
-        eventSchemaVersion = eventSchemaVersion,
+        schemaVersion = schemaVersion,
         tenantId = 7L,
         documentId = 42L,
         documentVersionId = documentVersionId,

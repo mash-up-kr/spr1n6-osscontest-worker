@@ -32,7 +32,7 @@ class DocumentDeletionHandlerTest {
     @Test
     fun `지원하지 않는 스키마 버전이면 삭제하지 않고 예외를 던진다`() {
         val thrown =
-            catchInvalidEvent { handler.handle(deletedEvent(eventSchemaVersion = 99)) }
+            catchInvalidEvent { handler.handle(deletedEvent(schemaVersion = 99)) }
 
         assertThat(thrown.code).isEqualTo("UNSUPPORTED_SCHEMA_VERSION")
         verify(documentDeletionService, never()).handleDocumentDeleted(any())
@@ -73,11 +73,11 @@ class DocumentDeletionHandlerTest {
         return thrown!!
     }
 
-    private fun deletedEvent(eventSchemaVersion: Int = 1) =
+    private fun deletedEvent(schemaVersion: Int = 1) =
         IndexingRequestedEvent(
             eventId = UUID.randomUUID(),
             eventType = "DOCUMENT_DELETED",
-            eventSchemaVersion = eventSchemaVersion,
+            schemaVersion = schemaVersion,
             tenantId = 7L,
             documentId = 42L,
             documentVersionId = null,

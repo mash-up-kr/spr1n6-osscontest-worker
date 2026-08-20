@@ -37,10 +37,11 @@ class DocumentDeletionHandler
     ) : this(documentDeletionService, documentRepository, supportedSchemaVersions.map(Int::toString))
 
     fun handle(event: IndexingRequestedEvent) {
-        if (event.eventSchemaVersion !in supportedVersions) {
+        val startedAt = System.nanoTime()
+        if (event.schemaVersion !in supportedVersions) {
             throw InvalidEventException(
                 "UNSUPPORTED_SCHEMA_VERSION",
-                "eventSchemaVersion=${event.eventSchemaVersion} is not supported",
+                "schemaVersion=${event.schemaVersion} is not supported",
             )
         }
 
@@ -55,7 +56,17 @@ class DocumentDeletionHandler
             )
         }
 
-        log.info("DOCUMENT_DELETED received for documentId={} (eventId={})", event.documentId, event.eventId)
+        log.info(
+            "document deletion started: eventId={} documentId={}",
+            event.eventId,
+            event.documentId,
+        )
         documentDeletionService.handleDocumentDeleted(event.documentId)
+        log.info(
+            "document deletion completed: eventId={} documentId={} durationMs={}",
+            event.eventId,
+            event.documentId,
+            (System.nanoTime() - startedAt) / 1_000_000,
+        )
     }
 }

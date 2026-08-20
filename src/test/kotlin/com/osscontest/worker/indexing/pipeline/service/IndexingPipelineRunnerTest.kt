@@ -664,7 +664,7 @@ class IndexingPipelineRunnerTest {
 
     private fun sampleEvent() =
         IndexingRequestedEvent(
-            eventId = UUID.randomUUID(), eventType = "INDEXING_REQUESTED", eventSchemaVersion = 1, tenantId = 7L,
+            eventId = UUID.randomUUID(), eventType = "INDEXING_REQUESTED", schemaVersion = 1, tenantId = 7L,
             documentId = 42L, documentVersionId = 1001L, occurredAt = Instant.now(), traceId = null,
         )
 

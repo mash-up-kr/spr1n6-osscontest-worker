@@ -33,14 +33,20 @@ class IndexingKafkaListener(
     // documentId(=메시지 key)로 그룹핑해 같은 문서의 이벤트는 순서대로, 서로 다른 문서는
     // 동시에 처리한다 — 배치 전체가 끝나야(모든 그룹의 future가 끝나야) 한 번만 ack한다.
     // §3.1의 "Kafka offset은 배치 전체를 봤다, DB status는 각 Job을 처리했다" 원칙.
-    @KafkaListener(topics = ["indexing"], id = "indexing")
+    @KafkaListener(topics = ["\${indexing.consumer.topic}"], id = "indexing")
     fun onMessage(
         records: List<ConsumerRecord<String, String>>,
         ack: Acknowledgment,
     ) {
+        val batchStartedAt = System.nanoTime()
+        val recordsByDocument = records.groupBy { it.key() }
+        log.info(
+            "Kafka batch received: recordCount={} documentGroupCount={}",
+            records.size,
+            recordsByDocument.size,
+        )
         val futures =
-            records
-                .groupBy { it.key() }
+            recordsByDocument
                 .values
                 .map { sameKeyRecords -> executor.submit { sameKeyRecords.forEach(::processRecord) } }
 
@@ -69,17 +75,41 @@ class IndexingKafkaListener(
             // 배치 리스너라 레코드 하나가 아니라 배치 전체(인덱스 0부터)가 되감긴다.
             // 이미 성공적으로 처리된 다른 documentId 그룹까지 재전달되지만,
             // UPSERT 수렴(§1.4-(2))으로 무해하다.
+            log.warn(
+                "Kafka batch nacked: recordCount={} retryDelayMs={} durationMs={}",
+                records.size,
+                nackDelay.toMillis(),
+                elapsedMillis(batchStartedAt),
+            )
             ack.nack(0, nackDelay)
             return
         }
         ack.acknowledge()
+        log.info(
+            "Kafka batch acknowledged: recordCount={} durationMs={}",
+            records.size,
+            elapsedMillis(batchStartedAt),
+        )
     }
 
     private fun processRecord(record: ConsumerRecord<String, String>) {
+        val eventStartedAt = System.nanoTime()
         var event: IndexingRequestedEvent? = null
         try {
-            event = deserialize(record.value())
-            MDC.put("traceId", event.traceId ?: "-")
+            val traceId = extractTraceId(record)
+            MDC.put("traceId", traceId ?: "-")
+            event = deserialize(record.value()).copy(traceId = traceId)
+            log.info(
+                "event received: eventType={} eventId={} documentId={} documentVersionId={} " +
+                    "topic={} partition={} offset={}",
+                event.eventType,
+                event.eventId,
+                event.documentId,
+                event.documentVersionId,
+                record.topic(),
+                record.partition(),
+                record.offset(),
+            )
             when (event.eventType) {
                 "INDEXING_REQUESTED" ->
                     pipelineRunner.run(
@@ -97,16 +127,53 @@ class IndexingKafkaListener(
                         "eventType=${event.eventType} is not recognized",
                     )
             }
+            log.info(
+                "event handling completed: eventType={} eventId={} documentId={} durationMs={}",
+                event.eventType,
+                event.eventId,
+                event.documentId,
+                elapsedMillis(eventStartedAt),
+            )
         } catch (e: DataAccessException) {
             // 여기서 삼키지 않는다 — onMessage()의 futures.forEach { it.get() }가
             // ExecutionException으로 다시 던지도록 그대로 전파한다(P0-5).
+            log.error(
+                "event handling failed due to DB error: eventType={} eventId={} documentId={} " +
+                    "topic={} partition={} offset={} durationMs={} errorType={}",
+                event?.eventType,
+                event?.eventId,
+                event?.documentId,
+                record.topic(),
+                record.partition(),
+                record.offset(),
+                elapsedMillis(eventStartedAt),
+                e::class.simpleName,
+                e,
+            )
             throw e
         } catch (e: DeserializationException) {
-            log.error("event schema invalid: partition={} offset={}", record.partition(), record.offset(), e)
+            log.error(
+                "event deserialization failed: topic={} partition={} offset={} durationMs={} errorType={}",
+                record.topic(),
+                record.partition(),
+                record.offset(),
+                elapsedMillis(eventStartedAt),
+                e.cause?.let { it::class.simpleName } ?: e::class.simpleName,
+                e,
+            )
         } catch (e: InvalidEventException) {
             log.error(
-                "event validation failed: code={} eventId={} documentId={} partition={} offset={}",
-                e.code, event?.eventId, event?.documentId, record.partition(), record.offset(), e,
+                "event validation failed: errorCode={} eventType={} eventId={} documentId={} " +
+                    "topic={} partition={} offset={} durationMs={}",
+                e.code,
+                event?.eventType,
+                event?.eventId,
+                event?.documentId,
+                record.topic(),
+                record.partition(),
+                record.offset(),
+                elapsedMillis(eventStartedAt),
+                e,
             )
         } catch (e: Exception) {
             // Throwable/Error(예: StackOverflowError)는 의도적으로 여기서 잡지 않고 그대로 전파한다 —
@@ -114,8 +181,17 @@ class IndexingKafkaListener(
             // 던져지고, 배치 ack 자체가 안 이뤄진다(워커가 정말 불안정하면 배치를 통째로 재전달받는
             // 게 낫다는 판단).
             log.error(
-                "indexing failed: eventId={} documentId={} partition={} offset={}",
-                event?.eventId, event?.documentId, record.partition(), record.offset(), e,
+                "event handling failed: eventType={} eventId={} documentId={} topic={} partition={} " +
+                    "offset={} durationMs={} errorType={}",
+                event?.eventType,
+                event?.eventId,
+                event?.documentId,
+                record.topic(),
+                record.partition(),
+                record.offset(),
+                elapsedMillis(eventStartedAt),
+                e::class.simpleName,
+                e,
             )
         } finally {
             MDC.remove("traceId")
@@ -128,4 +204,19 @@ class IndexingKafkaListener(
         } catch (e: Exception) {
             throw DeserializationException(e)
         }
+
+    private fun extractTraceId(record: ConsumerRecord<String, String>): String? =
+        record
+            .headers()
+            .lastHeader(TRACE_ID_HEADER)
+            ?.value()
+            ?.toString(Charsets.UTF_8)
+            ?.takeIf { it.isNotBlank() }
+
+    private fun elapsedMillis(startedAt: Long): Long =
+        (System.nanoTime() - startedAt) / 1_000_000
+
+    private companion object {
+        const val TRACE_ID_HEADER = "traceId"
+    }
 }
