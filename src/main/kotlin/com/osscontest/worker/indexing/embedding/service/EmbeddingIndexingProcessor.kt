@@ -6,6 +6,7 @@ import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
 import com.osscontest.worker.indexing.pipeline.service.IndexingProcessor
 import com.osscontest.worker.indexing.publication.domain.DocumentChunk
 import com.osscontest.worker.indexing.publication.service.IndexingPublicationService
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.time.Clock
 import java.time.LocalDateTime
@@ -16,25 +17,77 @@ class EmbeddingIndexingProcessor(
     private val indexingPublicationService: IndexingPublicationService,
     private val clock: Clock,
 ) : IndexingProcessor {
+    private val log = LoggerFactory.getLogger(javaClass)
+
     override fun process(
         context: IndexingContext,
         chunks: List<Chunk>,
     ) {
-        validateChunks(chunks)
-        val embeddings = embeddingUseCase.embed(chunks.map(Chunk::content))
-        validateEmbeddings(chunks, embeddings)
+        var currentStage = "EMBEDDING"
+        var stageStartedAt = System.nanoTime()
+        try {
+            log.info(
+                "indexing processor stage started: stage=EMBEDDING jobId={} documentId={} " +
+                    "documentVersionId={} chunkCount={}",
+                context.jobId,
+                context.documentId,
+                context.documentVersionId,
+                chunks.size,
+            )
+            validateChunks(chunks)
+            val embeddings = embeddingUseCase.embed(chunks.map(Chunk::content))
+            validateEmbeddings(chunks, embeddings)
+            log.info(
+                "indexing processor stage completed: stage=EMBEDDING jobId={} embeddingCount={} " +
+                    "dimensions={} durationMs={}",
+                context.jobId,
+                embeddings.size,
+                embeddings.firstOrNull()?.size ?: 0,
+                elapsedMillis(stageStartedAt),
+            )
 
-        val embeddedAt = LocalDateTime.now(clock)
-        val documentChunks =
-            chunks.indices.map { index ->
-                chunks[index].toDocumentChunk(
-                    context = context,
-                    embedding = embeddings[index],
-                    embeddedAt = embeddedAt,
-                )
-            }
+            val embeddedAt = LocalDateTime.now(clock)
+            val documentChunks =
+                chunks.indices.map { index ->
+                    chunks[index].toDocumentChunk(
+                        context = context,
+                        embedding = embeddings[index],
+                        embeddedAt = embeddedAt,
+                    )
+                }
 
-        indexingPublicationService.publish(context, documentChunks)
+            currentStage = "PUBLISHING"
+            stageStartedAt = System.nanoTime()
+            log.info(
+                "indexing processor stage started: stage=PUBLISHING jobId={} documentId={} " +
+                    "documentVersionId={} chunkCount={}",
+                context.jobId,
+                context.documentId,
+                context.documentVersionId,
+                documentChunks.size,
+            )
+            val status = indexingPublicationService.publish(context, documentChunks)
+            log.info(
+                "indexing processor stage completed: stage=PUBLISHING jobId={} status={} chunkCount={} durationMs={}",
+                context.jobId,
+                status,
+                documentChunks.size,
+                elapsedMillis(stageStartedAt),
+            )
+        } catch (e: Exception) {
+            log.error(
+                "indexing processor stage failed: stage={} jobId={} documentId={} documentVersionId={} " +
+                    "durationMs={} errorType={}",
+                currentStage,
+                context.jobId,
+                context.documentId,
+                context.documentVersionId,
+                elapsedMillis(stageStartedAt),
+                e::class.simpleName,
+                e,
+            )
+            throw e
+        }
     }
 
     private fun validateChunks(chunks: List<Chunk>) {
@@ -92,4 +145,7 @@ class EmbeddingIndexingProcessor(
     private companion object {
         const val EMBEDDING_DIMENSIONS = 1536
     }
+
+    private fun elapsedMillis(startedAt: Long): Long =
+        (System.nanoTime() - startedAt) / 1_000_000
 }

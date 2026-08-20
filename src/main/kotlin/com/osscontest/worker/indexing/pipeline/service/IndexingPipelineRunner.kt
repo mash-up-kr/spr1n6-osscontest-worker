@@ -103,8 +103,21 @@ class IndexingPipelineRunner(
         }
 
         val jobId = acquireJobId(event, documentVersionId, recordIdentity) ?: return
+        val jobStartedAt = System.nanoTime()
+        log.info(
+            "indexing job registered: jobId={} eventId={} documentId={} documentVersionId={} " +
+                "topic={} partition={} offset={}",
+            jobId,
+            event.eventId,
+            event.documentId,
+            documentVersionId,
+            recordIdentity.topic,
+            recordIdentity.partition,
+            recordIdentity.offset,
+        )
         val sample = Timer.start(meterRegistry)
         while (true) {
+            var currentStage = "ACQUIRING"
             val acquired =
                 indexingJobRepository.start(
                     jobId = jobId,
@@ -114,7 +127,13 @@ class IndexingPipelineRunner(
             if (acquired != 1) {
                 // 상한 초과인지, 이미 완료됐는지, 아직 due가 아닌 RETRY_WAIT인지 구분한다.
                 if (indexingJobRepository.failIfAttemptsExceeded(jobId, maxAttempts) == 1) {
-                    log.info("job {} reached max attempts", jobId)
+                    log.error(
+                        "indexing job failed before acquisition: jobId={} eventId={} errorCode={} durationMs={}",
+                        jobId,
+                        event.eventId,
+                        "MAX_ATTEMPTS_EXCEEDED",
+                        elapsedMillis(jobStartedAt),
+                    )
                     sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
                     return
                 }
@@ -127,11 +146,34 @@ class IndexingPipelineRunner(
                     waitUntilRetryDue(jobId, job.nextRetryAt!!)
                     continue
                 }
-                log.info("job {} not acquired (already handled or attempts exceeded)", jobId)
+                log.info(
+                    "indexing job skipped: jobId={} eventId={} status={} reason=NOT_ACQUIRED durationMs={}",
+                    jobId,
+                    event.eventId,
+                    job?.status,
+                    elapsedMillis(jobStartedAt),
+                )
                 sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
                 return
             }
+            val attemptStartedAt = System.nanoTime()
+            log.info(
+                "indexing attempt started: jobId={} eventId={} documentId={} documentVersionId={}",
+                jobId,
+                event.eventId,
+                event.documentId,
+                documentVersionId,
+            )
             try {
+                currentStage = "VALIDATING"
+                val validationStartedAt = System.nanoTime()
+                log.info(
+                    "indexing stage started: stage={} jobId={} documentId={} documentVersionId={}",
+                    currentStage,
+                    jobId,
+                    event.documentId,
+                    documentVersionId,
+                )
                 val documentVersion = eventValidator.validate(event)
                 val document =
                     documentRepository.findById(event.documentId).orElseThrow {
@@ -143,8 +185,24 @@ class IndexingPipelineRunner(
                         "event tenantId=${event.tenantId} but document belongs to tenant ${document.tenantId}",
                     )
                 }
+                log.info(
+                    "indexing stage completed: stage={} jobId={} mimeType={} fileSizeBytes={} durationMs={}",
+                    currentStage,
+                    jobId,
+                    documentVersion.mimeType,
+                    documentVersion.fileSize,
+                    elapsedMillis(validationStartedAt),
+                )
 
-                processAcquiredJob(jobId, event, documentVersion)
+                processAcquiredJob(jobId, event, documentVersion) { stage -> currentStage = stage }
+                log.info(
+                    "indexing job completed: jobId={} eventId={} documentId={} documentVersionId={} durationMs={}",
+                    jobId,
+                    event.eventId,
+                    event.documentId,
+                    documentVersionId,
+                    elapsedMillis(jobStartedAt),
+                )
                 sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
                 return
             } catch (e: Exception) {
@@ -152,21 +210,54 @@ class IndexingPipelineRunner(
                 // 동일하게 기록한다(§1.4-(4)). IndexingProcessor가 이미 자체적으로 기록한 예외가
                 // 다시 올라온 경우는 recordFailure 내부의 "status != PROCESSING이면 조용히 반환"
                 // 가드 덕분에 중복 기록되지 않는다.
+                val errorCode = errorCodeOf(e)
+                val retryable = isRetryable(e)
                 val failedAt = indexingJobRepository.currentDbTimestamp()
                 val status =
                     indexingFailureService.recordFailure(
                         jobId = jobId,
-                        errorCode = errorCodeOf(e),
+                        errorCode = errorCode,
                         errorMessage = e.message ?: "indexing failed",
-                        permanent = !isRetryable(e),
+                        permanent = !retryable,
                         maxAttempts = maxAttempts,
                         // §3.8 선형 백오프 — 실제 곱셈은 attempt_count를 알고 있는 recordFailure가 한다.
                         baseDelay = baseDelay,
                         failedAt = failedAt,
                     )
+                val logMessage =
+                    "indexing attempt failed: stage={} jobId={} eventId={} documentId={} " +
+                        "errorCode={} errorType={} retryable={} resultingStatus={} attemptDurationMs={}"
+                if (status == IndexingJobStatus.RETRY_WAIT) {
+                    log.warn(
+                        logMessage,
+                        currentStage,
+                        jobId,
+                        event.eventId,
+                        event.documentId,
+                        errorCode,
+                        e::class.simpleName,
+                        retryable,
+                        status,
+                        elapsedMillis(attemptStartedAt),
+                        e,
+                    )
+                } else {
+                    log.error(
+                        logMessage,
+                        currentStage,
+                        jobId,
+                        event.eventId,
+                        event.documentId,
+                        errorCode,
+                        e::class.simpleName,
+                        retryable,
+                        status,
+                        elapsedMillis(attemptStartedAt),
+                        e,
+                    )
+                }
                 if (status != IndexingJobStatus.RETRY_WAIT) {
                     // FAILED(영구 실패 또는 상한 도달)이거나, 다른 워커가 이미 COMPLETED로 끝냈다.
-                    log.warn("job {} resolved to {}", jobId, status, e)
                     sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
                     return
                 }
@@ -226,6 +317,7 @@ class IndexingPipelineRunner(
         jobId: Long,
         event: IndexingRequestedEvent,
         documentVersion: DocumentVersionEntity,
+        onStageStarted: (String) -> Unit,
     ) {
         if (documentVersion.fileSize > maxFileSizeBytes) {
             throw FileTooLargeException(documentVersion.fileSize, maxFileSizeBytes)
@@ -243,21 +335,71 @@ class IndexingPipelineRunner(
         // 대기 중에는 직전 실패 시점의 phase(예: EMBEDDING)가 그대로 남아있다 — 이건 버그가
         // 아니라 "마지막으로 도달한 단계"를 보여주는 의도된 동작이다. 폴링하는 외부 API는
         // phase 값만으로 "지금 그 단계를 실행 중"이라고 단정하면 안 된다.
+        onStageStarted("DOWNLOADING")
+        val downloadStartedAt = System.nanoTime()
+        log.info(
+            "indexing stage started: stage=DOWNLOADING jobId={} documentId={} documentVersionId={}",
+            jobId,
+            event.documentId,
+            documentVersion.id,
+        )
         indexingJobRepository.updatePhase(jobId, "DOWNLOADING")
         val tempFile = downloadClient.download(documentVersion.sourceObjectKey)
+        log.info(
+            "indexing stage completed: stage=DOWNLOADING jobId={} downloadedBytes={} durationMs={}",
+            jobId,
+            Files.size(tempFile),
+            elapsedMillis(downloadStartedAt),
+        )
         try {
+            onStageStarted("VERIFYING_CONTENT")
+            val verificationStartedAt = System.nanoTime()
+            log.info("indexing stage started: stage=VERIFYING_CONTENT jobId={}", jobId)
             val actualHash = "sha256:" + sha256HexOf(tempFile)
             if (actualHash != documentVersion.contentHash) {
                 throw ContentIntegrityException(documentVersion.contentHash, actualHash)
             }
+            log.info(
+                "indexing stage completed: stage=VERIFYING_CONTENT jobId={} durationMs={}",
+                jobId,
+                elapsedMillis(verificationStartedAt),
+            )
 
+            onStageStarted("PARSING")
+            val parsingStartedAt = System.nanoTime()
+            log.info(
+                "indexing stage started: stage=PARSING jobId={} mimeType={}",
+                jobId,
+                documentVersion.mimeType,
+            )
             indexingJobRepository.updatePhase(jobId, "PARSING")
             val parser = parserRegistry.findParser(documentVersion.mimeType)
             val blocks = parsingTimeoutGuard.parse(parser, tempFile, documentVersion.mimeType)
+            log.info(
+                "indexing stage completed: stage=PARSING jobId={} blockCount={} durationMs={}",
+                jobId,
+                blocks.size,
+                elapsedMillis(parsingStartedAt),
+            )
 
+            onStageStarted("CHUNKING")
+            val chunkingStartedAt = System.nanoTime()
+            log.info(
+                "indexing stage started: stage=CHUNKING jobId={} strategy={} blockCount={}",
+                jobId,
+                chunkingStrategy,
+                blocks.size,
+            )
             indexingJobRepository.updatePhase(jobId, "CHUNKING")
             val chunks = chunkingService.chunk(blocks, chunkingStrategy)
             chunkGuard.assertValid(chunks)
+            log.info(
+                "indexing stage completed: stage=CHUNKING jobId={} chunkCount={} totalTokens={} durationMs={}",
+                jobId,
+                chunks.size,
+                chunks.sumOf { it.tokenCount ?: 0 },
+                elapsedMillis(chunkingStartedAt),
+            )
 
             val context =
                 IndexingContext(
@@ -268,6 +410,12 @@ class IndexingPipelineRunner(
                     extractedMetadata = null,
                 )
 
+            onStageStarted("EMBEDDING")
+            log.info(
+                "indexing stage started: stage=EMBEDDING jobId={} chunkCount={}",
+                jobId,
+                chunks.size,
+            )
             indexingJobRepository.updatePhase(jobId, "EMBEDDING")
             indexingProcessor.process(context, chunks)
         } finally {
@@ -342,7 +490,12 @@ class IndexingPipelineRunner(
         if (cause == null) {
             log.info("job {} redelivered before retry due, waiting {}ms in-process", jobId, waitDuration.toMillis())
         } else {
-            log.warn("job {} in RETRY_WAIT, retrying in-process after {}ms", jobId, waitDuration.toMillis(), cause)
+            log.info(
+                "indexing retry scheduled: jobId={} retryDelayMs={} previousErrorType={}",
+                jobId,
+                waitDuration.toMillis(),
+                cause::class.simpleName,
+            )
         }
         retryWaiter.waitFor(waitDuration)
     }
@@ -362,4 +515,7 @@ class IndexingPipelineRunner(
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
+
+    private fun elapsedMillis(startedAt: Long): Long =
+        (System.nanoTime() - startedAt) / 1_000_000
 }
