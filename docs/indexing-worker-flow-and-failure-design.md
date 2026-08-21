@@ -114,12 +114,12 @@ DB 제약은 [V1__create_indexing_schema.sql](../src/main/resources/db/migration
 |---|---|
 | `eventId` | Job 멱등 키로 사용하는 UUID |
 | `eventType` | `INDEXING_REQUESTED` 또는 `DOCUMENT_DELETED` |
-| `eventSchemaVersion` | 기본 지원 버전 `1` |
+| `schemaVersion` | 기본 지원 버전 `1` |
 | `tenantId` | DB의 문서 tenant와 일치해야 함 |
 | `documentId` | 대상 문서 ID이자 Kafka key로 사용해야 하는 값 |
 | `documentVersionId` | 인덱싱 이벤트에는 필수, 삭제 이벤트에는 `null` |
 | `occurredAt` | 이벤트 발생 시각. 현재 처리 순서나 DB 갱신 조건에는 사용하지 않음 |
-| `traceId` | `indexing_job.trace_id`와 로그 MDC에 저장 |
+| Kafka 헤더 `traceId` | UTF-8 문자열 바이트. `indexing_job.trace_id`와 로그 MDC에 저장 |
 
 `DOCUMENT_DELETED`의 `documentVersionId=null`은 “특정 버전이 없는 이벤트”라는 표현이며, 삭제 범위를 한 버전으로 제한한다는 뜻이 아니다. 현재 삭제 핸들러는 이 필드를 읽거나 `null`인지 검증하지 않고 `documentId`만 사용한다. 따라서 삭제 이벤트에 실수로 non-null 값이 들어와도 해당 값을 무시하고 문서 전체 범위의 삭제를 수행한다.
 
@@ -496,7 +496,7 @@ phase는 단계 진입 직전에 `DOWNLOADING`, `PARSING`, `CHUNKING`, `EMBEDDIN
 
 ### 10.2 로그와 trace
 
-레코드 처리 스레드에서 이벤트의 `traceId`를 MDC에 넣고 `finally`에서 제거한다. 콘솔 로그 패턴에도 trace ID가 포함된다. 비동기 그룹 처리에 사용하는 각 작업 내부에서 MDC를 설정하므로 listener thread의 MDC 상속에 의존하지 않는다.
+레코드 처리 스레드에서 Kafka 헤더의 `traceId`를 UTF-8 문자열로 읽어 MDC에 넣고 `finally`에서 제거한다. 콘솔 로그 패턴에도 trace ID가 포함된다. 비동기 그룹 처리에 사용하는 각 작업 내부에서 MDC를 설정하므로 listener thread의 MDC 상속에 의존하지 않는다.
 
 ### 10.3 커스텀 metric
 

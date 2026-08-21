@@ -1,5 +1,7 @@
 package com.osscontest.worker.indexing.consumer
 
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.core.read.ListAppender
 import com.osscontest.worker.indexing.pipeline.service.IndexingPipelineRunner
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.assertj.core.api.Assertions.assertThat
@@ -14,6 +16,7 @@ import org.mockito.kotlin.never
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
+import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.dao.DataAccessResourceFailureException
 import org.springframework.kafka.support.Acknowledgment
@@ -143,17 +146,20 @@ class IndexingKafkaListenerTest {
     }
 
     @Test
-    fun `이벤트 처리 중에는 traceId가 MDC에 설정되고 처리 후 worker thread에서 제거된다`() {
+    fun `Kafka 헤더 traceId는 이벤트와 MDC에 설정되고 처리 후 worker thread에서 제거된다`() {
         var capturedDuringCall: String? = null
-        whenever(runner.run(any(), any())).thenAnswer {
+        var capturedEventTraceId: String? = null
+        whenever(runner.run(any(), any())).thenAnswer { invocation ->
             capturedDuringCall = MDC.get("traceId")
+            capturedEventTraceId = invocation.getArgument<IndexingRequestedEvent>(0).traceId
             null
         }
         val records =
             listOf(
                 record(
                     key = "1",
-                    value = indexingRequestedJson(documentId = 1, traceId = "abc-123"),
+                    value = indexingRequestedJson(documentId = 1),
+                    traceId = "abc-123",
                 ),
             )
 
@@ -161,7 +167,40 @@ class IndexingKafkaListenerTest {
         val capturedAfterCall = executor.submit<String?> { MDC.get("traceId") }.get()
 
         assertThat(capturedDuringCall).isEqualTo("abc-123")
+        assertThat(capturedEventTraceId).isEqualTo("abc-123")
         assertThat(capturedAfterCall).isNull()
+    }
+
+    @Test
+    fun `이벤트 수신 로그에는 traceId와 Kafka 위치가 포함된다`() {
+        val logger = LoggerFactory.getLogger(IndexingKafkaListener::class.java) as Logger
+        val appender = ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>()
+        appender.start()
+        logger.addAppender(appender)
+
+        try {
+            val record =
+                record(
+                    key = "1",
+                    value = indexingRequestedJson(documentId = 1),
+                    partition = 3,
+                    offset = 99L,
+                    traceId = "trace-log-123",
+                )
+
+            listener.onMessage(listOf(record), ack)
+
+            val receivedLog =
+                appender.list.first { it.formattedMessage.startsWith("event received:") }
+            assertThat(receivedLog.mdcPropertyMap["traceId"]).isEqualTo("trace-log-123")
+            assertThat(receivedLog.formattedMessage)
+                .contains("eventType=INDEXING_REQUESTED")
+                .contains("documentId=1")
+                .contains("topic=indexing partition=3 offset=99")
+        } finally {
+            logger.detachAppender(appender)
+            appender.stop()
+        }
     }
 
     @Test
@@ -187,22 +226,25 @@ class IndexingKafkaListenerTest {
         value: String,
         partition: Int = 0,
         offset: Long = 0L,
+        traceId: String? = null,
     ) = ConsumerRecord<String, String>("indexing", partition, offset, key, value)
+        .also { record ->
+            traceId?.let { record.headers().add("traceId", it.toByteArray(Charsets.UTF_8)) }
+        }
 
     private fun indexingRequestedJson(
         documentId: Long,
         documentVersionId: Long = 1001,
-        traceId: String? = null,
     ) = """
         {"eventId":"${java.util.UUID.randomUUID()}","eventType":"INDEXING_REQUESTED",
-         "eventSchemaVersion":1,"tenantId":7,"documentId":$documentId,"documentVersionId":$documentVersionId,
-         "occurredAt":"2026-08-16T09:14:22Z","traceId":${traceId?.let { "\"$it\"" } ?: "null"}}
+         "schemaVersion":1,"tenantId":7,"documentId":$documentId,"documentVersionId":$documentVersionId,
+         "occurredAt":"2026-08-16T09:14:22Z"}
         """.trimIndent()
 
     private fun documentDeletedJson() =
         """
         {"eventId":"${java.util.UUID.randomUUID()}","eventType":"DOCUMENT_DELETED",
-         "eventSchemaVersion":1,"tenantId":7,"documentId":42,"documentVersionId":null,
-         "occurredAt":"2026-08-16T09:20:00Z","traceId":null}
+         "schemaVersion":1,"tenantId":7,"documentId":42,"documentVersionId":null,
+         "occurredAt":"2026-08-16T09:20:00Z"}
         """.trimIndent()
 }

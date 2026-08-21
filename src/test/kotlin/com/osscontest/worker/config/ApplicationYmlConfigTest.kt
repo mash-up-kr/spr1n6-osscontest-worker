@@ -7,6 +7,26 @@ import org.springframework.core.io.ClassPathResource
 
 class ApplicationYmlConfigTest {
     @Test
+    fun `Flyway migration is enabled on application startup`() {
+        val factory = YamlPropertiesFactoryBean()
+        factory.setResources(ClassPathResource("application.yml"))
+        val props = factory.getObject()!!
+
+        assertThat(props.getProperty("spring.flyway.enabled"))
+            .isEqualTo("true")
+    }
+
+    @Test
+    fun `Kafka topic은 환경변수 미설정 시 doc events v1을 사용한다`() {
+        val factory = YamlPropertiesFactoryBean()
+        factory.setResources(ClassPathResource("application.yml"))
+        val props = factory.getObject()!!
+
+        assertThat(props.getProperty("indexing.consumer.topic"))
+            .isEqualTo("\${INDEXING_KAFKA_TOPIC:doc.events.v1}")
+    }
+
+    @Test
     fun `max poll interval ms는 900초(900000)로 설정돼 있다`() {
         val factory = YamlPropertiesFactoryBean()
         factory.setResources(ClassPathResource("application.yml"))

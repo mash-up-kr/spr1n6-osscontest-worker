@@ -110,9 +110,6 @@ CREATE TABLE indexing_job (
     source_event_id             UUID NOT NULL,
     document_id                 BIGINT NOT NULL,
     document_version_id         BIGINT NOT NULL,
-    kafka_topic                 VARCHAR(255) NOT NULL,
-    kafka_partition             INTEGER NOT NULL,
-    kafka_offset                BIGINT NOT NULL,
 
     status                      VARCHAR(30) NOT NULL,
     attempt_count               INTEGER NOT NULL DEFAULT 0,
@@ -143,13 +140,7 @@ CREATE TABLE indexing_job (
             'FAILED'
         )),
     CONSTRAINT ck_indexing_job_attempt_count
-        CHECK (attempt_count >= 0),
-    CONSTRAINT ck_indexing_job_kafka_topic
-        CHECK (BTRIM(kafka_topic) <> ''),
-    CONSTRAINT ck_indexing_job_kafka_partition
-        CHECK (kafka_partition >= 0),
-    CONSTRAINT ck_indexing_job_kafka_offset
-        CHECK (kafka_offset >= 0)
+        CHECK (attempt_count >= 0)
 );
 
 CREATE UNIQUE INDEX uq_indexing_job_active_version
@@ -158,7 +149,6 @@ CREATE UNIQUE INDEX uq_indexing_job_active_version
 
 -- source_event_id 에는 의도적으로 FK 를 걸지 않는다.
 -- Outbox 행은 발행 후 정리할 수 있어야 하지만 Job 의 이력은 더 오래 남긴다.
--- kafka_topic + kafka_partition + kafka_offset은 수신한 Kafka record의 불변 위치다.
 
 
 -- =========================================================

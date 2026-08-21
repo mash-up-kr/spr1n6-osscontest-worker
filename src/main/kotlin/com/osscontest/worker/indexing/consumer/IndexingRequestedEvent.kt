@@ -6,7 +6,7 @@ import java.util.UUID
 data class IndexingRequestedEvent(
     val eventId: UUID,
     val eventType: String,            // "INDEXING_REQUESTED" | "DOCUMENT_DELETED"
-    val eventSchemaVersion: Int,
+    val schemaVersion: Int,
     val tenantId: Long,
     val documentId: Long,
     val documentVersionId: Long?,     // DOCUMENT_DELETED에는 없음 — null

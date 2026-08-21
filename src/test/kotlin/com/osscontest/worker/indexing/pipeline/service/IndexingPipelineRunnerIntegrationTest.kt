@@ -156,7 +156,7 @@ class IndexingPipelineRunnerIntegrationTest(
     ) = IndexingRequestedEvent(
         eventId = eventId,
         eventType = "INDEXING_REQUESTED",
-        eventSchemaVersion = 1,
+        schemaVersion = 1,
         tenantId = documentId,
         documentId = documentId,
         documentVersionId = documentVersionId,

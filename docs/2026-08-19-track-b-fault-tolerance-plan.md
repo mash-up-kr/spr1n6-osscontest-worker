@@ -2058,7 +2058,7 @@ git commit -m "fix: 재시도 실패 시각을 앱 시계 대신 DB 시계 기�
         traceId: String? = null,
     ) = """
         {"eventId":"${java.util.UUID.randomUUID()}","eventType":"INDEXING_REQUESTED",
-         "eventSchemaVersion":1,"tenantId":7,"documentId":$documentId,"documentVersionId":$documentVersionId,
+         "schemaVersion":1,"tenantId":7,"documentId":$documentId,"documentVersionId":$documentVersionId,
          "occurredAt":"2026-08-16T09:14:22Z","traceId":${traceId?.let { "\"$it\"" } ?: "null"}}
         """.trimIndent()
 ```
