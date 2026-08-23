@@ -7,15 +7,6 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: none
-  flyway:
-    enabled: true
-    clean-disabled: true
-    # API 서버가 적용한 migration도 같은 history table에 기록되지만 이 워커에는 해당 SQL이 없다.
-    # 워커 소유 migration을 검증·적용할 때 그 이력을 missing 오류로 취급하지 않는다.
-    ignore-migration-patterns:
-      - "*:missing"
-      - "*:future"
-      - "*:ignored"
   ai:
     model:
       embedding: openai

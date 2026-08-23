@@ -22,23 +22,15 @@ repositories {
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
-    // Boot 4는 오토컨피그를 기능별 모듈로 쪼갰다 — 순수 org.springframework.kafka:spring-kafka만
-    // 넣으면 KafkaAutoConfiguration(=ConcurrentKafkaListenerContainerFactory 빈, @EnableKafka)이
-    // 전혀 로드되지 않아 @KafkaListener(Task 11의 IndexingKafkaListener)가 동작하지 않는다.
-    // spring-boot-starter-kafka로 바꿔야 spring-kafka 자체와 오토컨피그를 함께 가져온다.
+    // Kafka listener 컨테이너와 관련 자동 설정을 함께 사용한다.
     implementation("org.springframework.boot:spring-boot-starter-kafka")
-    // P1-2 메트릭 계측 — MeterRegistry 빈을 제공하고, Spring for Apache Kafka가 이를 감지해
-    // 컨슈머 클라이언트 메트릭(kafka_consumer_lag 포함)을 자동으로 Micrometer에 등록한다.
+    // MeterRegistry와 Kafka consumer 메트릭을 자동으로 등록한다.
     implementation("org.springframework.boot:spring-boot-starter-actuator")
-    // 같은 이유로 ObjectMapper 빈(Task 11의 IndexingKafkaListener가 생성자로 주입받음)도
-    // spring-boot-starter-jackson 없이는 오토컨피그되지 않는다(Jackson 3 기준 모듈).
+    // 이벤트 역직렬화에 사용하는 Jackson 3 ObjectMapper를 자동 설정한다.
     implementation("org.springframework.boot:spring-boot-starter-jackson")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation("org.hibernate.orm:hibernate-vector")
-    // 원래 스켈레톤(a5d44d4)의 build.gradle.kts에 tools.jackson.module:jackson-module-kotlin이
-    // 있었다 — 이 프로젝트가 Jackson 3.x(패키지가 com.fasterxml.jackson.*가 아니라
-    // tools.jackson.*)를 쓴다는 신호다. Kotlin data class를 Jackson으로 (역)직렬화하려면
-    // (Task 11의 IndexingRequestedEvent 등) 이 모듈이 필요하다.
+    // Kotlin data class를 Jackson 3로 직렬화하고 역직렬화한다.
     implementation("tools.jackson.module:jackson-module-kotlin")
     runtimeOnly("org.postgresql:postgresql")
 
@@ -49,24 +41,18 @@ dependencies {
     // 파서
     implementation("org.apache.pdfbox:pdfbox:3.0.3")
     implementation("org.apache.poi:poi-ooxml:5.3.0")
-    // hwplib는 kr.dogfoot 그룹으로 Maven Central에 직접 배포된다 (jitpack 불필요, github.com/neolord0/hwplib는 별도 소스일 뿐 실제 배포 좌표는 kr.dogfoot).
+    // hwplib는 kr.dogfoot 그룹으로 Maven Central에 배포된다.
     implementation("kr.dogfoot:hwplib:1.1.9")
 
     // 토크나이저 (OpenAI cl100k_base 호환, FIXED_TOKEN 청킹에 사용)
     implementation("com.knuddels:jtokkit:1.1.0")
-
-    // flyway
-    implementation("org.flywaydb:flyway-core")
-    runtimeOnly("org.flywaydb:flyway-database-postgresql")
 
     // 임베딩
     implementation(platform("org.springframework.ai:spring-ai-bom:2.0.0"))
     implementation("org.springframework.ai:spring-ai-starter-model-openai")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
-    // Boot 4.1은 테스트 슬라이스 어노테이션(@DataJpaTest, @AutoConfigureTestDatabase)을
-    // spring-boot-starter-test에서 분리해 이 스타터로 옮겼다
-    // (패키지도 org.springframework.boot.data.jpa.test.autoconfigure / org.springframework.boot.jdbc.test.autoconfigure로 변경됨).
+    // Boot 4의 JPA 테스트 슬라이스 어노테이션을 제공한다.
     testImplementation("org.springframework.boot:spring-boot-starter-data-jpa-test")
     testImplementation("org.springframework.kafka:spring-kafka-test")
     testImplementation("com.h2database:h2")
