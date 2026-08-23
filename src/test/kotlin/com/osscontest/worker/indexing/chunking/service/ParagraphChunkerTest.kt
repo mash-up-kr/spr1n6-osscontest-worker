@@ -45,6 +45,7 @@ class ParagraphChunkerTest {
 
         assertThat(chunks[0].content).startsWith("[A]\n")
         assertThat(chunks[1].content).startsWith("[B]\n")
+        assertThat(chunks).allMatch { it.tokenCount == ChunkerTokenizer.tokenCount(it.content) }
     }
 
     @Test

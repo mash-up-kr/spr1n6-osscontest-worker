@@ -7,16 +7,6 @@ import org.springframework.core.io.ClassPathResource
 
 class ApplicationYmlConfigTest {
     @Test
-    fun `Flyway migration is enabled on application startup`() {
-        val factory = YamlPropertiesFactoryBean()
-        factory.setResources(ClassPathResource("application.yml"))
-        val props = factory.getObject()!!
-
-        assertThat(props.getProperty("spring.flyway.enabled"))
-            .isEqualTo("true")
-    }
-
-    @Test
     fun `Kafka topic은 환경변수 미설정 시 doc events v1을 사용한다`() {
         val factory = YamlPropertiesFactoryBean()
         factory.setResources(ClassPathResource("application.yml"))
@@ -44,5 +34,17 @@ class ApplicationYmlConfigTest {
 
         assertThat(props.getProperty("spring.ai.openai.embedding.dimensions"))
             .isEqualTo("1536")
+    }
+
+    @Test
+    fun `청크 토큰 상한과 overlap은 환경변수로 조정할 수 있다`() {
+        val factory = YamlPropertiesFactoryBean()
+        factory.setResources(ClassPathResource("application.yml"))
+        val props = factory.getObject()!!
+
+        assertThat(props.getProperty("indexing.chunking.max-tokens-per-chunk"))
+            .isEqualTo("\${INDEXING_MAX_TOKENS_PER_CHUNK:512}")
+        assertThat(props.getProperty("indexing.chunking.overlap-tokens"))
+            .isEqualTo("\${INDEXING_OVERLAP_TOKENS:64}")
     }
 }

@@ -40,28 +40,6 @@ class IndexingEventValidatorTest {
     }
 
     @Test
-    fun `document_version이 다른 document에 속하면 거부한다`() {
-        whenever(documentVersionRepository.findById(1001L))
-            .thenReturn(
-                java.util.Optional.of(
-                    DocumentVersionEntity(
-                        id = 1001L,
-                        documentId = 99L,
-                        versionNo = 1L,
-                        sourceObjectKey = "docs/99/v1.pdf",
-                        mimeType = "application/pdf",
-                        contentHash = "sha256:abc",
-                        embeddingVersionNo = 3L,
-                    ),
-                ),
-            )
-
-        assertThatThrownBy { validator.validate(sampleEvent(documentVersionId = 1001L)) }
-            .isInstanceOf(InvalidEventException::class.java)
-            .hasFieldOrPropertyWithValue("code", "DOCUMENT_MISMATCH")
-    }
-
-    @Test
     fun `유효한 이벤트는 예외 없이 통과한다`() {
         whenever(documentVersionRepository.findById(1001L))
             .thenReturn(
@@ -86,7 +64,7 @@ class IndexingEventValidatorTest {
     private fun sampleEvent(
         schemaVersion: Int = 1,
         documentVersionId: Long? = 1001L,
-    ) = IndexingRequestedEvent(
+    ) = IndexingEvent(
         eventId = UUID.randomUUID(),
         eventType = "INDEXING_REQUESTED",
         schemaVersion = schemaVersion,

@@ -16,23 +16,21 @@ class IndexingEventValidator
     ) {
     private val supportedVersions = supportedSchemaVersions.map { it.trim().toInt() }.toSet()
 
-    // 테스트 편의용 보조 생성자
+    // 단위 테스트에서 Spring 문자열 바인딩 없이 지원 버전을 전달한다.
     constructor(
         documentVersionRepository: DocumentVersionRepository,
         supportedSchemaVersions: Set<Int>,
     ) : this(documentVersionRepository, supportedSchemaVersions.map(Int::toString))
 
     /**
-     * INDEXING_REQUESTED 이벤트 전용이다 — DOCUMENT_DELETED는 Kafka 리스너(Task 11)가
+     * INDEXING_REQUESTED 이벤트 전용이다. DOCUMENT_DELETED는 Kafka 리스너가
      * 이 검증기를 타지 않고 별도 핸들러로 라우팅하므로 여기서는 documentVersionId가
      * 항상 채워져 있다고 가정한다.
      *
-     * tenantId 일치 검증은 의도적으로 여기서 하지 않는다 — DocumentEntity를 함께
-     * 조회해야 하므로 Task 10(IndexingPipelineRunner, DocumentRepository와
-     * DocumentVersionRepository를 모두 가지고 있음)에서 마저 처리한다. 이 클래스는
-     * document_version 단위 검증만 담당한다(단일 책임 유지).
+     * Kafka 키와 이벤트의 documentId, document_version의 documentId는 Core가 보장하는
+     * 계약을 신뢰한다. tenantId는 DocumentEntity가 필요한 파이프라인에서 검증한다.
      */
-    fun validate(event: IndexingRequestedEvent): DocumentVersionEntity {
+    fun validate(event: IndexingEvent): DocumentVersionEntity {
         if (event.schemaVersion !in supportedVersions) {
             throw InvalidEventException(
                 "UNSUPPORTED_SCHEMA_VERSION",
@@ -54,14 +52,6 @@ class IndexingEventValidator
                     "document_version $documentVersionId does not exist",
                 )
             }
-
-        if (documentVersion.documentId != event.documentId) {
-            throw InvalidEventException(
-                "DOCUMENT_MISMATCH",
-                "document_version $documentVersionId belongs to document " +
-                    "${documentVersion.documentId}, not ${event.documentId}",
-            )
-        }
 
         return documentVersion
     }

@@ -32,10 +32,12 @@ class FixedTokenChunkerTest {
                 ParsedBlock(0, BlockType.PARAGRAPH, "본문", null, listOf("3. 아키텍처", "3.2 벡터 저장")),
             )
 
-        val chunks = chunker.chunk(blocks)
+        val chunks = FixedTokenChunker(maxTokensPerChunk = 64).chunk(blocks)
 
         assertThat(chunks.single().content).startsWith("[3. 아키텍처 > 3.2 벡터 저장]\n")
         assertThat(chunks.single().content).endsWith("본문")
+        assertThat(chunks).allMatch { it.tokenCount <= 64 }
+        assertThat(chunks).allMatch { it.tokenCount == ChunkerTokenizer.tokenCount(it.content) }
     }
 
     @Test

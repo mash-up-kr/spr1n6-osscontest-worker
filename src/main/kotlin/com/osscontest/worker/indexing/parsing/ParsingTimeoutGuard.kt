@@ -14,12 +14,8 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
-import java.util.concurrent.atomic.AtomicInteger
 
-// P0-2-b: 파싱이 hang되면 max.poll.interval.ms를 넘겨 불필요한 리밸런스가 난다. 전용
-// 스레드풀에서 파싱을 실행하고 시간 안에 못 끝나면 future를 취소한 뒤 ParseTimeoutException을
-// 던진다(재시도 가능 — isRetryable() 기본값을 그대로 따른다, 별도 화이트리스트 등록 불필요).
-// IOException(손상 파일)은 CorruptedFileException(영구 실패)으로 여기서 감싼다.
+/** 파싱을 전용 스레드풀에서 제한 시간 안에 실행하고 손상 파일의 I/O 실패를 영구 오류로 변환한다. */
 @Component
 class ParsingTimeoutGuard(
     @Value("\${indexing.limits.parse-timeout:PT60S}")
@@ -28,14 +24,8 @@ class ParsingTimeoutGuard(
     concurrency: Int,
     private val meterRegistry: MeterRegistry,
 ) {
-    // IndexingBatchExecutorConfig의 executor(문서 처리 자체)와는 다른 풀이다 — 파싱이
-    // 걸려도 취소된 스레드가 이 풀에만 누적된다(parse_thread_leaked, P1-2).
+    // 문서 처리 executor와 분리해 파싱 지연이 다른 단계의 작업 슬롯을 직접 점유하지 않게 한다.
     private val parseExecutor = Executors.newFixedThreadPool(concurrency)
-    private val leakedThreadCount = AtomicInteger(0)
-
-    init {
-        meterRegistry.gauge("parse_thread_leaked", leakedThreadCount)
-    }
 
     fun parse(
         parser: DocumentParser,
@@ -56,7 +46,7 @@ class ParsingTimeoutGuard(
             future.get(parseTimeout.toMillis(), TimeUnit.MILLISECONDS)
         } catch (e: TimeoutException) {
             future.cancel(true)
-            leakedThreadCount.incrementAndGet()
+            meterRegistry.counter("parse_timeout_total").increment()
             throw ParseTimeoutException(mimeType, parseTimeout)
         } catch (e: ExecutionException) {
             val cause = e.cause

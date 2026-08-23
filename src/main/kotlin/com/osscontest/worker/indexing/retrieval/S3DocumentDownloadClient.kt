@@ -26,7 +26,16 @@ class S3DocumentDownloadClient(
         // 던진다. 그래서 경로만 얻고 파일 자체는 SDK가 쓰기 전에 지운다.
         val tempFile = Files.createTempFile("indexing-download-", ".tmp")
         Files.delete(tempFile)
-        s3Client.getObject(request, ResponseTransformer.toFile(tempFile))
-        return tempFile
+        return try {
+            s3Client.getObject(request, ResponseTransformer.toFile(tempFile))
+            tempFile
+        } catch (failure: Throwable) {
+            try {
+                Files.deleteIfExists(tempFile)
+            } catch (cleanupFailure: Throwable) {
+                failure.addSuppressed(cleanupFailure)
+            }
+            throw failure
+        }
     }
 }
