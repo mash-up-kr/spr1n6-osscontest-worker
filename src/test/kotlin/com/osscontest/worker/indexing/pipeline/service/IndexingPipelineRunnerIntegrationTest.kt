@@ -1,18 +1,24 @@
 package com.osscontest.worker.indexing.pipeline.service
 
-import com.osscontest.worker.indexing.consumer.IndexingRequestedEvent
+import com.osscontest.worker.indexing.consumer.IndexingEvent
 import com.osscontest.worker.indexing.consumer.KafkaRecordIdentity
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
 import com.osscontest.worker.indexing.retrieval.DocumentDownloadClient
+import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.TestInstance
 import org.mockito.kotlin.whenever
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Primary
+import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.context.bean.override.mockito.MockitoBean
 import org.springframework.test.context.jdbc.Sql
@@ -29,15 +35,15 @@ import java.util.UUID
         "indexing.retry.base-delay=PT0.01S",
     ],
 )
-@ActiveProfiles("local")
+@ActiveProfiles("integration")
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class IndexingPipelineRunnerIntegrationTest(
     private val pipelineRunner: IndexingPipelineRunner,
     private val indexingJobRepository: IndexingJobRepository,
     private val fakeIndexingProcessor: FakeIndexingProcessor,
+    private val jdbcTemplate: JdbcTemplate,
 ) {
-    // Spring Boot가 @SpringBootTest 클래스 안의 중첩 @TestConfiguration을 자동으로 인식해서
-    // 메인 컨텍스트에 얹어준다 — IndexingProcessor의 실제 구현이 없는(Task 2) 이 브랜치에서
-    // 유일하게 이 fake만 빈으로 등록된다.
+    // 실제 임베딩 공급자 대신 실패 횟수와 Job 완료를 제어할 수 있는 테스트 대역을 사용한다.
     @TestConfiguration
     class FakeIndexingProcessorConfig {
         @Bean
@@ -49,6 +55,26 @@ class IndexingPipelineRunnerIntegrationTest(
     // 원문 다운로드는 실제 S3/MinIO에 의존하지 않도록 mock으로 대체한다.
     @MockitoBean
     private lateinit var downloadClient: DocumentDownloadClient
+
+    @BeforeAll
+    fun verifyDedicatedDatabase() {
+        assertDedicatedIntegrationDatabase(jdbcTemplate)
+    }
+
+    @BeforeEach
+    fun resetProcessor() {
+        fakeIndexingProcessor.reset()
+    }
+
+    @AfterEach
+    fun cleanUp() {
+        jdbcTemplate.update("DELETE FROM indexing_job")
+        jdbcTemplate.update("DELETE FROM document_chunk")
+        jdbcTemplate.update("DELETE FROM outbox_event")
+        jdbcTemplate.update("DELETE FROM document_version")
+        jdbcTemplate.update("DELETE FROM document")
+        jdbcTemplate.update("DELETE FROM tenant")
+    }
 
     // 아래 @Sql 시드들이 쓰는 900001~900003는 이 테스트 스위트가 예약해 둔 테스트 전용 ID
     // 범위다 — 로컬/CI에서 언제든 지우고 다시 만들어도 되는, 수동 개발/데모 데이터와 공유하지
@@ -153,7 +179,7 @@ class IndexingPipelineRunnerIntegrationTest(
         documentId: Long,
         documentVersionId: Long,
         eventId: UUID = UUID.randomUUID(),
-    ) = IndexingRequestedEvent(
+    ) = IndexingEvent(
         eventId = eventId,
         eventType = "INDEXING_REQUESTED",
         schemaVersion = 1,

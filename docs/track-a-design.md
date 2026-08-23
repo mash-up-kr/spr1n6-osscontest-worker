@@ -8,9 +8,8 @@
 특히 임베딩 관련 코드를 추가할 때 그 코드를 `pipeline`, `chunking`, `parsing`에 넣지
 않도록 하는 것이 목적이다.
 
-현재 Worker는 Kafka 수신부터 파싱·청킹까지는 전부 구현되어 있다. 임베딩 호출과
-`document_chunk` 저장, 검색 버전 승격을 담당하는 `IndexingProcessor`는 계약(인터페이스)만
-정의되어 있고, 실제 구현은 이 레포 밖(별도 담당자)에서 이루어진다.
+현재 Worker는 Kafka 수신부터 파싱·청킹·임베딩·publication까지 구현한다.
+`IndexingProcessor` 인터페이스가 파이프라인 조율과 실제 저장 구현의 경계를 만든다.
 
 ---
 
@@ -47,7 +46,7 @@ com.osscontest.worker.indexing
 │   ├── IndexingBatchExecutorConfig.kt    # 그룹 동시 처리용 고정 스레드풀
 │   ├── IndexingEventValidator.kt         # INDEXING_REQUESTED 스키마/문서버전 검증
 │   ├── DocumentDeletionHandler.kt        # DOCUMENT_DELETED 스키마/테넌트 검증 후 위임
-│   ├── IndexingRequestedEvent.kt
+│   ├── IndexingEvent.kt
 │   ├── InvalidEventException.kt
 │   └── DeserializationException.kt
 │
@@ -56,8 +55,9 @@ com.osscontest.worker.indexing
 │   │   ├── IndexingContext.kt
 │   │   └── IndexingJobStatus.kt
 │   └── service
-│       ├── IndexingPipelineRunner.kt     # 전체 흐름 조율 + 인프로세스 재시도 루프
-│       └── IndexingProcessor.kt          # 인터페이스만 — 구현은 이 레포 밖
+│       ├── IndexingPipelineRunner.kt     # Job 조율 + 인프로세스 재시도 루프
+│       ├── IndexingAttemptProcessor.kt   # 다운로드~임베딩 단계 실행
+│       └── IndexingProcessor.kt          # publication 경계 인터페이스
 │
 ├── retrieval
 │   ├── DocumentDownloadClient.kt
@@ -308,9 +308,9 @@ DocumentDeletionService.handleDocumentDeleted(documentId)
 
 ## 6. `IndexingProcessor`를 구현하는 방법
 
-`IndexingProcessor`는 이 레포에 인터페이스만 존재한다. 실제 구현은 별도 브랜치/담당자가
-작성하며, `pipeline.service` 패키지 **밖**에 있어야 한다(구현체가 이 레포에 들어온다면
-`embedding`/`publication` 같은 별도 최상위 패키지를 새로 만든다).
+`IndexingProcessor`는 파이프라인과 publication 구현 사이의 경계다. 구현체인
+`EmbeddingIndexingProcessor`는 `embedding.service`에 두어 조율 패키지가 세부 구현을
+직접 알지 않게 한다.
 
 ```kotlin
 interface IndexingProcessor {
@@ -363,12 +363,12 @@ indexingProcessor.process(
 
 ```text
 pipeline
-├── consumer.IndexingRequestedEvent / InvalidEventException
+├── consumer.IndexingEvent / InvalidEventException
 ├── retrieval
 ├── parsing
 ├── chunking
 ├── publication
-└── pipeline.service.IndexingProcessor (인터페이스, 구현은 레포 밖)
+└── pipeline.service.IndexingProcessor (publication 경계 인터페이스)
 ```
 
 기능 패키지끼리는 불필요하게 서로 의존하지 않는다.

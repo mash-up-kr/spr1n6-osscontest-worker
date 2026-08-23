@@ -26,11 +26,11 @@ Track A는 **"정합성이 깨지지 않는 파이프라인"**을 목표로 했�
 | A-2 | 리밸런스 중 같은 이벤트 중복 소비 | `source_event_id UNIQUE` + Kafka topic/partition/offset 비교 + `uq_indexing_job_active_version` + `UNIQUE(document_version_id, chunk_no)` UPSERT | 스펙 §1.1, 현재 구현 문서 §5.1 |
 | A-3 | 두 워커가 동시에 같은 Job 소유 | 배제하지 않고 수렴 — 청킹 결정성(§3.6) + UPSERT | 스펙 §1.2, 부록 원칙 4 |
 | A-4 | poison pill 크래시 루프 | 재획득 쿼리의 `attempt_count < :maxAttempts` 캡 → `FAILED('MAX_ATTEMPTS_EXCEEDED')` | 스펙 §1.4-(1), plan Task 3 |
-| A-5 | 실패 시 ack 보류로 인한 hot loop | `finally { ack.acknowledge() }` — Job이 최종 상태(success/failed) 도달 시 항상 ack | 스펙 §3.1, plan Task 11 |
+| A-5 | 실패 시 ack 보류로 인한 hot loop | Job이 최종 상태(success/failed)에 도달하거나 영구적인 잘못된 이벤트로 판정된 뒤 ack | 스펙 §3.1 |
 | A-6 | 잘못된 이벤트의 무한 재시도 | `IndexingEventValidator` → `InvalidEventException` 즉시 종결 + ack | 스펙 §0.3, plan Task 5 |
 | A-7 | 역직렬화 실패 메시지가 파티션을 막는 것 | `DeserializationException` catch → 로그 + ack | plan Task 11 |
 | A-8 | 오래된 업로드가 최신 업로드를 덮어씀 | `document_version.embedding_version_no` fencing 비교 | 스펙 §1.3 문제2, §1.4-(3) |
-| A-9 | STALE 버전에 임베딩 비용 낭비 | 다운로드 **이전** 조기 fencing 판정 → `COMPLETED(chunk_count=null)` | 스펙 §3.1, plan Task 10 |
+| A-9 | 느린 이전 버전이 최신 검색 결과를 덮어씀 | 이전 버전도 청크는 보관하되 검색 포인터 승격만 `embedding_version_no`로 차단 | 스펙 §3.1 |
 | A-10 | 실패 쓰기가 성공 결과를 덮어씀 | 실패 쓰기에만 `status = 'PROCESSING'` 가드 | 스펙 §1.4-(4) |
 | A-11 | 재청킹으로 청크 수가 줄었을 때 잔존 청크 | 현재 구현은 trailing DELETE(`chunk_no > :lastChunkNo`)를 수행한다. 같은 코드·설정이면 청킹이 결정적이지만 배포 버전, 전략, parser/tokenizer 또는 과거 데이터가 다를 때를 방어한다 | 현재 구현 문서 §5.9 |
 | A-12 | 스캔 PDF가 "성공"으로 위장 | `ChunkGuard.assertValid()` — 빈 청크 → `EMPTY_EXTRACTION` | 스펙 §3.6, plan Task 9 |
@@ -333,7 +333,7 @@ indexing:
 Kafka 리스너는 배치로 레코드를 받아 `documentId`로 그룹핑한 뒤, 그룹마다 `IndexingPipelineRunner.run()`을 한 번 호출한다. 재시도는 이 `run()` 안의 루프가 전담하고, ack은 배치 전체(모든 그룹)가 끝난 뒤 한 번만 호출된다:
 
 ```kotlin
-fun run(event: IndexingRequestedEvent, recordIdentity: KafkaRecordIdentity) {
+fun run(event: IndexingEvent, recordIdentity: KafkaRecordIdentity) {
     val jobId = acquireJobId(event, documentVersionId, recordIdentity) ?: return
 
     while (true) {
@@ -684,7 +684,7 @@ HAVING j.total_chunks <> count(c.id);
 
 ## 7. 다른 담당자에게 요청할 것
 
-### 7.1 태성님 (`IndexingProcessor`)
+### 7.1 인덱싱 처리 보강
 
 - 임베딩 실패를 `TransientIndexingException`/`PermanentIndexingException`으로 감싸기
 - 임베딩 호출에 타임아웃 30초 — P0-3 예산의 구성 요소

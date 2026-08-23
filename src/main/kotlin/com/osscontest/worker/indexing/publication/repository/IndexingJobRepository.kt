@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional
 import java.time.LocalDateTime
 import java.util.UUID
 
+/** Core 서버가 마이그레이션하는 공용 스키마에서 Worker의 인덱싱 Job 상태만 관리한다. */
 interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
     fun findBySourceEventId(sourceEventId: UUID): IndexingJobEntity?
 
@@ -142,9 +143,8 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
         @Param("jobId") jobId: Long,
     ): IndexingJobEntity?
 
-    // §3.9-(1): 재시도 폴러가 삭제된 문서의 Job을 다시 집지 못하게, 활성 Job을 먼저 종결시킨다.
-    // PROCESSING 중인 Job은 이 시점에 즉시 인터럽트되진 않지만(§3.9), 그 뒤 완료돼도
-    // Step 1의 chunk 삭제가 스윕으로 재실행되며 수렴한다.
+    // 삭제된 문서의 활성 Job을 먼저 종결한다. 실행 중인 Job은 즉시 중단되지 않지만
+    // 뒤이어 완료되더라도 삭제 스윕이 청크 정리를 반복해 같은 상태로 수렴한다.
     @Modifying
     @Transactional
     @Query(
@@ -165,7 +165,7 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
         @Param("documentId") documentId: Long,
     ): Int
 
-    // P1-1: 진행률 노출. 완료 후가 아니라 각 단계 "진입 직전"에 호출해야 사용자가 가장 오래
+    // 완료 후가 아니라 각 단계 진입 직전에 기록해야 사용자가 가장 오래
     // 걸리는 구간(특히 EMBEDDING)에서도 멈춘 것처럼 보이지 않는다.
     @Modifying
     @Transactional
@@ -178,9 +178,7 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
         @Param("phase") phase: String,
     ): Int
 
-    // P2-2: recordFailure()가 next_retry_at을 계산할 때 애플리케이션 시각이 아니라 DB 시각을
-    // 쓰도록 한다 — start()의 재획득 비교(next_retry_at <= CURRENT_TIMESTAMP)도 DB 시각이라
-    // 두 시각의 출처를 맞춰야 NTP 오차로 인한 크래시 재획득 타이밍 어긋남이 없다(B-Gap-5).
+    // 실패 시각과 재획득 조건을 모두 DB 시각으로 계산해 호스트 간 시계 오차를 제거한다.
     @Query(value = "SELECT CURRENT_TIMESTAMP", nativeQuery = true)
     fun currentDbTimestamp(): LocalDateTime
 }

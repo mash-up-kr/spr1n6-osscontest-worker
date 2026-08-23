@@ -7,9 +7,8 @@ import org.springframework.kafka.config.KafkaListenerEndpointRegistry
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 
-// P0-5-b: DB가 흔들리는 동안 리스너를 pause해 Task 1의 nack이 5초마다 같은 배치를
-// 재전달받는 hot loop가 되는 걸 막는다. pause()는 poll()만 멈추고 heartbeat/session은
-// 그대로 유지되므로 리밸런스가 나지 않는다(FAULT_TOLERANCE.md §3 P0-5-(b)).
+// DB 장애 중에는 리스너를 pause해 nack된 배치가 짧은 간격으로 반복되는 것을 막는다.
+// pause는 poll만 멈추고 heartbeat는 유지하므로 불필요한 리밸런스를 피할 수 있다.
 @Component
 class DbHealthGate(
     private val registry: KafkaListenerEndpointRegistry,

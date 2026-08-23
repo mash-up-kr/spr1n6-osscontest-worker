@@ -15,10 +15,7 @@ class PdfDocumentParserTest {
 
     @Test
     fun `PDF 텍스트를 페이지 번호와 함께 파싱한다`() {
-        // NOTE: Standard 14 fonts (e.g. Helvetica) only support WinAnsiEncoding, which has no
-        // Korean glyphs — PDType1Font.showText() throws IllegalArgumentException for U+AC00-D7A3.
-        // Using ASCII content here to isolate the test from that PDFBox font-encoding constraint;
-        // the parser itself is charset-agnostic and doesn't care what language the PDF contains.
+        // PDFBox 기본 Helvetica 글꼴은 한글을 지원하지 않으므로 테스트 PDF에는 ASCII를 쓴다.
         val bytes = onePagePdf("pgvector is a PostgreSQL extension for vector data.")
 
         val blocks = parser.parse(bytes.inputStream()).toList()
@@ -31,12 +28,7 @@ class PdfDocumentParserTest {
 
     @Test
     fun `한 페이지 안에서 빈 줄로 구분된 두 문단을 별개 블록으로 분리한다`() {
-        // A lone-space text line between two groups of real text lines is how PDFTextStripper's
-        // default extraction actually renders a blank line as "\n \n" in the stripped text
-        // (verified empirically — PDFTextStripper's built-in paragraphStart/paragraphEnd are
-        // empty by default, so vertical spacing alone does NOT produce a blank line; only an
-        // actual whitespace glyph run does). This is what pageText.split(Regex("\n\\s*\n"))
-        // in the parser is designed to split on.
+        // 공백 글리프 한 줄은 PDFTextStripper 결과에서 빈 줄이 되어 문단 구분자로 쓰인다.
         val bytes =
             multiPagePdf(
                 listOf(
@@ -59,16 +51,8 @@ class PdfDocumentParserTest {
 
     @Test
     fun `공백 글리프 없이 순수한 수직 간격만으로도 두 문단을 분리한다`() {
-        // Realistic PDFs (from Word/LaTeX/Google Docs etc.) mark a paragraph break purely with
-        // extra vertical spacing between lines — no literal whitespace glyph is present. PDFBox's
-        // PDFTextStripper has a built-in vertical-gap paragraph detector (dropThreshold, default
-        // 2.5x the previous line height) that fires internally, but by default it writes nothing
-        // extra to the output because paragraphStart/paragraphEnd default to "" — so without
-        // configuring paragraphStart, a page like this would extract as one run-on paragraph and
-        // pageText.split(Regex("\n\\s*\n")) would never split. PdfDocumentParser sets
-        // paragraphStart = "\n" specifically so this realistic case produces the blank-line gap
-        // the split regex needs. Two normal-pitch lines (14pt), then a ~40pt jump (well above the
-        // ~30-35pt dropThreshold for 12pt text), then two more normal-pitch lines.
+        // 실제 문서는 공백 글리프 없이 수직 간격만으로 문단을 나누기도 한다. 14pt 줄 간격 뒤
+        // 40pt 간격을 두어 PDFTextStripper의 문단 감지 결과가 빈 줄로 출력되는지 검증한다.
         val bytes =
             pageWithVerticalGap(
                 topLines = listOf("paragraph one line a.", "paragraph one line b."),
@@ -98,7 +82,7 @@ class PdfDocumentParserTest {
         assertThat(blocks).hasSize(3)
         assertThat(blocks.map { it.pageNo }).containsExactly(1, 1, 2)
         assertThat(blocks.map { it.order }).containsExactly(0, 1, 2)
-        // strictly increasing across the whole document, not reset per page
+        // 블록 순서는 페이지가 바뀌어도 초기화하지 않는다.
         assertThat(blocks.zipWithNext().all { (a, b) -> b.order == a.order + 1 }).isTrue
     }
 
@@ -107,7 +91,7 @@ class PdfDocumentParserTest {
         val bytes =
             multiPagePdf(
                 listOf("page one paragraph."),
-                null, // blank page: PDPage() added with no content stream at all
+                null, // 콘텐츠 스트림이 없는 빈 페이지
                 listOf("page three paragraph."),
             )
 
@@ -136,13 +120,7 @@ class PdfDocumentParserTest {
         }
     }
 
-    /**
-     * Builds a multi-page PDF. Each element is the list of text lines to render top-to-bottom
-     * on that page, or `null` for a page with no content stream at all (a truly blank page).
-     * A line consisting of a single space (`" "`) renders as its own whitespace-only text run,
-     * which PDFTextStripper surfaces as a blank line (`"\n \n"`) in the extracted text — the
-     * gap the parser's paragraph-split regex looks for.
-     */
+    /** 각 원소를 한 페이지의 줄 목록으로 렌더링하며 `null`은 콘텐츠 스트림 없는 빈 페이지다. */
     private fun multiPagePdf(vararg pages: List<String>?): ByteArray {
         PDDocument().use { doc ->
             for (lines in pages) {
@@ -168,12 +146,7 @@ class PdfDocumentParserTest {
         }
     }
 
-    /**
-     * Builds a single-page PDF with two groups of lines (normal 14pt line pitch within each
-     * group) separated by [gapBeforeBottom] — a pure vertical jump, no whitespace glyph involved.
-     * Used to validate paragraph splitting against realistic PDF paragraph-break geometry (as
-     * opposed to the artificial space-glyph line used elsewhere in this file).
-     */
+    /** 두 줄 그룹 사이에 공백 글리프 없이 [gapBeforeBottom]만큼 수직 간격을 둔 PDF를 만든다. */
     private fun pageWithVerticalGap(
         topLines: List<String>,
         gapBeforeBottom: Float,

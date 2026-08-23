@@ -1,0 +1,16 @@
+spring:
+  datasource:
+    url: ${INTEGRATION_DB_URL}
+    username: ${INTEGRATION_DB_USERNAME}
+    password: ${INTEGRATION_DB_PASSWORD}
+  ai:
+    openai:
+      api-key: ${INTEGRATION_OPENAI_API_KEY}
+  kafka:
+    bootstrap-servers: ${INTEGRATION_KAFKA_BOOTSTRAP_SERVERS}
+
+indexing:
+  storage:
+    bucket: ${INTEGRATION_STORAGE_BUCKET}
+    endpoint: ${INTEGRATION_STORAGE_ENDPOINT:}
+    region: ${INTEGRATION_STORAGE_REGION:us-east-1}

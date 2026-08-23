@@ -1,5 +1,6 @@
 package com.osscontest.worker.indexing.publication.repository
 
+import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Tag
@@ -12,17 +13,17 @@ import org.springframework.test.context.ActiveProfiles
 @Tag("integration")
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@ActiveProfiles("local")
+@ActiveProfiles("integration")
 class DocumentChunkRepositoryIntegrationTest(
     private val documentChunkRepository: DocumentChunkRepository,
     private val jdbcTemplate: JdbcTemplate,
 ) {
-    // document_chunk.embedding은 vector(1536) NOT NULL이다. DocumentChunkEntity는 삭제 전용이라
-    // 이 컬럼을 매핑하지 않지만, 원시 SQL로 행을 시딩하려면 제약을 만족시키는 더미 값이 필요하다.
+    // document_chunk.embedding의 vector(1536) NOT NULL 제약을 만족시키는 시드 값이다.
     private val zeroVector = "[" + (1..1536).joinToString(",") { "0" } + "]"
 
     @BeforeEach
     fun seedTenant() {
+        assertDedicatedIntegrationDatabase(jdbcTemplate)
         jdbcTemplate.update(
             "INSERT INTO tenant (id, name, created_at) VALUES (1, 'test-tenant', CURRENT_TIMESTAMP)",
         )

@@ -90,7 +90,7 @@ IndexingPipelineRunner  DocumentDeletionHandler
 - 결정적인 청킹 결과: 같은 입력과 설정이면 같은 `chunk_no`, content, hash 생성
 - 검색 버전 fencing: 더 낮거나 같은 `embedding_version_no`가 검색 포인터를 덮어쓰지 못함
 
-DB 제약은 [V1__create_indexing_schema.sql](../src/main/resources/db/migration/V1__create_indexing_schema.sql), 청크 UPSERT는 [DocumentChunkWriter](../src/main/kotlin/com/osscontest/worker/indexing/publication/repository/DocumentChunkWriter.kt), 검색 포인터 fencing은 [DocumentRepository](../src/main/kotlin/com/osscontest/worker/indexing/publication/repository/DocumentRepository.kt)에 있다.
+DB 스키마와 마이그레이션은 Core 서버가 소유한다. Worker는 합의된 제약을 전제로 [DocumentChunkWriter](../src/main/kotlin/com/osscontest/worker/indexing/publication/repository/DocumentChunkWriter.kt)의 청크 UPSERT와 [DocumentRepository](../src/main/kotlin/com/osscontest/worker/indexing/publication/repository/DocumentRepository.kt)의 검색 포인터 fencing을 수행한다.
 
 ### 3.3 외부 API 호출과 DB publication을 분리한다
 
@@ -108,7 +108,7 @@ DB 제약은 [V1__create_indexing_schema.sql](../src/main/resources/db/migration
 
 ### 4.1 이벤트 계약
 
-공통 DTO는 [IndexingRequestedEvent](../src/main/kotlin/com/osscontest/worker/indexing/consumer/IndexingRequestedEvent.kt)다.
+공통 DTO는 [IndexingEvent](../src/main/kotlin/com/osscontest/worker/indexing/consumer/IndexingEvent.kt)다.
 
 | 필드 | 계약 |
 |---|---|
@@ -135,14 +135,14 @@ DB 제약은 [V1__create_indexing_schema.sql](../src/main/resources/db/migration
 
 ### 4.3 ack/nack 결정표
 
-여기서 “역직렬화”는 이미 `String`으로 전달된 `ConsumerRecord.value()` JSON을 Jackson으로 `IndexingRequestedEvent`에 매핑하는 단계다. JSON 문법 오류, UUID/시각/숫자 타입 변환 실패, non-null 필드 누락 등이 여기에 해당하며 PDF/HWP 원문 파싱 실패와는 별개다. Kafka wire payload를 `String`으로 만드는 consumer deserializer에서 발생한 실패는 이 `processRecord()`의 catch 범위에 들어오지 않는다.
+여기서 “역직렬화”는 이미 `String`으로 전달된 `ConsumerRecord.value()` JSON을 Jackson으로 `IndexingEvent`에 매핑하는 단계다. JSON 문법 오류, UUID/시각/숫자 타입 변환 실패, non-null 필드 누락 등이 여기에 해당하며 PDF/HWP 원문 파싱 실패와는 별개다. Kafka wire payload를 `String`으로 만드는 consumer deserializer에서 발생한 실패는 이 `processRecord()`의 catch 범위에 들어오지 않는다.
 
 | 결과 | 현재 동작 | 이유와 영향 |
 |---|---|---|
 | 전체 정상 또는 Job이 `COMPLETED`/`FAILED`로 수렴 | 배치 ack | Kafka 재전달이 더 필요하지 않음 |
 | 역직렬화 실패 | 로그 후 해당 레코드 폐기, 최종 배치 ack | poison message가 파티션을 영구 차단하지 않게 함. DB/DLQ 기록은 없음 |
 | 지원하지 않는 이벤트/검증 실패 | 로그 또는 Job `FAILED`, 최종 배치 ack | 동일 입력 재시도가 의미 없다고 판단 |
-| Runner/DeletionHandler의 일반 `Exception`이 `processRecord()`의 generic catch에 도달 | 로그 후 예외를 삼키고 최종 배치 ack | 배치 진행성 우선. 단, DB에 실패 상태를 못 남긴 예외까지 이 경로에 들어갈 수 있는 잔여 위험이 있음 |
+| Runner/DeletionHandler의 예상하지 못한 일반 `Exception` | 로그 후 컨테이너로 전파, ack 없음 | 처리 결과가 기록되지 않은 레코드를 재전달받게 함 |
 | `DataAccessException`이 이탈 | 모든 future를 기다린 뒤 `ack.nack(0, delay)` | DB에 처리 결과를 기록하지 못했으므로 배치 전체 재전달 |
 | `Error` 등 `Exception` 밖의 치명 오류 | 컨테이너로 전파, ack 없음 | `OutOfMemoryError`, `StackOverflowError`, `LinkageError` 등이 해당. 재전달로 원인이 없어지지 않으면 같은 오류가 반복될 수 있음 |
 
@@ -228,7 +228,7 @@ RETRY_WAIT
 
 ### 5.3 이벤트와 tenant 검증
 
-[IndexingEventValidator](../src/main/kotlin/com/osscontest/worker/indexing/consumer/IndexingEventValidator.kt)가 schema version, 문서 버전 존재 여부, `documentVersion.documentId == event.documentId`를 확인한다. Runner가 `document`를 추가 조회하여 tenant 일치도 확인한다.
+[IndexingEventValidator](../src/main/kotlin/com/osscontest/worker/indexing/consumer/IndexingEventValidator.kt)가 schema version과 문서 버전 존재 여부를 확인한다. Kafka key와 payload 및 문서 버전의 `documentId` 관계는 Core의 발행 계약을 신뢰하며, Runner가 `document`를 추가 조회하여 tenant 일치도만 확인한다.
 
 검증은 Job 시작 뒤 수행한다. 그래야 검증 실패도 시도 횟수와 최종 실패 상태를 DB에 남길 수 있다.
 
@@ -236,7 +236,6 @@ RETRY_WAIT
 |---|---|---|
 | 미지원 schema version | `UNSUPPORTED_SCHEMA_VERSION` | 영구 실패, 즉시 `FAILED` |
 | 문서 버전 없음 | `DOCUMENT_VERSION_NOT_FOUND` | 영구 실패, 즉시 `FAILED` |
-| 문서와 버전 관계 불일치 | `DOCUMENT_MISMATCH` | 영구 실패, 즉시 `FAILED` |
 | 문서 없음 | `DOCUMENT_NOT_FOUND` | 영구 실패, 즉시 `FAILED` |
 | tenant 불일치 | `TENANT_MISMATCH` | 영구 실패, 즉시 `FAILED` |
 
@@ -556,7 +555,7 @@ Kafka 설정은 다음과 같다.
 
 따라서 consumer group을 바꾸려면 YAML만 수정해서는 안 된다. listener에 `groupId`를 명시하거나 `idIsGroup=false`로 바꾸지 않는 한 annotation의 `id`가 group ID로 사용된다. `id="indexing"`은 `DbHealthGate`가 컨테이너를 찾는 ID이기도 하므로 함께 검토해야 한다.
 
-JPA `ddl-auto`와 Flyway가 모두 비활성화되어 있으므로 애플리케이션이 운영 DB 스키마를 만들거나 갱신하지 않는다. 제공된 V1 migration도 독립 실행 가능한 전체 서비스 스키마가 아니며 기존 `tenant(id)` 테이블을 전제로 한다. 배포 전 pgvector extension, `vector(1536)`, JSONB, 복합 FK/unique index와 Kafka identity 필수 컬럼·check constraint가 실제 DB에 반영됐는지 확인해야 한다.
+Worker에는 Flyway 의존성과 migration 파일이 없고 JPA `ddl-auto`도 `none`이므로 DB 스키마를 만들거나 갱신하지 않는다. Core 서버가 pgvector extension, `vector(1536)`, JSONB, 복합 FK/unique index와 Kafka identity 필수 컬럼·check constraint를 마이그레이션한 뒤 Worker를 배포해야 한다.
 
 ## 12. 현재 남아 있는 장애 경계
 

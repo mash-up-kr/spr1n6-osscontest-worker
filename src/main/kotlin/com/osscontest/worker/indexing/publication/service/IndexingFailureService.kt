@@ -51,7 +51,7 @@ class IndexingFailureService(
             job.status = IndexingJobStatus.FAILED
             job.nextRetryAt = null
             job.completedAt = failedAt
-            // P1-2: DLQ가 없는 이 설계에서 실패를 감지하는 핵심 지표(FAULT_TOLERANCE.md §3 P1-2).
+            // DLQ가 없으므로 최종 실패를 운영에서 감지할 수 있도록 별도 카운터를 기록한다.
             meterRegistry.counter("indexing_job_failed_total", "errorCode", job.lastErrorCode!!).increment()
             IndexingJobStatus.FAILED
         } else {

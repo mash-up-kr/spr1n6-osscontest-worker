@@ -10,8 +10,6 @@ import java.io.InputStream
 class DocxDocumentParser : DocumentParser {
     override val supportedMimeTypes =
         setOf("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-    override val parserVersion = "docx-parser/1.0.0"
-
     override fun parse(input: InputStream): Sequence<ParsedBlock> =
         sequence {
             XWPFDocument(input).use { document ->

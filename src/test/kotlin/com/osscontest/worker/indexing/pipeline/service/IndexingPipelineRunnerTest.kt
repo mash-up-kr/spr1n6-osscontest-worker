@@ -5,7 +5,7 @@ import com.osscontest.worker.indexing.chunking.service.ChunkGuard
 import com.osscontest.worker.indexing.chunking.service.ChunkingService
 import com.osscontest.worker.indexing.chunking.service.ChunkingStrategy
 import com.osscontest.worker.indexing.consumer.IndexingEventValidator
-import com.osscontest.worker.indexing.consumer.IndexingRequestedEvent
+import com.osscontest.worker.indexing.consumer.IndexingEvent
 import com.osscontest.worker.indexing.consumer.InvalidEventException
 import com.osscontest.worker.indexing.consumer.KafkaRecordIdentity
 import com.osscontest.worker.indexing.embedding.service.EmbeddingRequestRejectedException
@@ -313,10 +313,7 @@ class IndexingPipelineRunnerTest {
         assertThat(indexingProcessor.calls).isEmpty()
     }
 
-    // Fix 1 회귀 방지: 검증 실패가 Job 획득 "이후"에 일어나야 attempt_count가 올라가고,
-    // recordFailure가 상한 도달 시 FAILED로 종결시켜 재시도 핫 루프를 끊을 수 있다.
-    // 예전 구조(검증 → 획득)에서는 이 예외가 run() 밖으로 그대로 전파되고 start()에도
-    // 도달하지 못해, RETRY_WAIT 상태의 Job이 매 폴링마다 영원히 다시 잡혔다.
+    // 검증 실패도 Job 획득 뒤에 기록해야 attempt_count 상한으로 재시도 루프를 종결할 수 있다.
     @Test
     fun `재시도 경로에서 검증이 실패해도 예외를 삼키고 recordFailure를 호출한다`() {
         stubActiveJobAcquisition(
@@ -657,13 +654,12 @@ class IndexingPipelineRunnerTest {
         whenever(indexingJobRepository.start(5001L, "worker-test", maxAttempts)).thenReturn(1)
         whenever(documentRepository.findById(42L))
             .thenReturn(Optional.of(DocumentEntity(id = 42L, tenantId = 7L, searchableVersionId = 2001L, deletedAt = null)))
-        // P2-2: recordFailure()가 DB 시각을 쓰도록 바뀌었으므로, unstub 상태(mock 기본값 null)로
-        // 인해 recordFailure(...) 검증의 any() 매처가 null 인자와 불일치하지 않도록 스텁한다.
+        // recordFailure에 전달할 DB 시각이 null이 되지 않도록 스텁한다.
         whenever(indexingJobRepository.currentDbTimestamp()).thenReturn(LocalDateTime.now())
     }
 
     private fun sampleEvent() =
-        IndexingRequestedEvent(
+        IndexingEvent(
             eventId = UUID.randomUUID(), eventType = "INDEXING_REQUESTED", schemaVersion = 1, tenantId = 7L,
             documentId = 42L, documentVersionId = 1001L, occurredAt = Instant.now(), traceId = null,
         )
