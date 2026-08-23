@@ -74,7 +74,7 @@ class DocumentDeletionHandlerTest {
     }
 
     private fun deletedEvent(schemaVersion: Int = 1) =
-        IndexingRequestedEvent(
+        IndexingEvent(
             eventId = UUID.randomUUID(),
             eventType = "DOCUMENT_DELETED",
             schemaVersion = schemaVersion,

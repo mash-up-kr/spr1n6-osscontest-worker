@@ -15,6 +15,8 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest
 import software.amazon.awssdk.services.s3.model.GetObjectResponse
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException
 import java.io.ByteArrayInputStream
+import java.io.IOException
+import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
@@ -71,4 +73,38 @@ class S3DocumentDownloadClientTest {
         assertThatThrownBy { client.download("docs/missing/v1.txt") }
             .isInstanceOf(NoSuchKeyException::class.java)
     }
+
+    @Test
+    fun `다운로드 중 실패하면 부분 임시 파일을 삭제한다`() {
+        val filesBefore = downloadTempFiles()
+        val failingStream =
+            object : InputStream() {
+                private var reads = 0
+
+                override fun read(): Int {
+                    if (reads++ < 3) return 'x'.code
+                    throw IOException("stream failed")
+                }
+            }
+        whenever(s3Client.getObject(any<GetObjectRequest>(), any<ResponseTransformer<GetObjectResponse, GetObjectResponse>>()))
+            .thenAnswer { invocation ->
+                val transformer = invocation.getArgument<ResponseTransformer<GetObjectResponse, GetObjectResponse>>(1)
+                transformer.transform(
+                    GetObjectResponse.builder().build(),
+                    AbortableInputStream.create(failingStream),
+                )
+            }
+
+        assertThatThrownBy { client.download("docs/partial/v1.txt") }
+            .isInstanceOf(Exception::class.java)
+        assertThat(downloadTempFiles()).isEqualTo(filesBefore)
+    }
+
+    private fun downloadTempFiles(): Set<Path> =
+        Files.list(Path.of(System.getProperty("java.io.tmpdir"))).use { paths ->
+            paths
+                .filter { it.fileName.toString().startsWith("indexing-download-") }
+                .toList()
+                .toSet()
+        }
 }

@@ -6,6 +6,7 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
 import tools.jackson.databind.ObjectMapper
 
+/** 물리 스키마와 마이그레이션은 Core 서버가 소유하며, 이 Writer는 합의된 청크 저장 계약만 사용한다. */
 @Repository
 class DocumentChunkWriter(
     private val jdbcTemplate: NamedParameterJdbcTemplate,

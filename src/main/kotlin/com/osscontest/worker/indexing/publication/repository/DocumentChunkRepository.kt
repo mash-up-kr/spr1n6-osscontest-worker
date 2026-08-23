@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.transaction.annotation.Transactional
 
+/** Core 서버가 소유·마이그레이션하는 청크 스키마에서 Worker가 생성한 인덱싱 데이터만 관리한다. */
 interface DocumentChunkRepository : JpaRepository<DocumentChunkEntity, Long> {
     // 몇 번을 다시 실행해도 두 번째부터는 0건 — 멱등(§3.9).
     @Modifying

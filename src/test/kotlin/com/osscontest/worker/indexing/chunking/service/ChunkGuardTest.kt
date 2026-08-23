@@ -75,18 +75,9 @@ class ChunkGuardTest {
         assertThat(thrown.code).isEqualTo("TOTAL_TOKEN_LIMIT_EXCEEDED")
     }
 
-    @Test
-    fun `tokenCount가 null인 청크는 0으로 취급한다`() {
-        val tightGuard = ChunkGuard(ChunkingProperties(maxChunksPerDocument = 10, maxTotalTokens = 5))
-        val chunks = (0..2).map { fakeChunk(it, tokenCount = null) }
-
-        assertThatCode { tightGuard.assertValid(chunks) }
-            .doesNotThrowAnyException()
-    }
-
     private fun fakeChunk(
         no: Int,
-        tokenCount: Int? = 10,
+        tokenCount: Int = 10,
     ) = Chunk(
         chunkNo = no,
         content = "content-$no",

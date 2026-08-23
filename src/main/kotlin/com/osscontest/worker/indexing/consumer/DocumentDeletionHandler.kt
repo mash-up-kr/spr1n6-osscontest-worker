@@ -29,14 +29,14 @@ class DocumentDeletionHandler
     private val log = LoggerFactory.getLogger(javaClass)
     private val supportedVersions = supportedSchemaVersions.map { it.trim().toInt() }.toSet()
 
-    // 테스트 편의용 보조 생성자 (IndexingEventValidator와 동일한 패턴)
+    // 단위 테스트에서 Spring 문자열 바인딩 없이 지원 버전을 전달한다.
     constructor(
         documentDeletionService: DocumentDeletionService,
         documentRepository: DocumentRepository,
         supportedSchemaVersions: Set<Int>,
     ) : this(documentDeletionService, documentRepository, supportedSchemaVersions.map(Int::toString))
 
-    fun handle(event: IndexingRequestedEvent) {
+    fun handle(event: IndexingEvent) {
         val startedAt = System.nanoTime()
         if (event.schemaVersion !in supportedVersions) {
             throw InvalidEventException(

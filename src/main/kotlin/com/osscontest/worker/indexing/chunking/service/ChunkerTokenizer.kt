@@ -13,6 +13,18 @@ import java.security.MessageDigest
 internal object ChunkerTokenizer {
     val encoding: Encoding = Encodings.newDefaultEncodingRegistry().getEncoding(EncodingType.CL100K_BASE)
 
+    fun tokenCount(text: String): Int = encoding.encode(text).boxed().size
+
+    fun bodyTokenLimit(
+        prefix: String,
+        maxTokensPerChunk: Int,
+    ): Int {
+        require(maxTokensPerChunk > 0) { "maxTokensPerChunk must be positive" }
+        val limit = maxTokensPerChunk - tokenCount(prefix)
+        require(limit > 0) { "heading prefix must be smaller than maxTokensPerChunk" }
+        return limit
+    }
+
     // jtokkit의 decode()는 일반 List<Int>가 아니라 자체 IntArrayList 타입을 요구하므로,
     // 분할된 각 청크를 다시 변환해서 넘겨준다.
     fun List<Int>.toIntArrayList(): IntArrayList {

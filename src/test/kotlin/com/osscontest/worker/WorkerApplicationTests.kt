@@ -16,9 +16,7 @@ class WorkerApplicationTests {
     fun contextLoads() {
     }
 
-    // Spring Boot가 @SpringBootTest 클래스 안의 중첩 @TestConfiguration을 자동으로 인식해서
-    // 메인 컨텍스트에 얹어준다 — IndexingProcessor의 실제 구현이 없는(Task 2) 이 브랜치에서
-    // 유일하게 이 fake만 빈으로 등록된다.
+    // 외부 임베딩과 DB 쓰기를 실행하지 않고 애플리케이션 컨텍스트만 검증한다.
     @TestConfiguration
     class FakeIndexingProcessorConfig {
         @Bean

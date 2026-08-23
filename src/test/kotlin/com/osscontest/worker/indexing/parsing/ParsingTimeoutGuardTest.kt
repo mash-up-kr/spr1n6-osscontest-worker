@@ -53,7 +53,7 @@ class ParsingTimeoutGuardTest {
     }
 
     @Test
-    fun `타임아웃이 발생하면 parse_thread_leaked 게이지가 증가한다`() {
+    fun `타임아웃이 발생하면 parse_timeout_total 카운터가 증가한다`() {
         val meterRegistry = SimpleMeterRegistry()
         val guard = ParsingTimeoutGuard(parseTimeout = Duration.ofMillis(100), concurrency = 2, meterRegistry = meterRegistry)
         val parser: DocumentParser = mock()
@@ -67,6 +67,6 @@ class ParsingTimeoutGuardTest {
 
         assertThrows<ParseTimeoutException> { guard.parse(parser, path, "text/plain") }
 
-        assertThat(meterRegistry.get("parse_thread_leaked").gauge().value()).isEqualTo(1.0)
+        assertThat(meterRegistry.get("parse_timeout_total").counter().count()).isEqualTo(1.0)
     }
 }

@@ -11,8 +11,6 @@ class DocumentParserRegistryTest {
     private class FakeParser(
         override val supportedMimeTypes: Set<String>,
     ) : DocumentParser {
-        override val parserVersion = "fake/1.0"
-
         override fun parse(input: InputStream): Sequence<ParsedBlock> =
             sequenceOf(ParsedBlock(0, BlockType.PARAGRAPH, "fake", null, emptyList()))
     }

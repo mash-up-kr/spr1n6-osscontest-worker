@@ -2,6 +2,7 @@ package com.osscontest.worker.indexing.publication.repository
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.publication.entity.IndexingJobEntity
+import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
 import jakarta.persistence.EntityManager
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
@@ -17,7 +18,7 @@ import java.util.UUID
 @Tag("integration")
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@ActiveProfiles("local")
+@ActiveProfiles("integration")
 class IndexingJobRepositoryIntegrationTest(
     private val indexingJobRepository: IndexingJobRepository,
     private val jdbcTemplate: JdbcTemplate,
@@ -30,6 +31,7 @@ class IndexingJobRepositoryIntegrationTest(
     // 매 테스트 시작 시 id=1로 다시 시딩해도 충돌하지 않는다.
     @BeforeEach
     fun seedDocumentVersionFixture() {
+        assertDedicatedIntegrationDatabase(jdbcTemplate)
         jdbcTemplate.update(
             "INSERT INTO tenant (id, name, created_at) VALUES (1, 'test-tenant', CURRENT_TIMESTAMP)",
         )

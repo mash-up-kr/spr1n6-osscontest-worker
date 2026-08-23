@@ -10,8 +10,6 @@ import java.io.InputStream
 @Component
 class PdfDocumentParser : DocumentParser {
     override val supportedMimeTypes = setOf("application/pdf")
-    override val parserVersion = "pdf-parser/1.0.0"
-
     override fun parse(input: InputStream): Sequence<ParsedBlock> =
         sequence {
             Loader.loadPDF(input.readAllBytes()).use { document ->

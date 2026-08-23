@@ -7,6 +7,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.mockito.kotlin.any
 import org.mockito.kotlin.doThrow
 import org.mockito.kotlin.eq
@@ -22,6 +23,7 @@ import org.springframework.dao.DataAccessResourceFailureException
 import org.springframework.kafka.support.Acknowledgment
 import tools.jackson.module.kotlin.jacksonObjectMapper
 import java.time.Duration
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 
 // Jackson 3.x(tools.jackson.*) 사용 프로젝트다 — com.fasterxml.jackson.*가 아니다.
@@ -77,18 +79,15 @@ class IndexingKafkaListenerTest {
     }
 
     @Test
-    fun `배치 안 한 레코드가 예외를 던져도 나머지는 계속 처리하고 ack한다`() {
+    fun `인덱싱 처리에서 예상하지 못한 예외가 나면 ack하지 않고 전파한다`() {
         whenever(runner.run(any(), any())).doThrow(RuntimeException("boom"))
-        val records =
-            listOf(
-                record(key = "1", value = indexingRequestedJson(documentId = 1)),
-                record(key = "2", value = documentDeletedJson()),
-            )
+        val records = listOf(record(key = "1", value = indexingRequestedJson(documentId = 1)))
 
-        listener.onMessage(records, ack)
+        val thrown = assertThrows<ExecutionException> { listener.onMessage(records, ack) }
 
-        verify(deletionHandler, times(1)).handle(any())
-        verify(ack, times(1)).acknowledge()
+        assertThat(thrown.cause).isInstanceOf(RuntimeException::class.java)
+        verify(ack, never()).acknowledge()
+        verify(ack, never()).nack(any(), any())
     }
 
     @Test
@@ -135,13 +134,14 @@ class IndexingKafkaListenerTest {
     }
 
     @Test
-    fun `DB 장애가 아닌 일반 예외는 여전히 ack한다`() {
-        whenever(runner.run(any(), any())).thenThrow(RuntimeException("boom"))
-        val records = listOf(record(key = "1", value = indexingRequestedJson(documentId = 1)))
+    fun `삭제 처리에서 예상하지 못한 예외가 나면 ack하지 않고 전파한다`() {
+        whenever(deletionHandler.handle(any())).thenThrow(RuntimeException("boom"))
+        val records = listOf(record(key = "1", value = documentDeletedJson()))
 
-        listener.onMessage(records, ack)
+        val thrown = assertThrows<ExecutionException> { listener.onMessage(records, ack) }
 
-        verify(ack, times(1)).acknowledge()
+        assertThat(thrown.cause).isInstanceOf(RuntimeException::class.java)
+        verify(ack, never()).acknowledge()
         verify(ack, never()).nack(any(), any())
     }
 
@@ -151,7 +151,7 @@ class IndexingKafkaListenerTest {
         var capturedEventTraceId: String? = null
         whenever(runner.run(any(), any())).thenAnswer { invocation ->
             capturedDuringCall = MDC.get("traceId")
-            capturedEventTraceId = invocation.getArgument<IndexingRequestedEvent>(0).traceId
+            capturedEventTraceId = invocation.getArgument<IndexingEvent>(0).traceId
             null
         }
         val records =
@@ -219,7 +219,7 @@ class IndexingKafkaListenerTest {
     }
 
     private fun argThatVersionIs(documentVersionId: Long) =
-        org.mockito.kotlin.argThat<IndexingRequestedEvent> { this.documentVersionId == documentVersionId }
+        org.mockito.kotlin.argThat<IndexingEvent> { this.documentVersionId == documentVersionId }
 
     private fun record(
         key: String,

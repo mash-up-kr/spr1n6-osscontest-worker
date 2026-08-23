@@ -9,8 +9,7 @@ import org.springframework.stereotype.Component
 
 // DOCUMENT_DELETED 이벤트가 유실돼도 유령 청크가 검색에 남지 않도록, 삭제됐는데 아직
 // document_chunk가 안 지워진 문서를 주기적으로 찾아 정리하는 내구성 백업 스윕이다.
-// 이벤트 경로(DocumentDeletionHandler)와 이 스윕 둘 다 같은 멱등 함수(handleDocumentDeleted)를
-// 공유한다 — 인덱싱 재시도 스케줄러(IndexingRetryScheduler, 삭제됨)와는 무관한 별개 컴포넌트다.
+// 이벤트 경로와 스윕이 같은 멱등 삭제 함수를 사용하므로 중복 실행해도 안전하다.
 @Component
 class DocumentDeletionSweepScheduler(
     private val documentChunkRepository: DocumentChunkRepository,

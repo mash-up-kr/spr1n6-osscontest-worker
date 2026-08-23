@@ -13,8 +13,6 @@ import java.io.InputStream
 @Component
 class HwpDocumentParser : DocumentParser {
     override val supportedMimeTypes = setOf("application/x-hwp", "application/haansofthwp")
-    override val parserVersion = "hwp-parser/1.0.0"
-
     override fun parse(input: InputStream): Sequence<ParsedBlock> {
         val tempFile = File.createTempFile("hwp-parse-", ".hwp")
         val fullText =

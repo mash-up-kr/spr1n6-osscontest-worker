@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 
+/** Core 서버가 소유·마이그레이션하는 문서 버전 스키마에 인덱싱 완료 결과만 기록한다. */
 interface DocumentVersionRepository : JpaRepository<DocumentVersionEntity, Long> {
     @Modifying
     @Query(

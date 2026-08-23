@@ -3,6 +3,7 @@ package com.osscontest.worker.indexing.publication.service
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.publication.entity.IndexingJobEntity
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
+import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -29,7 +30,7 @@ import java.util.UUID
 @Tag("integration")
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@ActiveProfiles("local")
+@ActiveProfiles("integration")
 @Import(IndexingFailureService::class)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class IndexingFailureServiceIntegrationTest(
@@ -39,6 +40,7 @@ class IndexingFailureServiceIntegrationTest(
 ) {
     @BeforeEach
     fun seedDocumentVersionFixture() {
+        assertDedicatedIntegrationDatabase(jdbcTemplate)
         jdbcTemplate.update(
             "INSERT INTO tenant (id, name, created_at) VALUES (1, 'test-tenant', CURRENT_TIMESTAMP)",
         )

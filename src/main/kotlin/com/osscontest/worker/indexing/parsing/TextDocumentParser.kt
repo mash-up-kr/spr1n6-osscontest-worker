@@ -8,11 +8,9 @@ import java.io.InputStream
 @Component
 class TextDocumentParser : DocumentParser {
     override val supportedMimeTypes = setOf("text/plain", "text/markdown")
-    override val parserVersion = "text-parser/1.0.0"
-
     override fun parse(input: InputStream): Sequence<ParsedBlock> =
         sequence {
-            val headingStack = mutableListOf<Pair<Int, String>>() // level to text
+            val headingStack = mutableListOf<Pair<Int, String>>()
             var order = 0
 
             input.bufferedReader(Charsets.UTF_8).useLines { lines ->
