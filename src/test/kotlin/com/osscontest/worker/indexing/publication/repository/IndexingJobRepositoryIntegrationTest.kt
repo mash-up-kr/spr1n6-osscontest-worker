@@ -322,6 +322,8 @@ class IndexingJobRepositoryIntegrationTest(
 
         val dbNow = indexingJobRepository.currentDbTimestamp()
 
+        // 5초는 호스트와 DB 컨테이너 클럭이 완전히 동기화돼 있지 않을 때의 오차를 흡수하는
+        // 값이다. 정확한 순서 비교 대신 이 범위로 "제대로 된 현재 시각"인지만 검증한다.
         assertThat(Duration.between(hostNow, dbNow).abs().toMillis()).isLessThan(5_000)
     }
 }
