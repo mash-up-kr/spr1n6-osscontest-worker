@@ -179,6 +179,6 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
     ): Int
 
     // 실패 시각과 재획득 조건을 모두 DB 시각으로 계산해 호스트 간 시계 오차를 제거한다.
-    @Query(value = "SELECT CURRENT_TIMESTAMP", nativeQuery = true)
+    @Query(value = "SELECT LOCALTIMESTAMP", nativeQuery = true)
     fun currentDbTimestamp(): LocalDateTime
 }

@@ -12,7 +12,9 @@ import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
+import java.time.Duration
 import java.time.LocalDateTime
+import java.time.ZoneId
 import java.util.UUID
 
 @Tag("integration")
@@ -311,5 +313,15 @@ class IndexingJobRepositoryIntegrationTest(
         val reloadedFailed = indexingJobRepository.findById(failedJob.id!!).orElseThrow()
         assertThat(reloadedFailed.status).isEqualTo(IndexingJobStatus.FAILED)
         assertThat(reloadedFailed.lastErrorCode).isEqualTo("SOME_OTHER_ERROR")
+    }
+
+    @Test
+    fun `currentDbTimestamp는 예외 없이 DB 서버의 현재 시각을 LocalDateTime으로 반환한다`() {
+        val dbTimeZone = ZoneId.of(jdbcTemplate.queryForObject("SHOW timezone", String::class.java))
+        val hostNow = LocalDateTime.now(dbTimeZone)
+
+        val dbNow = indexingJobRepository.currentDbTimestamp()
+
+        assertThat(Duration.between(hostNow, dbNow).abs().toMillis()).isLessThan(5_000)
     }
 }
