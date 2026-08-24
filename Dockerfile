@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build stage ----
-FROM eclipse-temurin:17-jdk-jammy AS build
+FROM eclipse-temurin:21-jdk-jammy AS build
 WORKDIR /workspace
 
 # Gradle 캐시 재사용을 위해 의존성 관련 파일만 먼저 복사
@@ -14,7 +14,7 @@ COPY src ./src
 RUN ./gradlew --no-daemon bootJar -x test
 
 # ---- Runtime stage ----
-FROM eclipse-temurin:17-jre-jammy AS runtime
+FROM eclipse-temurin:21-jre-jammy AS runtime
 WORKDIR /app
 
 RUN groupadd -r worker && useradd -r -g worker worker
