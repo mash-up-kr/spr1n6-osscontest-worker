@@ -11,7 +11,7 @@ version = "0.0.1-SNAPSHOT"
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(17)
+        languageVersion = JavaLanguageVersion.of(21)
     }
 }
 
@@ -35,7 +35,7 @@ dependencies {
     runtimeOnly("org.postgresql:postgresql")
 
     // 원문 다운로드 (S3 호환 — MinIO 로컬 개발 포함)
-    implementation(platform("software.amazon.awssdk:bom:2.29.1"))
+    implementation(platform("software.amazon.awssdk:bom:2.46.7"))
     implementation("software.amazon.awssdk:s3")
 
     // 파서
