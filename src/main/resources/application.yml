@@ -65,6 +65,9 @@ indexing:
     max-chunks-per-document: ${INDEXING_MAX_CHUNKS:5000}
     # 단일 문서가 임베딩 쿼터를 독점하지 않도록 총 입력을 2백만 토큰으로 제한한다.
     max-total-tokens: ${INDEXING_MAX_TOTAL_TOKENS:2000000}
+  embedding:
+    # OpenAI 임베딩 API의 요청당 토큰 상한(300,000)에 맞춘 값이다.
+    max-tokens-per-request: ${INDEXING_EMBEDDING_MAX_TOKENS_PER_REQUEST:300000}
   storage:
     bucket: ${INDEXING_STORAGE_BUCKET}
     endpoint: ${INDEXING_STORAGE_ENDPOINT:}

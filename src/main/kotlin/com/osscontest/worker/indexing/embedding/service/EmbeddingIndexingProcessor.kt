@@ -7,6 +7,7 @@ import com.osscontest.worker.indexing.pipeline.service.IndexingProcessor
 import com.osscontest.worker.indexing.publication.domain.DocumentChunk
 import com.osscontest.worker.indexing.publication.service.IndexingPublicationService
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
 import java.time.Clock
 import java.time.LocalDateTime
@@ -16,6 +17,9 @@ class EmbeddingIndexingProcessor(
     private val embeddingUseCase: EmbeddingUseCase,
     private val indexingPublicationService: IndexingPublicationService,
     private val clock: Clock,
+    // OpenAI 임베딩 API는 요청 1건당 최대 300,000 토큰까지만 허용한다.
+    @Value("\${indexing.embedding.max-tokens-per-request:300000}")
+    private val maxTokensPerRequest: Int = 300_000,
 ) : IndexingProcessor {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -35,7 +39,7 @@ class EmbeddingIndexingProcessor(
                 chunks.size,
             )
             validateChunks(chunks)
-            val embeddings = embeddingUseCase.embed(chunks.map(Chunk::content))
+            val embeddings = embedInBatches(chunks)
             validateEmbeddings(chunks, embeddings)
             log.info(
                 "indexing processor stage completed: stage=EMBEDDING jobId={} embeddingCount={} " +
@@ -88,6 +92,28 @@ class EmbeddingIndexingProcessor(
             )
             throw e
         }
+    }
+
+    // 청크 순서를 보존하면서, 누적 토큰이 상한을 넘기 직전까지 한 배치로 묶어 순차적으로 embed한다.
+    // 청크 하나가 그 자체로 상한을 넘더라도(비정상 설정 등) 자신만 담은 배치로 보내
+    // 무한정 쌓이거나 유실되지 않게 한다.
+    private fun embedInBatches(chunks: List<Chunk>): List<FloatArray> {
+        val batches = mutableListOf<List<Chunk>>()
+        var currentBatch = mutableListOf<Chunk>()
+        var currentTokens = 0
+        for (chunk in chunks) {
+            if (currentBatch.isNotEmpty() && currentTokens + chunk.tokenCount > maxTokensPerRequest) {
+                batches.add(currentBatch)
+                currentBatch = mutableListOf()
+                currentTokens = 0
+            }
+            currentBatch.add(chunk)
+            currentTokens += chunk.tokenCount
+        }
+        if (currentBatch.isNotEmpty()) {
+            batches.add(currentBatch)
+        }
+        return batches.flatMap { batch -> embeddingUseCase.embed(batch.map(Chunk::content)) }
     }
 
     private fun validateChunks(chunks: List<Chunk>) {
