@@ -80,3 +80,7 @@ indexing:
     batch-size: ${INDEXING_DELETION_BATCH_SIZE:50}
     # 애플리케이션 초기화와 경쟁하지 않도록 첫 스윕을 1분 늦춘다.
     initial-delay-ms: ${INDEXING_DELETION_INITIAL_DELAY_MS:60000}
+
+fault-injection:
+  enabled: ${FAULT_INJECTION_ENABLED:false}
+  phase: ${FAULT_INJECTION_PHASE:EMBEDDING}

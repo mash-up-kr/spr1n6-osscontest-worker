@@ -1,5 +1,6 @@
 package com.osscontest.worker.indexing.consumer
 
+import com.osscontest.worker.indexing.pipeline.service.IndexingPipelineRunner
 import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -15,8 +16,11 @@ class RebalanceMetricsConfig {
     @Bean
     fun rebalanceMetricsContainerCustomizer(
         meterRegistry: MeterRegistry,
+        pipelineRunner: IndexingPipelineRunner,
     ): ContainerCustomizer<String, String, ConcurrentMessageListenerContainer<String, String>> =
         ContainerCustomizer { container ->
-            container.containerProperties.setConsumerRebalanceListener(RebalanceMetricsListener(meterRegistry))
+            container.containerProperties.setConsumerRebalanceListener(
+                RebalanceMetricsListener(meterRegistry, pipelineRunner.currentWorkerId()),
+            )
         }
 }

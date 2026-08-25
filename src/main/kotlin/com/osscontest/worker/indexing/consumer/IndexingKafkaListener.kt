@@ -86,8 +86,9 @@ class IndexingKafkaListener(
         }
         ack.acknowledge()
         log.info(
-            "Kafka batch acknowledged: recordCount={} durationMs={}",
+            "KAFKA_BATCH_ACK batchSize={} records={} durationMs={}",
             records.size,
+            records.map { "${it.partition()}:${it.offset()}" },
             elapsedMillis(batchStartedAt),
         )
     }
@@ -100,12 +101,13 @@ class IndexingKafkaListener(
             MDC.put("traceId", traceId ?: "-")
             event = deserialize(record.value()).copy(traceId = traceId)
             log.info(
-                "event received: eventType={} eventId={} documentId={} documentVersionId={} " +
-                    "topic={} partition={} offset={}",
-                event.eventType,
+                "INDEXING_EVENT_RECEIVED sourceEventId={} documentId={} documentVersionId={} " +
+                    "workerId={} eventType={} topic={} partition={} offset={}",
                 event.eventId,
                 event.documentId,
                 event.documentVersionId,
+                pipelineRunner.currentWorkerId(),
+                event.eventType,
                 record.topic(),
                 record.partition(),
                 record.offset(),

@@ -4,6 +4,8 @@ import com.osscontest.worker.indexing.chunking.service.ChunkGuard
 import com.osscontest.worker.indexing.chunking.service.ChunkingService
 import com.osscontest.worker.indexing.chunking.service.ChunkingStrategy
 import com.osscontest.worker.indexing.consumer.IndexingEvent
+import com.osscontest.worker.indexing.fault.FaultInjectionContext
+import com.osscontest.worker.indexing.fault.IndexingFaultInjector
 import com.osscontest.worker.indexing.parsing.DocumentParserRegistry
 import com.osscontest.worker.indexing.parsing.ParsingTimeoutGuard
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
@@ -27,6 +29,7 @@ internal class IndexingAttemptProcessor(
     private val chunkingService: ChunkingService,
     private val chunkGuard: ChunkGuard,
     private val indexingProcessor: IndexingProcessor,
+    private val faultInjector: IndexingFaultInjector,
     private val maxFileSizeBytes: Long,
     private val chunkingStrategy: ChunkingStrategy,
 ) {
@@ -36,6 +39,7 @@ internal class IndexingAttemptProcessor(
         jobId: Long,
         event: IndexingEvent,
         documentVersion: DocumentVersionEntity,
+        faultInjectionContext: FaultInjectionContext,
         onStageStarted: (String) -> Unit,
     ) {
         if (documentVersion.fileSize > maxFileSizeBytes) {
@@ -126,6 +130,11 @@ internal class IndexingAttemptProcessor(
                 chunks.size,
             )
             indexingJobRepository.updatePhase(jobId, "EMBEDDING")
+            faultInjector.blockIfNeeded(
+                documentVersionId = documentVersion.id,
+                phase = "EMBEDDING",
+                context = faultInjectionContext,
+            )
             indexingProcessor.process(context, chunks)
         } finally {
             Files.deleteIfExists(tempFile)

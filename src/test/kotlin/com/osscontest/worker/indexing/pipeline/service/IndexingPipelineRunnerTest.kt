@@ -1,5 +1,7 @@
 package com.osscontest.worker.indexing.pipeline.service
 
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.core.read.ListAppender
 import com.osscontest.worker.indexing.chunking.domain.Chunk
 import com.osscontest.worker.indexing.chunking.service.ChunkGuard
 import com.osscontest.worker.indexing.chunking.service.ChunkingService
@@ -9,6 +11,7 @@ import com.osscontest.worker.indexing.consumer.IndexingEvent
 import com.osscontest.worker.indexing.consumer.InvalidEventException
 import com.osscontest.worker.indexing.consumer.KafkaRecordIdentity
 import com.osscontest.worker.indexing.embedding.service.EmbeddingRequestRejectedException
+import com.osscontest.worker.indexing.fault.IndexingFaultInjector
 import com.osscontest.worker.indexing.parsing.CorruptedFileException
 import com.osscontest.worker.indexing.parsing.DocumentParser
 import com.osscontest.worker.indexing.parsing.DocumentParserRegistry
@@ -37,6 +40,7 @@ import org.mockito.kotlin.never
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
+import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -57,6 +61,7 @@ class IndexingPipelineRunnerTest {
     private val chunkGuard: ChunkGuard = mock()
     private val indexingProcessor = FakeIndexingProcessor()
     private val indexingFailureService: IndexingFailureService = mock()
+    private val faultInjector: IndexingFaultInjector = mock()
     private val retryWaiter: RetryWaiter = mock()
     private val meterRegistry = SimpleMeterRegistry()
     private val maxAttempts = 5
@@ -78,6 +83,7 @@ class IndexingPipelineRunnerTest {
             chunkGuard = chunkGuard,
             indexingProcessor = indexingProcessor,
             indexingFailureService = indexingFailureService,
+            faultInjector = faultInjector,
             workerId = "worker-test",
             maxAttempts = maxAttempts,
             baseDelay = baseDelay,
@@ -158,11 +164,12 @@ class IndexingPipelineRunnerTest {
         verify(indexingJobRepository, never()).complete(any())
         verify(indexingFailureService, never()).recordFailure(any(), any(), any(), any(), any(), any(), any())
 
-        val order = inOrder(indexingJobRepository)
+        val order = inOrder(indexingJobRepository, faultInjector)
         order.verify(indexingJobRepository).updatePhase(5001L, "DOWNLOADING")
         order.verify(indexingJobRepository).updatePhase(5001L, "PARSING")
         order.verify(indexingJobRepository).updatePhase(5001L, "CHUNKING")
         order.verify(indexingJobRepository).updatePhase(5001L, "EMBEDDING")
+        order.verify(faultInjector).blockIfNeeded(eq(1001L), eq("EMBEDDING"), any())
         verify(indexingJobRepository, times(4)).updatePhase(any(), any())
     }
 
@@ -440,23 +447,43 @@ class IndexingPipelineRunnerTest {
 
     @Test
     fun `같은 eventId가 다른 Kafka offset으로 다시 발행되면 중복 발행으로 무시한다`() {
+        val event = sampleEvent()
         val originalIdentity = recordIdentity.copy(offset = recordIdentity.offset - 1)
         whenever(indexingJobRepository.insertIfAbsent(any(), any(), any(), anyOrNull(), any(), any(), any())).thenReturn(0)
         whenever(indexingJobRepository.findBySourceEventId(any()))
-            .thenReturn(indexingJob(status = IndexingJobStatus.PROCESSING, identity = originalIdentity))
+            .thenReturn(
+                indexingJob(
+                    status = IndexingJobStatus.PROCESSING,
+                    identity = originalIdentity,
+                    sourceEventId = event.eventId,
+                ),
+            )
 
-        runner.run(sampleEvent(), recordIdentity)
+        val messages = captureRunnerLogs { runner.run(event, recordIdentity) }
 
         verify(indexingJobRepository, never()).start(any(), any(), any())
         verify(eventValidator, never()).validate(any())
         assertThat(indexingProcessor.calls).isEmpty()
+        assertThat(messages.first { it.startsWith("INDEXING_EVENT_REPUBLISHED") })
+            .contains("sourceEventId=${event.eventId}")
+            .contains("originalPartition=0 originalOffset=9")
+            .contains("republishedPartition=0 republishedOffset=10")
+            .contains("action=IGNORED")
     }
 
     @Test
     fun `같은 Kafka record가 PROCESSING 상태로 재전달되면 다시 획득한다`() {
+        val event = sampleEvent()
         whenever(indexingJobRepository.insertIfAbsent(any(), any(), any(), anyOrNull(), any(), any(), any())).thenReturn(0)
         whenever(indexingJobRepository.findBySourceEventId(any()))
-            .thenReturn(indexingJob(status = IndexingJobStatus.PROCESSING, identity = recordIdentity))
+            .thenReturn(
+                indexingJob(
+                    status = IndexingJobStatus.PROCESSING,
+                    identity = recordIdentity,
+                    sourceEventId = event.eventId,
+                    workerId = "worker-a",
+                ),
+            )
         whenever(indexingJobRepository.start(5001L, "worker-test", maxAttempts)).thenReturn(1)
         whenever(eventValidator.validate(any()))
             .thenThrow(InvalidEventException("DOCUMENT_VERSION_NOT_FOUND", "not found"))
@@ -464,13 +491,19 @@ class IndexingPipelineRunnerTest {
         whenever(indexingFailureService.recordFailure(any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(IndexingJobStatus.FAILED)
 
-        runner.run(sampleEvent(), recordIdentity)
+        val messages = captureRunnerLogs { runner.run(event, recordIdentity) }
 
         verify(indexingJobRepository).start(5001L, "worker-test", maxAttempts)
         verify(indexingFailureService).recordFailure(
             eq(5001L), eq("DOCUMENT_VERSION_NOT_FOUND"), eq("not found"), eq(true),
             eq(maxAttempts), eq(baseDelay), any(),
         )
+        assertThat(messages.first { it.startsWith("INDEXING_EVENT_REDELIVERED") })
+            .contains("sourceEventId=${event.eventId}")
+            .contains("partition=0 offset=10")
+        assertThat(messages.first { it.startsWith("INDEXING_JOB_RECOVERY") })
+            .contains("recoveryType=WORKER_HANDOFF")
+            .contains("previousWorkerId=worker-a currentWorkerId=worker-test")
     }
 
     @ParameterizedTest
@@ -668,15 +701,17 @@ class IndexingPipelineRunnerTest {
         status: IndexingJobStatus,
         identity: KafkaRecordIdentity,
         nextRetryAt: LocalDateTime? = null,
+        sourceEventId: UUID = UUID.randomUUID(),
+        workerId: String? = "worker-test",
     ) = IndexingJobEntity(
         id = 5001L,
-        sourceEventId = UUID.randomUUID(),
+        sourceEventId = sourceEventId,
         documentId = 42L,
         documentVersionId = 1001L,
         status = status,
         attemptCount = 1,
         nextRetryAt = nextRetryAt,
-        workerId = "worker-test",
+        workerId = workerId,
         lastErrorCode = null,
         lastErrorMessage = null,
         traceId = null,
@@ -698,4 +733,18 @@ class IndexingPipelineRunnerTest {
     }
 
     private fun <T> anyOrNull(): T? = org.mockito.kotlin.any()
+
+    private fun captureRunnerLogs(block: () -> Unit): List<String> {
+        val logger = LoggerFactory.getLogger(IndexingPipelineRunner::class.java) as Logger
+        val appender = ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>()
+        appender.start()
+        logger.addAppender(appender)
+        return try {
+            block()
+            appender.list.map { it.formattedMessage }
+        } finally {
+            logger.detachAppender(appender)
+            appender.stop()
+        }
+    }
 }
