@@ -46,6 +46,8 @@ dependencies {
 
     // 토크나이저 (OpenAI cl100k_base 호환, FIXED_TOKEN 청킹에 사용)
     implementation("com.knuddels:jtokkit:1.1.0")
+    // 형태소 분석 (한국어 키워드 검색용 content_tokens 생성에 사용)
+    implementation("org.apache.lucene:lucene-analysis-nori:9.11.1")
 
     // 임베딩
     implementation(platform("org.springframework.ai:spring-ai-bom:2.0.0"))

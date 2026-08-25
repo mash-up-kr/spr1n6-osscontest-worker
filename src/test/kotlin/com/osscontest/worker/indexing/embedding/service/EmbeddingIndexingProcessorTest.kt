@@ -25,6 +25,7 @@ class EmbeddingIndexingProcessorTest {
         EmbeddingIndexingProcessor(
             embeddingUseCase = embeddingUseCase,
             indexingPublicationService = publicationService,
+            noriTokenizer = NoriTokenizer(),
             clock = Clock.fixed(Instant.parse("2026-08-19T00:00:00Z"), ZoneOffset.UTC),
             maxTokensPerRequest = 250,
         )

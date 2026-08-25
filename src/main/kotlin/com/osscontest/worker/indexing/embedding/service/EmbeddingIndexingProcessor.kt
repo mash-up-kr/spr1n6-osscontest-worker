@@ -16,6 +16,7 @@ import java.time.LocalDateTime
 class EmbeddingIndexingProcessor(
     private val embeddingUseCase: EmbeddingUseCase,
     private val indexingPublicationService: IndexingPublicationService,
+    private val noriTokenizer: NoriTokenizer,
     private val clock: Clock,
     // OpenAI 임베딩 API는 요청 1건당 최대 300,000 토큰까지만 허용한다.
     @Value("\${indexing.embedding.max-tokens-per-request:300000}")
@@ -158,6 +159,7 @@ class EmbeddingIndexingProcessor(
             documentId = context.documentId,
             chunkNo = chunkNo,
             content = content,
+            contentTokens = noriTokenizer.tokenize(content),
             contentHash = contentHash,
             tokenCount = tokenCount,
             pageFrom = pageFrom,

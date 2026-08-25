@@ -26,6 +26,8 @@ class DocumentChunkEntity(
     var chunkNo: Int,
     @Column(name = "content", nullable = false)
     var content: String,
+    @Column(name = "content_tokens")
+    var contentTokens: String?,
     @Column(name = "content_hash", nullable = false)
     var contentHash: String,
     @Column(name = "token_count")

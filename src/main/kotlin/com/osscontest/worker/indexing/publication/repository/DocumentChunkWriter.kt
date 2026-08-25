@@ -31,6 +31,7 @@ class DocumentChunkWriter(
             .addValue("documentId", documentId)
             .addValue("chunkNo", chunkNo)
             .addValue("content", content)
+            .addValue("contentTokens", contentTokens)
             .addValue("contentHash", contentHash)
             .addValue("tokenCount", tokenCount)
             .addValue("pageFrom", pageFrom)
@@ -49,6 +50,7 @@ class DocumentChunkWriter(
                 document_id,
                 chunk_no,
                 content,
+                content_tokens,
                 content_hash,
                 token_count,
                 page_from,
@@ -64,6 +66,7 @@ class DocumentChunkWriter(
                 :documentId,
                 :chunkNo,
                 :content,
+                :contentTokens,
                 :contentHash,
                 :tokenCount,
                 :pageFrom,
@@ -79,6 +82,7 @@ class DocumentChunkWriter(
                 tenant_id = EXCLUDED.tenant_id,
                 document_id = EXCLUDED.document_id,
                 content = EXCLUDED.content,
+                content_tokens = EXCLUDED.content_tokens,
                 content_hash = EXCLUDED.content_hash,
                 token_count = EXCLUDED.token_count,
                 page_from = EXCLUDED.page_from,
