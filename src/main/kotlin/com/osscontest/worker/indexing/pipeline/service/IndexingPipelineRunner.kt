@@ -7,6 +7,8 @@ import com.osscontest.worker.indexing.consumer.IndexingEvent
 import com.osscontest.worker.indexing.consumer.IndexingEventValidator
 import com.osscontest.worker.indexing.consumer.InvalidEventException
 import com.osscontest.worker.indexing.consumer.KafkaRecordIdentity
+import com.osscontest.worker.indexing.fault.FaultInjectionContext
+import com.osscontest.worker.indexing.fault.IndexingFaultInjector
 import com.osscontest.worker.indexing.parsing.DocumentParserRegistry
 import com.osscontest.worker.indexing.parsing.ParsingTimeoutGuard
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
@@ -17,9 +19,11 @@ import com.osscontest.worker.indexing.publication.service.IndexingFailureService
 import com.osscontest.worker.indexing.retrieval.DocumentDownloadClient
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
+import jakarta.annotation.PostConstruct
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
+import java.net.InetAddress
 import java.time.Duration
 import java.time.LocalDateTime
 
@@ -35,6 +39,7 @@ class IndexingPipelineRunner(
     private val chunkGuard: ChunkGuard,
     private val indexingProcessor: IndexingProcessor,
     private val indexingFailureService: IndexingFailureService,
+    private val faultInjector: IndexingFaultInjector,
     @Value("\${indexing.worker-id:#{T(java.util.UUID).randomUUID().toString()}}")
     private val workerId: String,
     @Value("\${indexing.retry.max-attempts}")
@@ -60,9 +65,17 @@ class IndexingPipelineRunner(
             chunkingService = chunkingService,
             chunkGuard = chunkGuard,
             indexingProcessor = indexingProcessor,
+            faultInjector = faultInjector,
             maxFileSizeBytes = maxFileSizeBytes,
             chunkingStrategy = chunkingStrategy,
         )
+
+    @PostConstruct
+    fun logWorkerInfo() {
+        log.info("WORKER_STARTED workerId={} hostname={}", workerId, hostname())
+    }
+
+    fun currentWorkerId(): String = workerId
 
     /**
      * Kafka 배치 리스너가 documentId 그룹마다 부르는 단일 진입점이다.
@@ -147,11 +160,13 @@ class IndexingPipelineRunner(
             }
             val attemptStartedAt = System.nanoTime()
             log.info(
-                "indexing attempt started: jobId={} eventId={} documentId={} documentVersionId={}",
+                "INDEXING_JOB_STARTED jobId={} sourceEventId={} status={} workerId={} partition={} offset={}",
                 jobId,
                 event.eventId,
-                event.documentId,
-                documentVersionId,
+                IndexingJobStatus.PROCESSING,
+                workerId,
+                recordIdentity.partition,
+                recordIdentity.offset,
             )
             try {
                 currentStage = "VALIDATING"
@@ -183,13 +198,23 @@ class IndexingPipelineRunner(
                     elapsedMillis(validationStartedAt),
                 )
 
-                attemptProcessor.process(jobId, event, documentVersion) { stage -> currentStage = stage }
+                attemptProcessor.process(
+                    jobId,
+                    event,
+                    documentVersion,
+                    FaultInjectionContext(
+                        sourceEventId = event.eventId,
+                        workerId = workerId,
+                        recordIdentity = recordIdentity,
+                    ),
+                ) { stage -> currentStage = stage }
                 log.info(
-                    "indexing job completed: jobId={} eventId={} documentId={} documentVersionId={} durationMs={}",
+                    "INDEXING_JOB_COMPLETED jobId={} sourceEventId={} workerId={} partition={} offset={} durationMs={}",
                     jobId,
                     event.eventId,
-                    event.documentId,
-                    documentVersionId,
+                    workerId,
+                    recordIdentity.partition,
+                    recordIdentity.offset,
                     elapsedMillis(jobStartedAt),
                 )
                 sample.stop(meterRegistry.timer("indexing_job_duration_seconds", "phase", "total"))
@@ -288,9 +313,11 @@ class IndexingPipelineRunner(
             return null
         }
         if (inserted == 0 && !job.matches(recordIdentity)) {
-            log.info(
-                "duplicate publication ignored: eventId={} original={}-{}@{} duplicate={}-{}@{}",
-                event.eventId,
+            log.warn(
+                "INDEXING_EVENT_REPUBLISHED sourceEventId={} " +
+                    "originalTopic={} originalPartition={} originalOffset={} " +
+                    "republishedTopic={} republishedPartition={} republishedOffset={} action=IGNORED",
+                job.sourceEventId,
                 job.kafkaTopic,
                 job.kafkaPartition,
                 job.kafkaOffset,
@@ -302,12 +329,30 @@ class IndexingPipelineRunner(
         }
         if (inserted == 0) {
             log.info(
-                "Kafka record redelivered: eventId={} topic={} partition={} offset={}",
-                event.eventId,
+                "INDEXING_EVENT_REDELIVERED sourceEventId={} topic={} partition={} offset={} " +
+                    "previousStatus={} previousWorkerId={} currentWorkerId={}",
+                job.sourceEventId,
                 recordIdentity.topic,
                 recordIdentity.partition,
                 recordIdentity.offset,
+                job.status,
+                job.workerId,
+                workerId,
             )
+            if (job.status in RECOVERABLE_STATUSES) {
+                log.warn(
+                    "INDEXING_JOB_RECOVERY recoveryType={} jobId={} sourceEventId={} previousStatus={} " +
+                        "previousWorkerId={} currentWorkerId={} partition={} offset={}",
+                    recoveryType(job.workerId),
+                    job.id,
+                    job.sourceEventId,
+                    job.status,
+                    job.workerId,
+                    workerId,
+                    recordIdentity.partition,
+                    recordIdentity.offset,
+                )
+            }
         }
         return job.id
     }
@@ -343,4 +388,25 @@ class IndexingPipelineRunner(
 
     private fun elapsedMillis(startedAt: Long): Long =
         (System.nanoTime() - startedAt) / 1_000_000
+
+    private fun recoveryType(previousWorkerId: String?): String =
+        when (previousWorkerId) {
+            null -> "UNOWNED_JOB"
+            workerId -> "SAME_WORKER_REDELIVERY"
+            else -> "WORKER_HANDOFF"
+        }
+
+    private fun hostname(): String =
+        System.getenv("HOSTNAME")
+            ?.takeIf { it.isNotBlank() }
+            ?: runCatching { InetAddress.getLocalHost().hostName }.getOrDefault("unknown")
+
+    private companion object {
+        val RECOVERABLE_STATUSES =
+            setOf(
+                IndexingJobStatus.PENDING,
+                IndexingJobStatus.PROCESSING,
+                IndexingJobStatus.RETRY_WAIT,
+            )
+    }
 }

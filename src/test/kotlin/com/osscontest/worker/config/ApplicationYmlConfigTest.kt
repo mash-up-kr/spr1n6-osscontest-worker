@@ -47,4 +47,16 @@ class ApplicationYmlConfigTest {
         assertThat(props.getProperty("indexing.chunking.overlap-tokens"))
             .isEqualTo("\${INDEXING_OVERLAP_TOKENS:64}")
     }
+
+    @Test
+    fun `fault injection은 기본 비활성이고 환경변수로 대상을 지정할 수 있다`() {
+        val factory = YamlPropertiesFactoryBean()
+        factory.setResources(ClassPathResource("application.yml"))
+        val props = factory.getObject()!!
+
+        assertThat(props.getProperty("fault-injection.enabled"))
+            .isEqualTo("\${FAULT_INJECTION_ENABLED:false}")
+        assertThat(props.getProperty("fault-injection.phase"))
+            .isEqualTo("\${FAULT_INJECTION_PHASE:EMBEDDING}")
+    }
 }

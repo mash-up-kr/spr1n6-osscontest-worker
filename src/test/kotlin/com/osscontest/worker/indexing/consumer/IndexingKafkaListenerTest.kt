@@ -35,6 +35,10 @@ class IndexingKafkaListenerTest {
     private val listener = IndexingKafkaListener(runner, deletionHandler, objectMapper, executor)
     private val ack: Acknowledgment = mock()
 
+    init {
+        whenever(runner.currentWorkerId()).thenReturn("worker-test")
+    }
+
     @AfterEach
     fun tearDown() {
         executor.shutdownNow()
@@ -191,12 +195,16 @@ class IndexingKafkaListenerTest {
             listener.onMessage(listOf(record), ack)
 
             val receivedLog =
-                appender.list.first { it.formattedMessage.startsWith("event received:") }
+                appender.list.first { it.formattedMessage.startsWith("INDEXING_EVENT_RECEIVED") }
             assertThat(receivedLog.mdcPropertyMap["traceId"]).isEqualTo("trace-log-123")
             assertThat(receivedLog.formattedMessage)
                 .contains("eventType=INDEXING_REQUESTED")
                 .contains("documentId=1")
+                .contains("workerId=worker-test")
                 .contains("topic=indexing partition=3 offset=99")
+
+            val ackLog = appender.list.first { it.formattedMessage.startsWith("KAFKA_BATCH_ACK") }
+            assertThat(ackLog.formattedMessage).contains("batchSize=1 records=[3:99]")
         } finally {
             logger.detachAppender(appender)
             appender.stop()
