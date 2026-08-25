@@ -70,6 +70,7 @@ class IndexingPublicationServiceTest {
             documentId = 2L,
             chunkNo = no,
             content = "content-$no",
+            contentTokens = "content $no",
             contentHash = "hash-$no",
             tokenCount = 1,
             pageFrom = null,

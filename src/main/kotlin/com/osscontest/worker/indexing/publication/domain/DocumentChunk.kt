@@ -7,6 +7,7 @@ data class DocumentChunk(
     val documentId: Long,
     val chunkNo: Int,
     val content: String,
+    val contentTokens: String,
     val contentHash: String,
     val tokenCount: Int?,
     val pageFrom: Int?,
