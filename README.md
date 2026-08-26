@@ -317,5 +317,4 @@ integration DB에서 `./gradlew integrationTest`도 실행합니다.
 
 ## License
 
-현재 저장소에는 `LICENSE` 파일이 포함되어 있지 않다. 배포·재사용 전에
-프로젝트 소유자가 정한 라이선스를 확인해야 합니다.
+이 프로젝트는 [MIT License](LICENSE)로 배포됩니다.
