@@ -4,12 +4,12 @@
 ![Kotlin 2.3.21](https://img.shields.io/badge/Kotlin-2.3.21-7F52FF?logo=kotlin&logoColor=white)
 ![Spring Boot 4.1.0](https://img.shields.io/badge/Spring%20Boot-4.1.0-6DB33F?logo=springboot&logoColor=white)
 
-Tmax OpenSQL 기반 AI 문서 관리 시스템의 비동기 인덱싱 Worker다. Kafka로
+Tmax OpenSQL 기반 AI 문서 관리 시스템의 비동기 인덱싱 Worker입니다. Kafka로
 전달된 문서 이벤트를 받아 원문 다운로드, 파싱, 청킹, 임베딩, pgvector
-저장까지 수행한다.
+저장까지 수행합니다.
 
 장시간 수행되는 AI 작업에서 발생할 수 있는 **Worker 장애, 중복 이벤트,
-외부 API 장애, DB 장애**를 고려해 재처리와 멱등성을 중심으로 설계했다.
+외부 API 장애, DB 장애**를 고려해 재처리와 멱등성을 중심으로 설계했습니다.
 
 > 2026 공개SW 개발자대회 TmaxTibero 기업과제<br>
 > **「Tmax OpenSQL 기반 AI 문서 관리 및 벡터 동기화 시스템」**
@@ -17,9 +17,9 @@ Tmax OpenSQL 기반 AI 문서 관리 시스템의 비동기 인덱싱 Worker다.
 ## 프로젝트 소개
 
 전체 시스템은 업로드된 문서를 검색 가능한 벡터 데이터로 변환하고, 의미
-기반 검색과 MCP 검색에서 활용할 수 있도록 동기화한다. 이 저장소는 업로드
+기반 검색과 MCP 검색에서 활용할 수 있도록 동기화합니다. 이 저장소는 업로드
 API나 검색 API가 아니라 **Kafka 이후의 문서 인덱싱과 삭제 후처리**를
-담당한다.
+담당합니다.
 
 Worker가 처리하는 주요 범위는 다음과 같다.
 
@@ -43,7 +43,7 @@ Worker가 처리하는 주요 범위는 다음과 같다.
 ## 시스템 아키텍처
 
 아래에서 강조된 Worker가 이 저장소의 범위다. Web, Server, Outbox, Relay,
-Search/MCP의 세부 구현은 다른 컴포넌트의 책임이다.
+Search/MCP의 세부 구현은 다른 컴포넌트의 책임입니다.
 
 ```mermaid
 flowchart LR
@@ -61,61 +61,12 @@ flowchart LR
 ```
 
 Kafka를 경계로 업로드 요청과 인덱싱을 분리하므로 파일 파싱과 외부 임베딩
-API 호출이 업로드 응답 시간을 직접 점유하지 않는다. 대신 Kafka 중복
-전달과 Worker 중단을 전제로 DB 결과가 같은 상태로 수렴하도록 설계한다.
+API 호출이 업로드 응답 시간을 직접 점유하지 않습니다. 대신 Kafka 중복
+전달과 Worker 중단을 전제로 DB 결과가 같은 상태로 수렴하도록 설계합니다.
 
-## Worker가 해결하는 문제와 핵심 설계
+## 핵심 설계
 
-### 비동기 인덱싱
-
-**Problem**\
-문서 다운로드·파싱·임베딩은 처리 시간이 길고 외부 시스템에 의존하므로
-업로드 요청과 동기적으로 처리하기 어렵다.
-
-**Decision**\
-Server → Outbox → Relay → Kafka → Worker로 인덱싱 경로를 분리하고,
-다운로드·파싱·임베딩은 DB 트랜잭션 밖에서 수행한다.
-
-**Result**\
-업로드와 인덱싱의 실행 수명을 분리하고, 장시간 외부 I/O 동안 DB
-트랜잭션을 점유하지 않는다.
-
-### 문서 단위 순서와 병렬 처리
-
-**Problem**\
-같은 문서의 이벤트는 순서가 중요하지만 서로 다른 문서까지 모두 직렬
-처리하면 처리량이 떨어진다.
-
-**Decision**\
-Kafka record key를 기준으로 Batch를 그룹화하고, 같은 key의 record는 그룹
-내부에서 순차 처리하며 서로 다른 key 그룹은 제한된 Executor에서 병렬
-처리한다.
-
-**Result**\
-같은 key 범위의 처리 순서를 유지하면서 서로 독립적인 문서 작업은 병렬로
-처리한다.
-
-같은 문서 순서 보장은 Producer가 같은 `documentId`에 같은 Kafka key를
-사용한다는 전제에 의존한다. Worker는 record key와 payload의
-`documentId`가 일치하는지 별도로 검증하지 않는다.
-
-### 장애 후 재처리와 멱등성
-
-**Problem**\
-Worker가 처리 도중 종료되면 미완료 작업을 다시 수행해야 하지만,
-at-least-once 환경에서는 정상적인 중복 이벤트도 발생할 수 있다.
-
-**Decision**\
-`source_event_id`와 최초 Kafka `(topic, partition, offset)`을
-`indexing_job`에 기록하고, 결정적 청킹·청크 UPSERT·검색 버전 fencing을
-함께 사용한다.
-
-**Result**\
-동일 이벤트의 재발행은 멱등하게 무시하고, 동일 Kafka record의 재전달은
-복구 가능한 Job을 다시 획득해 처리하며, 재실행 결과가 같은 DB 상태로
-수렴하도록 한다.
-
-## 인덱싱 처리 흐름
+### 인덱싱 처리 흐름
 
 ```mermaid
 sequenceDiagram
@@ -144,16 +95,16 @@ sequenceDiagram
 -   HWP: `application/x-hwp`, `application/haansofthwp`
 -   Text/Markdown: `text/plain`, `text/markdown`
 
-청킹 전략은 Worker 인스턴스의 전역 설정으로 선택한다.
+청킹 전략은 Worker 인스턴스의 전역 설정으로 선택합니다.
 
 -   `FIXED_TOKEN`: 전체 추출 텍스트를 토큰 상한으로 분할한다.
 -   `PARAGRAPH`: 문단 경계를 유지하고 긴 문단만 분할한다.
 -   `PARAGRAPH_OVERLAP`: 긴 문단을 overlap을 두고 분할한다.
 
 Kafka Batch 처리, key별 병렬 실행, acknowledgment와 poll lifecycle의
-상세 설계는 [Processing Model](docs/PROCESSING_MODEL.md)에서 설명한다.
+상세 설계는 [Processing Model](docs/PROCESSING_MODEL.md)에서 설명합니다.
 
-## Job 상태와 멱등성
+### Job 상태와 멱등성
 
 ```mermaid
 stateDiagram-v2
@@ -166,10 +117,11 @@ stateDiagram-v2
 ```
 
 Worker는 `indexing_job`에 처리 상태와 Kafka record identity를 영속화하여
-프로세스 메모리에 의존하지 않고 작업을 추적한다. 동일 이벤트 재수신
-판정, Job 재획득 조건, 상태별 복구 방식의 상세 내용은 [Failure Handling](docs/FAILURE_HANDLING.md)에서 설명한다.
+프로세스 메모리에 의존하지 않고 작업을 추적합니다. 동일 이벤트 재수신
+판정, Job 재획득 조건, 상태별 복구 방식의 상세 내용은 [Failure
+Handling](docs/FAILURE_HANDLING.md)에서 설명합니다.
 
-## 장애 대응
+### 장애 대응
 
 | 장애 시나리오 | 대응 |
 |---|---|
@@ -187,8 +139,8 @@ Worker는 `indexing_job`에 처리 상태와 Kafka record identity를 영속화�
 ## OpenSQL 활용
 
 Worker는 Tmax OpenSQL을 인덱싱 결과와 작업 상태의 영속 저장소로
-사용한다. `document_chunk`에 청크와 1,536차원 임베딩을 저장하고,
-`indexing_job`에 처리 상태와 Kafka record identity를 기록한다.
+사용합니다. `document_chunk`에 청크와 1,536차원 임베딩을 저장하고,
+`indexing_job`에 처리 상태와 Kafka record identity를 기록합니다.
 
 | 데이터 | Worker의 사용 방식 |
 |---|---|
@@ -196,14 +148,6 @@ Worker는 Tmax OpenSQL을 인덱싱 결과와 작업 상태의 영속 저장소�
 | `document_version` | 원본 위치·MIME·hash·버전 정보를 읽고, 완료 시 chunk 수와 `indexed_at` 갱신 |
 | `document_chunk` | `(document_version_id, chunk_no)` 기준 UPSERT, Nori 토큰·JSONB metadata·`vector(1536)` 저장 |
 | `indexing_job` | 이벤트 멱등 키, 처리 상태, 시도 횟수, Worker, 오류, Kafka 위치 기록 |
-
-물리 스키마와 migration은 이 저장소에 포함되어 있지 않으며 Server/Core가
-소유한 공용 스키마가 미리 준비되어 있어야 한다. Hibernate 설정도
-`ddl-auto: none`이다.
-
-HNSW/IVFFlat 검색 인덱스, OpenCrypto 기반 암호화, OpenSQL cluster HA
-구성, 검색 API와 MCP 인터페이스는 전체 시스템의 다른 구성 요소가
-담당하며 이 Worker의 구현 범위에는 포함되지 않는다.
 
 ## 설계 문서
 
@@ -217,15 +161,15 @@ HNSW/IVFFlat 검색 인덱스, OpenCrypto 기반 암호화, OpenSQL cluster HA
 
 기본 테스트는 외부 서비스 없이 H2와 test double을 사용해 listener
 ACK/NACK, key별 순서, 파서, 청킹 결정성, retry 분류, publication 호출을
-검증한다.
+검증합니다.
 
 ```bash
 ./gradlew test
 ```
 
 `integration` tag 테스트는 실제 PostgreSQL/pgvector 공용 스키마를 사용해
-Job 상태 전이, 고유 제약, 청크 삭제와 파이프라인 재시도를 검증한다.
-안전을 위해 DB 이름에 `test` 또는 `integration`이 포함되어야 한다.
+Job 상태 전이, 고유 제약, 청크 삭제와 파이프라인 재시도를 검증합니다.
+안전을 위해 DB 이름에 `test` 또는 `integration`이 포함되어야 합니다.
 
 ```bash
 set -a
@@ -234,7 +178,7 @@ set +a
 ./gradlew integrationTest
 ```
 
-실제 OpenAI 연동 테스트는 `OPENAI_API_KEY`가 설정된 경우에만 실행된다.
+실제 OpenAI 연동 테스트는 `OPENAI_API_KEY`가 설정된 경우에만 실행됩니다.
 
 ## 시작하기
 
@@ -247,12 +191,12 @@ set +a
 -   원문이 저장된 S3 호환 Object Storage
 -   OpenAI API key
 
-이 저장소에는 Docker Compose와 DB migration이 없다. Worker만 실행하기
-전에 외부 의존성과 공용 스키마를 먼저 준비해야 한다.
+이 저장소에는 Docker Compose와 DB migration이 없습니다. Worker만 실행하기
+전에 외부 의존성과 공용 스키마를 먼저 준비해야 합니다.
 
 ### 환경 변수
 
-`.env.example`을 복사하고 빈 값을 실행 환경에 맞게 채운다.
+`.env.example`을 복사하고 빈 값을 실행 환경에 맞게 채웁니다.
 
 ```bash
 cp .env.example .env
@@ -296,7 +240,7 @@ cp .env.example .env
 
 DB health gate와 삭제 sweep 간격 등 나머지 설정은
 [`application.yml`](src/main/resources/application.yml)에서 확인할 수
-있다.
+있습니다.
 
 ### 로컬 실행
 
@@ -308,7 +252,7 @@ set +a
 ./gradlew bootRun
 ```
 
-JAR로 실행하려면 다음 명령을 사용한다.
+JAR로 실행하려면 다음 명령을 사용합니다.
 
 ```bash
 ./gradlew bootJar
@@ -326,15 +270,15 @@ docker run --rm \
   osscontest-indexing-worker
 ```
 
-DB, Kafka, Object Storage 주소는 컨테이너에서 접근 가능한 주소여야 한다.
-종료는 다음과 같이 수행한다.
+DB, Kafka, Object Storage 주소는 컨테이너에서 접근 가능한 주소여야 합니다.
+종료는 다음과 같이 수행합니다.
 
 ```bash
 docker stop aidocs-worker
 ```
 
 Docker image는 non-root `worker` 사용자로 실행되며, health check는 HTTP
-endpoint가 아니라 Java PID 1의 생존 여부를 확인한다.
+endpoint가 아니라 Java PID 1의 생존 여부를 확인합니다.
 
 ## 기술 스택
 
@@ -365,23 +309,13 @@ src/main/kotlin/com/osscontest/worker/indexing
 └── fault/         # 환경변수 기반 장애 주입
 ```
 
-## 관련 문서
-
--   [Architecture](docs/ARCHITECTURE.md)
--   [Processing Model](docs/PROCESSING_MODEL.md)
--   [Failure Handling](docs/FAILURE_HANDLING.md)
--   [코드 컨벤션](docs/CODE_CONVENTIONS.md)
-
-상세 문서와 실제 코드가 충돌하면 현재 코드와 `application.yml`을
-기준으로 판단한다.
-
 ## Contributing
 
 변경 전 패키지 경계와 공용 DB 계약을 확인하고, 최소한 `./gradlew test`를
-통과시킨다. 실제 DB 계약이나 OpenAI 연동을 변경하는 경우 전용
-integration DB에서 `./gradlew integrationTest`도 실행한다.
+통과시킵니다. 실제 DB 계약이나 OpenAI 연동을 변경하는 경우 전용
+integration DB에서 `./gradlew integrationTest`도 실행합니다.
 
 ## License
 
 현재 저장소에는 `LICENSE` 파일이 포함되어 있지 않다. 배포·재사용 전에
-프로젝트 소유자가 정한 라이선스를 확인해야 한다.
+프로젝트 소유자가 정한 라이선스를 확인해야 합니다.
