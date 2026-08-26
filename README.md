@@ -1,3 +1,5 @@
+[KO](README.md) / [EN](README_EN.md)
+
 # AI Document Indexing Worker
 
 ![Java 21](https://img.shields.io/badge/Java-21-007396?logo=openjdk&logoColor=white)
