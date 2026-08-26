@@ -2,7 +2,7 @@
 
 이 문서는 2026 공개SW 개발자대회 TmaxTibero 기업과제 「Tmax OpenSQL 기반 AI 문서 관리 및 벡터 동기화 시스템」의 문서 인덱싱 Worker가 Kafka record를 실행하는 모델을 설명한다. 기준은 현재 저장소의 production code, `application.yml`, Gradle dependency resolution, 테스트와 Dockerfile이다.
 
-설명하는 범위는 Kafka poll 이후 record가 batch listener에 전달되어 key별 task로 실행되고, 결과가 ACK 또는 NACK으로 연결된 뒤 consumer loop로 돌아가는 과정이다. 전체 시스템 구조와 DB transaction 설계는 [Worker Architecture](링크_추가_예정), crash·중복·재전달·retry의 상세 복구 정책은 [Failure Handling & Recovery](링크_추가_예정)를 참고한다.
+설명하는 범위는 Kafka poll 이후 record가 batch listener에 전달되어 key별 task로 실행되고, 결과가 ACK 또는 NACK으로 연결된 뒤 consumer loop로 돌아가는 과정이다. 전체 시스템 구조와 DB transaction 설계는 [Worker Architecture](ARCHITECTURE.md), crash·중복·재전달·retry의 상세 복구 정책은 [Failure Handling & Recovery](FAILURE_HANDLING.md)를 참고한다.
 
 ## 1. 문서 목적과 범위
 
@@ -24,7 +24,7 @@
 - processing time이 consumer liveness에 어떤 영향을 주는가
 - process, consumer, partition, executor thread를 늘릴 때 병렬성이 어떻게 달라지는가
 
-Job 상태별 재획득, duplicate publish와 redelivery 판정, retryable/permanent 오류 분류 등 **다음 실행에서 어떻게 복구하는가**는 이 문서의 범위가 아니며 [Failure Handling & Recovery](링크_추가_예정)에서 설명한다.
+Job 상태별 재획득, duplicate publish와 redelivery 판정, retryable/permanent 오류 분류 등 **다음 실행에서 어떻게 복구하는가**는 이 문서의 범위가 아니며 [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 설명한다.
 
 ## 2. Processing Requirements
 
@@ -351,7 +351,7 @@ ConsumerRecord
 
 `INDEXING_REQUESTED`의 pipeline은 Job 획득 이후 validation, download, hash verification, parse, chunk, embedding, publication을 같은 outer indexing thread에서 순차 호출한다. Parsing 계산만 parse executor로 넘겼다가 결과를 기다리고, embedding client 호출도 synchronous하게 수행한다.
 
-각 단계의 내부 DB transaction 구성과 publication 원자성은 [Worker Architecture](링크_추가_예정)에서 설명한다.
+각 단계의 내부 DB transaction 구성과 publication 원자성은 [Worker Architecture](ARCHITECTURE.md)에서 설명한다.
 
 ### 9.2 Application-level record completion
 
@@ -361,7 +361,7 @@ Listener 관점의 완료는 “해당 record에 대한 현재 실행 정책이 
 - terminal 정책에 따라 pipeline이 실행을 생략하거나 종료하고 정상 반환한 경우
 - malformed JSON 또는 listener-level invalid event를 로그 후 소비한 경우
 
-Job 상태별 skip·재획득, duplicate publish/redelivery 판정과 terminal failure 정책은 [Failure Handling & Recovery](링크_추가_예정)에서 설명한다.
+Job 상태별 skip·재획득, duplicate publish/redelivery 판정과 terminal failure 정책은 [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 설명한다.
 
 ### 9.3 Kafka, task, acknowledgment boundary 비교
 
@@ -372,7 +372,7 @@ Job 상태별 skip·재획득, duplicate publish/redelivery 판정과 terminal f
 | record pipeline | 한 record의 event handler 실행 | 전체 batch를 감싸는 transaction 없음 |
 | Kafka acknowledgment | DB 처리 결과를 기다린 뒤 listener thread에서 호출 | broker offset과 DB의 atomic transaction이 아님 |
 
-Listener thread에서 executor thread로 실행이 넘어가며 서로 다른 key group은 독립적으로 진행된다. DB transaction의 상세 경계는 [Worker Architecture](링크_추가_예정), 실패 후 재실행과 상태 수렴은 [Failure Handling & Recovery](링크_추가_예정)에서 다룬다.
+Listener thread에서 executor thread로 실행이 넘어가며 서로 다른 key group은 독립적으로 진행된다. DB transaction의 상세 경계는 [Worker Architecture](ARCHITECTURE.md), 실패 후 재실행과 상태 수렴은 [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 다룬다.
 
 ## 10. Batch Completion과 Offset Management
 
@@ -430,13 +430,13 @@ ack.nack(0, INDEXING_DB_HEALTH_PAUSE_NACK_DELAY)
 
 Default delay는 5초다. Batch listener의 index 0 NACK이므로 index보다 앞서 commit할 record는 없고, 현재 batch의 record 전체가 partition별 seek/redelivery 대상이 될 수 있다. NACK delay 동안 consumer 전체가 pause되는 효과가 있으며 단일 실패 record만 별도 retry하는 모델이 아니다.
 
-NACK 호출 후 listener는 즉시 return한다. 이미 성공한 group의 DB transaction은 rollback되지 않는다. 이후 redelivery의 idempotency와 상태별 복구는 [Failure Handling & Recovery](링크_추가_예정)에서 다룬다.
+NACK 호출 후 listener는 즉시 return한다. 이미 성공한 group의 DB transaction은 rollback되지 않는다. 이후 redelivery의 idempotency와 상태별 복구는 [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 다룬다.
 
 ### 10.5 Unexpected exception
 
 Non-DB `ExecutionException`과 listener wait의 `InterruptedException`은 explicit ACK/NACK 없이 container로 전파된다. 이 저장소에는 별도 `CommonErrorHandler` configuration이 없으므로 live container의 재호출 횟수와 delay를 application 정책으로 정의하지 않는다.
 
-또한 pipeline 내부에서 처리 정책에 의해 정상 반환된 오류는 listener의 explicit ACK/NACK 판단에서 이미 결론 난 task로 보인다. Listener까지 exception이 전파되는 구체적인 오류 분류와 상태 기록 실패의 복구 정책은 [Failure Handling & Recovery](링크_추가_예정)에서 설명한다.
+또한 pipeline 내부에서 처리 정책에 의해 정상 반환된 오류는 listener의 explicit ACK/NACK 판단에서 이미 결론 난 task로 보인다. Listener까지 exception이 전파되는 구체적인 오류 분류와 상태 기록 실패의 복구 정책은 [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 설명한다.
 
 ## 11. Processing Time과 Consumer Liveness
 
@@ -667,7 +667,7 @@ Docker entrypoint는 `exec java ...`로 Java process를 PID 1로 실행해 SIGTE
 
 - **Context**: 현재 retry 구현은 별도 scheduler가 아니라 record를 처리하던 executor thread 안에서 대기한다.
 - **Decision**: Processing Model은 retry 정책 자체가 아니라 이 대기가 executor slot과 batch completion 시간을 점유한다는 실행 특성을 전제로 한다.
-- **Consequence**: retry가 길어질수록 pool 가용성과 consumer poll budget이 함께 줄어든다. 오류 분류, attempt와 backoff 정책은 [Failure Handling & Recovery](링크_추가_예정)에서 다룬다.
+- **Consequence**: retry가 길어질수록 pool 가용성과 consumer poll budget이 함께 줄어든다. 오류 분류, attempt와 backoff 정책은 [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 다룬다.
 
 ## 16. Verification
 
@@ -723,7 +723,7 @@ Default Gradle `test` task는 `integration` tag를 제외한다. `integrationTes
 ## 18. Related Documents
 
 - [README](../README.md)
-- [Worker Architecture](링크_추가_예정): Worker의 책임과 경계, building block, 데이터·transaction 구조와 architecture decision
-- [Failure Handling & Recovery](링크_추가_예정): 장애 모델, retry, redelivery, 상태별 복구와 보장 범위
+- [Worker Architecture](ARCHITECTURE.md): Worker의 책임과 경계, building block, 데이터·transaction 구조와 architecture decision
+- [Failure Handling & Recovery](FAILURE_HANDLING.md): 장애 모델, retry, redelivery, 상태별 복구와 보장 범위
 
 이 문서의 수치와 동작은 repository default 기준이다. Topic partition 수, producer key, 실제 배포 process 수와 외부 configuration은 각 실행 환경에서 별도로 확인해야 한다.

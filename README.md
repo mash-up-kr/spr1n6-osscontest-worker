@@ -151,7 +151,7 @@ sequenceDiagram
 -   `PARAGRAPH_OVERLAP`: 긴 문단을 overlap을 두고 분할한다.
 
 Kafka Batch 처리, key별 병렬 실행, acknowledgment와 poll lifecycle의
-상세 설계는 [Processing Model](링크_추가_예정)에서 설명한다.
+상세 설계는 [Processing Model](docs/PROCESSING_MODEL.md)에서 설명한다.
 
 ## Job 상태와 멱등성
 
@@ -167,8 +167,7 @@ stateDiagram-v2
 
 Worker는 `indexing_job`에 처리 상태와 Kafka record identity를 영속화하여
 프로세스 메모리에 의존하지 않고 작업을 추적한다. 동일 이벤트 재수신
-판정, Job 재획득 조건, 상태별 복구 방식의 상세 내용은 [Failure
-Handling](링크_추가_예정)에서 설명한다.
+판정, Job 재획득 조건, 상태별 복구 방식의 상세 내용은 [Failure Handling](docs/FAILURE_HANDLING.md)에서 설명한다.
 
 ## 장애 대응
 
@@ -183,7 +182,7 @@ Handling](링크_추가_예정)에서 설명한다.
 | 영구 오류 또는 재시도 한도 도달 | `FAILED` 상태로 종결 |
 | 문서 삭제 이벤트 누락 | 삭제 대상 잔여 chunk를 주기적으로 탐색해 멱등 삭제 |
 
-상세한 장애 감지 조건, 상태 전이, retry 정책, redelivery/republish 판정과 현재 보장 범위는 [Failure Handling & Recovery](링크_추가_예정)에 정리했습니다.
+상세한 장애 감지 조건, 상태 전이, retry 정책, redelivery/republish 판정과 현재 보장 범위는 [Failure Handling & Recovery](docs/FAILURE_HANDLING.md)에 정리했습니다.
 
 ## OpenSQL 활용
 
@@ -210,9 +209,9 @@ HNSW/IVFFlat 검색 인덱스, OpenCrypto 기반 암호화, OpenSQL cluster HA
 
 | 문서 | 내용 |
 |---|---|
-| [Architecture](링크_추가_예정) | Worker의 책임과 경계, 시스템 컨텍스트, 주요 컴포넌트와 설계 결정 |
-| [Processing Model](링크_추가_예정) | Kafka Batch, Partition, 순서 보장, 병렬 처리, ACK/NACK과 poll lifecycle |
-| [Failure Handling](링크_추가_예정) | 장애 모델, 멱등성, 재처리 전략, 상태 전이와 보장 범위 |
+| [Architecture](docs/ARCHITECTURE.md) | Worker의 책임과 경계, 시스템 컨텍스트, 주요 컴포넌트와 설계 결정 |
+| [Processing Model](docs/PROCESSING_MODEL.md) | Kafka Batch, Partition, 순서 보장, 병렬 처리, ACK/NACK과 poll lifecycle |
+| [Failure Handling](docs/FAILURE_HANDLING.md) | 장애 모델, 멱등성, 재처리 전략, 상태 전이와 보장 범위 |
 
 ## 테스트
 
@@ -368,9 +367,9 @@ src/main/kotlin/com/osscontest/worker/indexing
 
 ## 관련 문서
 
--   [Architecture](링크_추가_예정)
--   [Processing Model](링크_추가_예정)
--   [Failure Handling](링크_추가_예정)
+-   [Architecture](docs/ARCHITECTURE.md)
+-   [Processing Model](docs/PROCESSING_MODEL.md)
+-   [Failure Handling](docs/FAILURE_HANDLING.md)
 -   [코드 컨벤션](docs/CODE_CONVENTIONS.md)
 
 상세 문서와 실제 코드가 충돌하면 현재 코드와 `application.yml`을

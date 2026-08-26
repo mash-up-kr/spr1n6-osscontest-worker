@@ -18,7 +18,7 @@
 - 배포 모델과 횡단 관심사
 - 주요 architecture decision, 품질 요구사항과 구조적 한계
 
-Kafka poll·batch·thread·ACK/NACK의 상세 실행 모델은 [Processing Model](링크_추가_예정)에서, 장애별 감지·재처리·복구 알고리즘과 보장 범위는 [Failure Handling](링크_추가_예정)에서 다룬다. 이 문서에서는 두 영역을 architecture를 이해하는 데 필요한 수준까지만 설명한다.
+Kafka poll·batch·thread·ACK/NACK의 상세 실행 모델은 [Processing Model](PROCESSING_MODEL.md)에서, 장애별 감지·재처리·복구 알고리즘과 보장 범위는 [Failure Handling](FAILURE_HANDLING.md)에서 다룬다. 이 문서에서는 두 영역을 architecture를 이해하는 데 필요한 수준까지만 설명한다.
 
 ### 1.1 구현 기준
 
@@ -56,7 +56,7 @@ Kafka poll·batch·thread·ACK/NACK의 상세 실행 모델은 [Processing Model
 - 같은 문서의 순서는 producer가 `documentId`를 Kafka key로 사용한다는 계약에 의존하며, Worker는 Kafka key와 payload의 `documentId` 일치를 검사하지 않는다.
 - Kafka offset과 DB 상태는 하나의 transaction으로 묶이지 않으므로, ACK 전 crash나 NACK에 따른 record 재전달 가능성을 전제로 한다.
 
-consumer group, listener concurrency, batch 크기, heartbeat/session timeout, `max.poll.interval.ms`, executor와 ACK/NACK의 상세 실행 모델은 [Processing Model](링크_추가_예정)에서 설명한다.
+consumer group, listener concurrency, batch 크기, heartbeat/session timeout, `max.poll.interval.ms`, executor와 ACK/NACK의 상세 실행 모델은 [Processing Model](PROCESSING_MODEL.md)에서 설명한다.
 
 ### 3.2 데이터와 transaction
 
@@ -291,7 +291,7 @@ flowchart LR
 
 Worker process가 ACK 전에 종료되면 partition 재할당과 record 재전달은 Kafka consumer group이 담당한다. 재전달된 record를 받은 Worker는 영속화된 event identity, Kafka record identity와 Job 상태를 기준으로 실행 여부를 판단해 결과가 같은 DB 상태로 수렴하도록 한다.
 
-오류 분류, retry/backoff, Worker handoff, 동일 record 재전달과 동일 event 재발행의 판정, DB 장애와 crash window의 상세 동작은 [Failure Handling](링크_추가_예정)에서 설명한다.
+오류 분류, retry/backoff, Worker handoff, 동일 record 재전달과 동일 event 재발행의 판정, DB 장애와 crash window의 상세 동작은 [Failure Handling](FAILURE_HANDLING.md)에서 설명한다.
 
 ### 7.4 `DOCUMENT_DELETED`
 
@@ -428,7 +428,7 @@ stateDiagram-v2
     FAILED --> [*]
 ```
 
-`indexing_job.status`는 처리 lifecycle의 영속 상태를 나타낸다. crash 이후 재획득, 삭제와의 경합, 겹쳐 실행 중인 attempt가 만드는 세부 상태 전이는 [Failure Handling](링크_추가_예정)에서 설명한다.
+`indexing_job.status`는 처리 lifecycle의 영속 상태를 나타낸다. crash 이후 재획득, 삭제와의 경합, 겹쳐 실행 중인 attempt가 만드는 세부 상태 전이는 [Failure Handling](FAILURE_HANDLING.md)에서 설명한다.
 
 DB에 저장되는 phase는 `DOWNLOADING`, `PARSING`, `CHUNKING`, `EMBEDDING`이다. `VALIDATING`, `VERIFYING_CONTENT`, `PUBLISHING`은 로그의 stage지만 현재 `indexing_job.phase`에 저장되지 않는다. phase는 현재 실행 여부가 아니라 마지막으로 기록된 진입 지점이므로 `status`와 함께 해석해야 한다.
 
@@ -520,7 +520,7 @@ Worker는 오류를 architecture 수준에서 다음 세 범주로 나눈다.
 - retryable failure: 일시적 외부 시스템 오류는 durable Job 상태를 남기고 제한된 재시도로 연결한다.
 - infrastructure failure: DB에 처리 결과 자체를 기록할 수 없는 실패는 Kafka acknowledgment를 완료하지 않고 redelivery 경로로 연결한다.
 
-구체적인 오류 분류, retry 계층, DB 장애 시 NACK과 health gate, poison event 처리와 timeout 한계는 [Failure Handling](링크_추가_예정)에서 설명한다.
+구체적인 오류 분류, retry 계층, DB 장애 시 NACK과 health gate, poison event 처리와 timeout 한계는 [Failure Handling](FAILURE_HANDLING.md)에서 설명한다.
 
 ### 10.4 Worker identity and traceability
 
@@ -557,7 +557,7 @@ indexing: partitions assigned: [doc.events.v1-0, doc.events.v1-1]
 
 Worker에는 `EMBEDDING` 호출 직전 실행을 block할 수 있는 비활성 기본값의 장애 주입 지점이 있다. 이 기능은 production 복구 로직이 아니라 장애 상황에서 Worker 중단과 재처리 경로를 확인하기 위한 test support다.
 
-구체적인 활성화 조건과 제약은 [Failure Handling](링크_추가_예정)에서 설명한다.
+구체적인 활성화 조건과 제약은 [Failure Handling](FAILURE_HANDLING.md)에서 설명한다.
 
 ## 11. Architecture Decisions
 
@@ -585,7 +585,7 @@ Worker에는 `EMBEDDING` 호출 직전 실행을 block할 수 있는 비활성 �
 | Traceability | 특정 event가 어느 Worker와 Kafka record에서 처리됐는지 추적해야 한다. | `indexing_job`과 structured log에 Worker ID, trace ID, topic/partition/offset을 연결한다. |
 | Deletion convergence | 삭제 event 누락 또는 처리 경합으로 chunk가 남을 수 있다. | 멱등 삭제와 scheduled sweep으로 잔여 데이터를 반복 정리한다. |
 
-세부 실행 모델의 검증 포인트는 [Processing Model](링크_추가_예정), 장애 복구의 상태별 보장과 한계는 [Failure Handling](링크_추가_예정)에서 다룬다.
+세부 실행 모델의 검증 포인트는 [Processing Model](PROCESSING_MODEL.md), 장애 복구의 상태별 보장과 한계는 [Failure Handling](FAILURE_HANDLING.md)에서 다룬다.
 
 ## 13. Architecture Risks & Limitations
 
@@ -601,7 +601,7 @@ Worker에는 `EMBEDDING` 호출 직전 실행을 block할 수 있는 비활성 �
 | process-only health check | Docker health check는 Java PID 생존만 확인하므로 Kafka/DB/storage/OpenAI 연결 불능을 readiness로 구분하지 못한다. |
 | 관측 export 부재 | Micrometer 계측은 있지만 exporter, dashboard, alert가 없어 deployment에서 별도 연결하지 않으면 process 밖에서 사용할 수 없다. |
 
-처리 시간 budget, executor 점유, listener concurrency와 batch replay 범위 같은 실행 모델의 한계는 [Processing Model](링크_추가_예정)에서 다룬다. lease/fencing 부재, retry/poison event, duplicate republish, 상태 경합과 같은 복구 한계는 [Failure Handling](링크_추가_예정)에서 다룬다.
+처리 시간 budget, executor 점유, listener concurrency와 batch replay 범위 같은 실행 모델의 한계는 [Processing Model](PROCESSING_MODEL.md)에서 다룬다. lease/fencing 부재, retry/poison event, duplicate republish, 상태 경합과 같은 복구 한계는 [Failure Handling](FAILURE_HANDLING.md)에서 다룬다.
 
 이 저장소에서 확인되지 않아 현재 architecture로 포함하지 않은 기능은 다음과 같다.
 
@@ -616,8 +616,8 @@ Worker에는 `EMBEDDING` 호출 직전 실행을 block할 수 있는 비활성 �
 ## 14. Related Documents
 
 - [README](../README.md): 프로젝트 소개, 실행 방법, 환경변수
-- [Processing Model](링크_추가_예정): Kafka batch, partition, ordering, executor, ACK/NACK과 consumer liveness
-- [Failure Handling](링크_추가_예정): 장애 모델, retry, redelivery, 복구 알고리즘과 보장 범위
+- [Processing Model](PROCESSING_MODEL.md): Kafka batch, partition, ordering, executor, ACK/NACK과 consumer liveness
+- [Failure Handling](FAILURE_HANDLING.md): 장애 모델, retry, redelivery, 복구 알고리즘과 보장 범위
 - [Code Conventions](CODE_CONVENTIONS.md): 코드 작성과 검토 규칙
 
 일부 기존 설계·계획 문서는 작성 시점의 목표나 과거 package 상태를 담고 있을 수 있다. 현재 동작을 판단할 때는 이 문서와 실제 소스 코드·설정을 우선한다.

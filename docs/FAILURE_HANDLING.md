@@ -18,7 +18,7 @@ Worker는 Kafka의 `INDEXING_REQUESTED` 이벤트를 받아 원문 다운로드,
 - failure injection과 현재 테스트 근거
 - 현재 복구 설계가 보장하는 범위와 한계
 
-전체 시스템 구조와 DB transaction 설계는 [Worker Architecture](링크_추가_예정), Kafka poll·batch·thread·ACK/NACK의 상세 실행 모델과 processing time budget은 [Processing Model](링크_추가_예정)의 범위다. 여기서는 장애 감지와 다음 실행의 복구 판단에 직접 필요한 구조만 반복한다.
+전체 시스템 구조와 DB transaction 설계는 [Worker Architecture](ARCHITECTURE.md), Kafka poll·batch·thread·ACK/NACK의 상세 실행 모델과 processing time budget은 [Processing Model](PROCESSING_MODEL.md)의 범위다. 여기서는 장애 감지와 다음 실행의 복구 판단에 직접 필요한 구조만 반복한다.
 
 ### 1.1 검증 수준 표기
 
@@ -53,7 +53,7 @@ Worker는 Kafka의 `INDEXING_REQUESTED` 이벤트를 받아 원문 다운로드,
 
 Worker는 batch listener로 Kafka record를 수신하고 key별 task의 완료를 기다린 뒤 acknowledgment를 수행한다. DB failure가 listener까지 전파되면 batch NACK 경로로 연결될 수 있으며, ACK 전에 process가 종료되거나 offset commit이 완료되지 않으면 같은 record가 다시 전달될 수 있다.
 
-이 문서에서 중요한 전제는 **Kafka delivery 완료와 DB 처리 완료가 하나의 원자적 사건이 아니라는 점**이다. consumer group, partition, batch scheduling, executor, `AckMode.MANUAL`, ACK/NACK와 offset boundary의 상세 동작은 [Processing Model](링크_추가_예정)에서 설명한다.
+이 문서에서 중요한 전제는 **Kafka delivery 완료와 DB 처리 완료가 하나의 원자적 사건이 아니라는 점**이다. consumer group, partition, batch scheduling, executor, `AckMode.MANUAL`, ACK/NACK와 offset boundary의 상세 동작은 [Processing Model](PROCESSING_MODEL.md)에서 설명한다.
 
 ### 3.2 Batch ACK가 만드는 상태 혼합
 
@@ -81,7 +81,7 @@ Worker는 batch listener로 Kafka record를 수신하고 key별 task의 완료�
 
 Kafka identity는 Job을 처음 insert할 때 저장되며 이후 redelivery나 republish로 갱신하지 않는다. `worker_id`는 `start()`가 성공할 때 현재 Worker로 갱신하지만 fencing token이나 lease가 아니다.
 
-전체 `indexing_job` 데이터 모델과 다른 entity의 관계는 [Worker Architecture](링크_추가_예정)에서 설명한다.
+전체 `indexing_job` 데이터 모델과 다른 entity의 관계는 [Worker Architecture](ARCHITECTURE.md)에서 설명한다.
 
 ### 3.4 두 종류의 identity
 
@@ -101,7 +101,7 @@ Kafka identity는 Job을 처음 insert할 때 저장되며 이후 redelivery나 
 - publication은 commit됐지만 Kafka offset commit 전 종료
 - 여러 key group 중 일부만 DB commit된 상태에서 batch 종료
 
-각 DB transaction의 정확한 경계는 [Worker Architecture](링크_추가_예정)에서 설명한다.
+각 DB transaction의 정확한 경계는 [Worker Architecture](ARCHITECTURE.md)에서 설명한다.
 
 ## 4. Worker 처리 중 종료
 
@@ -124,7 +124,7 @@ Kafka record 수신
 
 Worker가 직접 다른 Worker의 생존을 감지하거나 partition을 재할당하지 않는다. process 종료나 consumer가 poll lifecycle을 유지하지 못하는 상황은 Kafka consumer group이 감지하고, group membership 변화에 따라 partition을 다른 consumer에 재할당할 수 있다.
 
-`SIGKILL`처럼 process가 사라지는 경우와 process는 살아 있지만 긴 처리로 poll interval을 초과하는 경우는 Kafka 관점에서 서로 다른 liveness 경로다. heartbeat/session timeout, `max.poll.interval.ms`, 실제 consumer group과 listener concurrency의 상세 설정은 [Processing Model](링크_추가_예정)에서 설명한다.
+`SIGKILL`처럼 process가 사라지는 경우와 process는 살아 있지만 긴 처리로 poll interval을 초과하는 경우는 Kafka 관점에서 서로 다른 liveness 경로다. heartbeat/session timeout, `max.poll.interval.ms`, 실제 consumer group과 listener concurrency의 상세 설정은 [Processing Model](PROCESSING_MODEL.md)에서 설명한다.
 
 이 저장소는 `group.instance.id`, container restart policy 또는 다중 Worker deployment를 정의하지 않는다. 따라서 partition handoff가 실제로 일어나려면 같은 consumer group의 다른 실행 중 Worker 또는 외부 orchestrator가 필요하다.
 
@@ -338,7 +338,7 @@ Worker retry는 별도 Kafka retry topic, Job poller, scheduler를 사용하지 
 - HTTP 400 변환 단위 테스트가 있다.
 - 429, 5xx, `Retry-After`, network timeout을 실제 OpenAI/Kafka와 함께 검증하는 테스트는 없다.
 
-Worker retry와 provider retry가 누적되면 listener completion과 consumer poll budget에 영향을 준다. `max.poll.interval.ms` 대비 최악 처리 시간 계산과 executor slot 점유 영향은 [Processing Model](링크_추가_예정)에서 설명한다.
+Worker retry와 provider retry가 누적되면 listener completion과 consumer poll budget에 영향을 준다. `max.poll.interval.ms` 대비 최악 처리 시간 계산과 executor slot 점유 영향은 [Processing Model](PROCESSING_MODEL.md)에서 설명한다.
 
 ## 7. Database 장애
 
@@ -359,7 +359,7 @@ Worker retry와 provider retry가 누적되면 listener completion과 consumer p
 
 Listener까지 `DataAccessException`이 전파되면 Worker는 해당 batch를 ACK하지 않고 NACK 경로로 연결한다. 이때 이미 DB에서 성공한 다른 Job도 같은 batch 범위에서 다시 전달될 수 있으므로 terminal status와 UPSERT가 재실행 결과를 흡수한다.
 
-NACK index, delay, Future barrier와 예상하지 못한 비-DB exception이 listener/container에 미치는 영향은 [Processing Model](링크_추가_예정)에서 설명한다. 이 문서에서는 이후 redelivery가 발생했을 때의 상태 수렴만 복구 보장으로 다룬다.
+NACK index, delay, Future barrier와 예상하지 못한 비-DB exception이 listener/container에 미치는 영향은 [Processing Model](PROCESSING_MODEL.md)에서 설명한다. 이 문서에서는 이후 redelivery가 발생했을 때의 상태 수렴만 복구 보장으로 다룬다.
 
 ### 7.3 DB health gate
 
@@ -395,7 +395,7 @@ download, parsing, chunking, embedding 결과는 publication 전까지 파일 �
 
 재처리 시 chunk는 `(document_version_id, chunk_no)` 기준 UPSERT되고 trailing chunk를 제거해 같은 document version의 결과를 현재 attempt의 chunk set으로 수렴시킨다.
 
-publication transaction의 정확한 write 순서와 데이터 모델은 [Worker Architecture](링크_추가_예정)에서 설명한다.
+publication transaction의 정확한 write 순서와 데이터 모델은 [Worker Architecture](ARCHITECTURE.md)에서 설명한다.
 
 ### 8.3 Schema dependency
 
@@ -581,12 +581,12 @@ indexing: partitions assigned: [doc.events.v1-0, doc.events.v1-1]
 
 9. **저장소가 process restart나 다중 Worker 배치를 정의하지 않는다.** consumer group recovery는 다른 Worker 또는 외부 orchestrator가 실제로 존재할 때 의미가 있다.
 
-Kafka/DB atomicity, 외부 schema와 OpenSQL HA 같은 구조적 한계는 [Worker Architecture](링크_추가_예정)에서, `max.poll.interval.ms` budget, batch acknowledgment 영향 범위, executor 점유, 실제 consumer group 설정과 같은 실행 모델의 한계는 [Processing Model](링크_추가_예정)에서 다룬다.
+Kafka/DB atomicity, 외부 schema와 OpenSQL HA 같은 구조적 한계는 [Worker Architecture](ARCHITECTURE.md)에서, `max.poll.interval.ms` budget, batch acknowledgment 영향 범위, executor 점유, 실제 consumer group 설정과 같은 실행 모델의 한계는 [Processing Model](PROCESSING_MODEL.md)에서 다룬다.
 
 ## 14. 관련 문서
 
 - [README](../README.md)
-- [Worker Architecture](링크_추가_예정): Worker의 책임과 경계, 데이터 모델, transaction boundary와 architecture decision
-- [Processing Model](링크_추가_예정): Kafka consumer, batch, partition, executor, ACK/NACK와 consumer liveness
+- [Worker Architecture](ARCHITECTURE.md): Worker의 책임과 경계, 데이터 모델, transaction boundary와 architecture decision
+- [Processing Model](PROCESSING_MODEL.md): Kafka consumer, batch, partition, executor, ACK/NACK와 consumer liveness
 
 과거 계획/설계 문서와 현재 production code가 충돌하면 이 문서 역시 production code를 기준으로 갱신해야 한다.
