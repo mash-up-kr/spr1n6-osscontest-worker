@@ -125,9 +125,11 @@ This document therefore addresses these crash windows explicitly:
 Exact database transaction boundaries are described in [Worker
 Architecture](ARCHITECTURE_EN.md).
 
-## 4. Termination During Worker Processing
+## 4. Recovery Strategies by Failure Type
 
-### 4.1 Failure Scenario
+### 4.1 Termination During Worker Processing
+
+#### 4.1.1 Failure Scenario
 
 The most important path is:
 
@@ -144,7 +146,7 @@ The concerns are that an external API call may be duplicated, an unfinished job
 remains in the database, and even jobs that finished earlier in the same batch
 may appear again in Kafka.
 
-### 4.2 Kafka Failure Detection and Reassignment
+#### 4.1.2 Kafka Failure Detection and Reassignment
 
 The Worker does not detect the liveness of other Workers or reassign partitions.
 Kafka's consumer group detects process termination or a consumer that fails to
@@ -157,7 +159,7 @@ different liveness paths. See the [Processing Model](PROCESSING_MODEL_EN.md) for
 heartbeat/session timeout, `max.poll.interval.ms`, and the actual consumer group
 and listener concurrency settings.
 
-### 4.3 Recovery Strategy
+#### 4.1.3 Recovery Strategy
 
 ```mermaid
 sequenceDiagram
@@ -186,7 +188,7 @@ Partition reassignment is a Kafka consumer-group capability. Determining whether
 this is the same record and reacquiring an unfinished job are responsibilities
 of the Worker's production code.
 
-### 4.4 Crash Windows
+#### 4.1.4 Crash Windows
 
 | Crash point | State that may remain in the database | Path on redelivery | Duplication/protection |
 |---|---|---|---|
@@ -204,7 +206,7 @@ to `PROCESSING`, changes `worker_id` to the current Worker, and increments
 `PROCESSING` job that reaches the limit becomes `FAILED` with
 `MAX_ATTEMPTS_EXCEEDED`.
 
-### 4.5 Guarantees and Limitations
+#### 4.1.5 Guarantees and Limitations
 
 The current design provides the following:
 
@@ -225,9 +227,9 @@ It does not guarantee:
 - Losslessness across Kafka broker failure, retention expiration, or incorrect
   operational offset changes
 
-## 5. Duplicate Event Publication and Kafka Redelivery
+### 4.2 Duplicate Event Publication and Kafka Redelivery
 
-### 5.1 Why `eventId` Alone Is Insufficient
+#### 4.2.1 Failure Scenario
 
 The same `source_event_id` can appear in two situations:
 
@@ -240,7 +242,7 @@ same event ID, on the other hand, prevents recovery of an incomplete job after a
 Worker crash. This Worker stores the initial Kafka position in the job and
 compares it with the current record.
 
-### 5.2 Actual Decision Logic
+#### 4.2.2 Decision and Recovery Strategy
 
 ```mermaid
 flowchart TD
@@ -270,7 +272,7 @@ The decision code resides in `IndexingPipelineRunner.acquireJobId()`.
 - If the previous `worker_id` differs from the current one:
   `recoveryType=WORKER_HANDOFF`.
 
-### 5.3 State Interaction
+#### 4.2.3 State-specific Handling
 
 | Existing status | Same-record redelivery | Same-event republish at another position |
 |---|---|---|
@@ -284,7 +286,7 @@ Republishing the same event ID for a `FAILED` job does not act as a retry
 trigger. Reprocessing requires a new request with a different source event
 identity.
 
-### 5.4 Database Constraint Assumptions
+#### 4.2.4 Database Constraints
 
 `insertIfAbsent()` uses `ON CONFLICT DO NOTHING`, relying on these constraints in
 the external schema:
@@ -294,7 +296,7 @@ the external schema:
 
 The recovery strategy depends on the external schema satisfying this contract.
 
-### 5.5 Guarantees and Limitations
+#### 4.2.5 Guarantees and Limitations
 
 - Production code contains an actual branch distinguishing duplicate
   publication from Kafka redelivery.
@@ -302,16 +304,12 @@ The recovery strategy depends on the external schema satisfying this contract.
 - An unfinished job for the same record is reprocessed, while a terminal job is
   not executed again.
 
-However, Kafka identity comparison assumes the initial job row is preserved
-accurately. If another event already has an active job for the same document
-version, inserting a new event ends in conflict and `findBySourceEventId()` also
-returns null, so the new event follows the ACK path. If the pre-existing active
-job later fails, there is no separate scheduler that automatically revives the
-ignored event.
+Kafka identity comparison assumes that the initial job row is preserved
+accurately.
 
-## 6. Embedding API and Transient-Failure Retries
+### 4.3 Embedding API and Transient Failures
 
-### 6.1 Retryable and Non-retryable Classification
+#### 4.3.1 Failure Scenario and Classification
 
 `EmbeddingService` separately converts only `BadRequestException` from the
 OpenAI Java SDK—HTTP 400—into a permanent failure. It becomes an
@@ -336,7 +334,7 @@ by the provider client, and otherwise unclassified application errors are
 eligible for Worker retries. This broadly absorbs transient errors, with the
 trade-off that a permanent but unclassified error may repeat until the limit.
 
-### 6.2 Two Retry Layers
+#### 4.3.2 Retry Strategy
 
 The currently resolved dependencies are Spring AI 2.0.0 and OpenAI Java core
 4.39.1. Without overrides, the Worker uses the defaults from Spring AI's OpenAI
@@ -356,7 +354,7 @@ batches. Therefore, `attempt_count=1` does not mean one OpenAI HTTP call. If an
 earlier embedding batch succeeds and a later batch fails, database publication
 has not started, but the Worker retry calls the earlier batch again.
 
-### 6.3 Retry Runtime
+#### 4.3.3 Retry Flow
 
 ```mermaid
 sequenceDiagram
@@ -387,7 +385,7 @@ They wait with `Thread.sleep()` in the same `IndexingPipelineRunner.run()`
 invocation and on the same batch-executor thread. The listener's batch ACK also
 waits until the job reaches `COMPLETED` or `FAILED`.
 
-### 6.4 Worker Termination During Retry
+#### 4.3.4 Worker Termination During Retry
 
 `recordFailure()` first commits `RETRY_WAIT` and `next_retry_at` in a
 `REQUIRES_NEW` transaction, then sleeps. If the Worker terminates during this
@@ -404,7 +402,7 @@ attempt but before the failure state is recorded, the job remains in
 `PROCESSING`. Reacquisition on the next redelivery consumes another attempt, and
 the backoff for the previous error is not stored.
 
-### 6.5 Retry Exhaustion
+#### 4.3.5 Retry Exhaustion
 
 - Permanent exception: immediately `FAILED` in the current attempt
 - Retryable exception with `attempt_count < maxAttempts`: `RETRY_WAIT`
@@ -421,16 +419,16 @@ the consumer poll budget. See the [Processing Model](PROCESSING_MODEL_EN.md) for
 the worst-case processing-time calculation against `max.poll.interval.ms` and
 the impact on executor-slot occupancy.
 
-## 7. Database Failures
+### 4.4 Database Failures
 
-### 7.1 Why a Separate Path Is Required
+#### 4.4.1 Failure Scenario
 
 For ordinary pipeline errors, the Worker can record `RETRY_WAIT` or `FAILED` in
 the database before deciding whether to ACK. If the database itself fails, that
 state cannot be recorded, so the same approach alone cannot leave evidence that
 the record was processed.
 
-### 7.2 Actual Exception Paths
+#### 4.4.2 Failure Handling
 
 Not every database error goes directly to NACK.
 
@@ -451,7 +449,7 @@ Future barrier, and the impact of unexpected non-database exceptions on the
 listener/container. This document treats convergence after subsequent
 redelivery as the recovery guarantee.
 
-### 7.3 Database Health Gate
+#### 4.4.3 Database Health Gate
 
 `DbHealthGate` executes `SELECT 1` every five seconds by default.
 
@@ -465,7 +463,7 @@ not interrupt or roll back an already executing batch. NACK and the health gate
 are separate mechanisms, and the scheduler may detect the database failure
 before or after the listener.
 
-### 7.4 Guarantees and Limitations
+#### 4.4.4 Guarantees and Limitations
 
 - A `DataAccessException` that reaches the listener causes a batch NACK instead
   of ACK.
@@ -474,9 +472,9 @@ before or after the listener.
 - A batch NACK can redeliver successful records, but job status reduces repeated
   processing.
 
-## 8. Partial Writes and Reprocessing
+### 4.5 Partial Writes and Reprocessing
 
-### 8.1 Chunks Are Not Stored Before Publication
+#### 4.5.1 Before Publication
 
 Until publication, download, parsing, chunking, and embedding results remain in
 a file or memory. Even when embeddings are split among several requests, chunk
@@ -484,7 +482,7 @@ rows are not inserted after each successful request. Therefore, a crash during
 embedding causes duplicate external calls rather than a partial chunk set in the
 database.
 
-### 8.2 Atomic Boundary of Publication Failure
+#### 4.5.2 Publication Atomicity
 
 Successful publication finalizes chunk results, version-completion information,
 conditional searchable-version promotion, and job `COMPLETED` in one database
@@ -498,13 +496,13 @@ set from the current attempt.
 The exact publication write order and data model are described in [Worker
 Architecture](ARCHITECTURE_EN.md).
 
-### 8.3 Schema Dependency
+#### 4.5.3 Schema Dependency
 
 UPSERT depends on the database unique constraint on
 `(document_version_id, chunk_no)`. Reprocessing convergence depends on this
 schema contract and the publication transaction.
 
-### 8.4 Failure Window After Database Success and Before Offset Commit
+#### 4.5.4 Failure After Database Success and Before Kafka Offset Commit
 
 When the publication transaction succeeds, the job is `COMPLETED`. If the
 Worker then dies before the `INDEXING_JOB_COMPLETED` log or batch ACK, the same
@@ -517,7 +515,7 @@ This path does not create an atomic database/Kafka transaction. Instead, it
 allows redelivery and uses the database's terminal status to avoid duplicate
 publication under at-least-once delivery.
 
-### 8.5 Concurrent-Attempt Limitation
+#### 4.5.5 Concurrent-Attempt Limitation
 
 `start()` can acquire a `PROCESSING` job and does not validate a lease or fencing
 token. During a rebalance, the previous Worker may still be executing, allowing
@@ -536,7 +534,7 @@ can write `COMPLETED`; the deleted guard on searchable-version promotion and the
 periodic deletion sweep are supporting mechanisms that reconverge chunk
 visibility and residual data. They do not guarantee exclusive execution.
 
-## 9. Job State Machine
+## 5. Job State Machine
 
 | State | Meaning for failure recovery |
 |---|---|
@@ -550,43 +548,43 @@ visibility and residual data. They do not guarantee exclusive execution.
 because the completion SQL itself has no status guard, a successful attempt that
 is already running can in fact change `FAILED` back to `COMPLETED`.
 
-## 10. Interactions Between Failures
+## 6. Interactions Between Failures
 
-### 10.1 Partial Batch Success + Another Blocked Job + Worker Crash
+### 6.1 Partial Batch Success + Another Blocked Job + Worker Crash
 
 The database contains both `COMPLETED` and `PROCESSING`. ACK does not occur
 because not every Future in the batch has completed. On redelivery, the completed
 job is skipped and only the processing job is reacquired. This is the main reason
 for combining batch ACK with durable per-job state.
 
-### 10.2 Retry Wait + Worker Crash
+### 6.2 Retry Wait + Worker Crash
 
 `RETRY_WAIT` commits first, and the record remains uncommitted. When a new Worker
 receives the same record, it calculates the remaining backoff from database time
 and waits. The retry count is preserved, but an additional attempt is consumed
 if the crash occurred after `start()`.
 
-### 10.3 Database Outage + Job Already Successful Within the Batch
+### 6.3 Database Outage + Job Already Successful Within the Batch
 
 An escaped `DataAccessException` in one group causes a NACK from index 0. Another
 group may be delivered again even if it already succeeded. Terminal skipping
 reduces reprocessing cost but does not eliminate Kafka lag or duplicate delivery.
 
-### 10.4 Prolonged Provider Outage + Poll Interval
+### 6.4 Prolonged Provider Outage + Poll Interval
 
 While SDK retries, Worker attempts, and linear sleeps accumulate, the listener
 callback does not return. Even if heartbeats continue, exceeding the 15-minute
 poll interval can trigger a rebalance. A new Worker may reacquire the same
 `PROCESSING`/`RETRY_WAIT` job and call the provider concurrently or sequentially.
 
-### 10.5 Successful Commit + ACK Gap
+### 6.5 Successful Commit + ACK Gap
 
 There is a window between database success and Kafka offset commit. Kafka may
 redeliver the record, but the Worker sees `COMPLETED` together with the same
 record identity and skips it. This safety depends on the source-event unique
 constraint and persistence of the job row.
 
-## 11. Failure Guarantees & Boundaries
+## 7. Failure Guarantees & Boundaries
 
 - Kafka processing is **at least once**; exactly-once execution is not
   guaranteed.
@@ -599,13 +597,11 @@ constraint and persistence of the job row.
   indefinitely. They end as `FAILED` according to the retry limit or permanent
   failure classification.
 
-## 12. Related Documents
+## 8. Related Documents
 
 - [README](../README_EN.md)
 - [Worker Architecture](ARCHITECTURE_EN.md): Worker responsibilities and
   boundaries, data model, transaction boundaries, and architecture decisions
 - [Processing Model](PROCESSING_MODEL_EN.md): Kafka consumer, batches,
   partitions, executors, ACK/NACK, and consumer liveness
-
-If older planning/design documents conflict with current production code, this
-document must likewise be updated to follow the production code.
+- [Code Conventions](CODE_CONVENTIONS_EN.md): Code authoring and review rules

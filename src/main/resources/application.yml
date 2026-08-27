@@ -25,8 +25,8 @@ spring:
       # 한 배치가 문서별 병렬 처리 한도를 넘지 않도록 listener 동시성의 두 배로 제한한다.
       max-poll-records: ${INDEXING_BATCH_SIZE:10}
       properties:
-        # 파일 다운로드·파싱·임베딩 최악 시간을 수용하면서 15분을 넘으면 재할당한다.
-        max.poll.interval.ms: 900000
+        # 같은 key 10건이 문서당 최대 5분의 retry backoff로 순차 처리되는 50분에, 다운로드·파싱·임베딩·DB 처리와 commit 여유 20분을 더해 70분으로 설정한다.
+        max.poll.interval.ms: 4200000
         # 브로커 장애를 45초 안에 감지하고 그보다 충분히 짧은 3초마다 heartbeat를 보낸다.
         session.timeout.ms: 45000
         heartbeat.interval.ms: 3000

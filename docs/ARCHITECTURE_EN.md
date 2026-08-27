@@ -1,11 +1,8 @@
 # Worker Architecture
 
-> Implementation baseline: 2026-08-26
->
-> This document is based on the current repository's source code,
-> configuration, tests, and Dockerfile. Because this repository does not
-> contain migrations for the physical database schema, it describes only the
-> contract used by the Worker.
+This document describes the Worker's overall structure, component
+responsibilities, data flows, transaction boundaries, and major design
+decisions.
 
 ## 1. Purpose and Scope
 
@@ -606,7 +603,3 @@ included in the current architecture:
 - [Failure Handling](FAILURE_HANDLING_EN.md): Failure model, retries,
   redelivery, recovery algorithms, and guarantees
 - [Code Conventions](CODE_CONVENTIONS_EN.md): Code authoring and review rules
-
-Some older design and planning documents may describe goals from the time they
-were written or previous package states. Prefer this document and the actual
-source code and configuration when determining current behavior.

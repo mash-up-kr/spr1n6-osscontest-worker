@@ -6,6 +6,8 @@
 ![Kotlin 2.3.21](https://img.shields.io/badge/Kotlin-2.3.21-7F52FF?logo=kotlin&logoColor=white)
 ![Spring Boot 4.1.0](https://img.shields.io/badge/Spring%20Boot-4.1.0-6DB33F?logo=springboot&logoColor=white)
 
+> 2026 Open Source Software Developer Competition, TmaxTibero Corporate Challenge<br>
+
 This is the asynchronous indexing worker for an AI document management system
 built on Tmax OpenSQL. It consumes document events from Kafka and downloads,
 parses, chunks, and embeds source documents before storing them in pgvector.
@@ -13,9 +15,6 @@ parses, chunks, and embeds source documents before storing them in pgvector.
 The worker is designed around retryability and idempotency to handle **worker
 failures, duplicate events, external API failures, and database failures** that
 can occur during long-running AI workloads.
-
-> 2026 Open Source Software Developer Competition, TmaxTibero Corporate Challenge<br>
-> **“AI Document Management and Vector Synchronization System Based on Tmax OpenSQL”**
 
 ## Project Overview
 
@@ -45,6 +44,26 @@ The worker's main responsibilities are:
 | Automatic embedding | Builds an asynchronous post-upload pipeline | Performs parsing, chunking, OpenAI embedding, and vector storage |
 | Semantic and keyword search | Search/MCP provides search interfaces | Prepares pgvector and Nori token data |
 | Processing reliability | Each component manages failures within its ownership boundary | Handles manual ACK, idempotent storage, job reacquisition, and retries |
+
+The system consists of four source code repositories. An uploaded document
+becomes searchable through the following flow:
+
+```mermaid
+flowchart LR
+    web[web] -->|upload| server[server]
+    server -->|Outbox| relay[relay]
+    relay -->|Kafka| worker[worker]
+    worker -->|store chunks and embeddings| server
+```
+
+| Repository | Role |
+|---|---|
+| [server](https://github.com/mash-up-kr/spr1n6-osscontest-server) | API server responsible for uploads, authorization, and search; writes Outbox events |
+| [relay](https://github.com/mash-up-kr/spr1n6-osscontest-relay) | Reads Outbox rows and publishes them to Kafka |
+| [worker](https://github.com/mash-up-kr/spr1n6-osscontest-worker) | Chunks documents, generates embeddings, and stores the results |
+| [web](https://github.com/mash-up-kr/spr1n6-osscontest-web) | React SPA |
+
+This repository is the `worker`.
 
 ## System Architecture
 
@@ -203,10 +222,6 @@ Tests that call OpenAI run only when `OPENAI_API_KEY` is set.
   migrations applied
 - S3-compatible Object Storage containing the source documents
 - OpenAI API key
-
-This repository does not include Docker Compose or database migrations. Prepare
-the external dependencies and shared schema before running the worker on its
-own.
 
 ### Environment Variables
 

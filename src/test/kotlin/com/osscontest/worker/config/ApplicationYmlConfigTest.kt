@@ -17,13 +17,13 @@ class ApplicationYmlConfigTest {
     }
 
     @Test
-    fun `max poll interval ms는 900초(900000)로 설정돼 있다`() {
+    fun `max poll interval ms는 4200초(4200000)로 설정돼 있다`() {
         val factory = YamlPropertiesFactoryBean()
         factory.setResources(ClassPathResource("application.yml"))
         val props = factory.getObject()!!
 
         assertThat(props.getProperty("spring.kafka.consumer.properties.max.poll.interval.ms"))
-            .isEqualTo("900000")
+            .isEqualTo("4200000")
     }
 
     @Test

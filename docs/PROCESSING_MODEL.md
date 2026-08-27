@@ -1,8 +1,6 @@
 # Kafka Processing Model
 
-이 문서는 2026 공개SW 개발자대회 TmaxTibero 기업과제 「Tmax OpenSQL 기반 AI 문서 관리 및 벡터 동기화 시스템」의 문서 인덱싱 Worker가 Kafka record를 실행하는 모델을 설명합니다. 기준은 현재 저장소의 production code, `application.yml`, Gradle dependency resolution, 테스트와 Dockerfile입니다.
-
-설명하는 범위는 Kafka poll 이후 record가 batch listener에 전달되어 key별 task로 실행되고, 결과가 ACK 또는 NACK으로 연결된 뒤 consumer loop로 돌아가는 과정입니다. 전체 시스템 구조와 DB transaction 설계는 [Worker Architecture](ARCHITECTURE.md), crash·중복·재전달·retry의 상세 복구 정책은 [Failure Handling & Recovery](FAILURE_HANDLING.md)를 참고합니다.
+이 문서는 Kafka poll 이후 record가 batch listener에 전달되어 key별 task로 실행되고, 결과가 ACK 또는 NACK으로 연결된 뒤 consumer loop로 돌아가는 과정을 설명합니다.
 
 ## 1. 문서 목적과 범위
 
@@ -24,7 +22,7 @@
 - processing time이 consumer liveness에 어떤 영향을 주는가
 - process, consumer, partition, executor thread를 늘릴 때 병렬성이 어떻게 달라지는가
 
-Job 상태별 재획득, duplicate publish와 redelivery 판정, retryable/permanent 오류 분류 등 **다음 실행에서 어떻게 복구하는가**는 이 문서의 범위가 아니며 [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 설명합니다.
+Job 상태별 재획득, duplicate publish와 redelivery 판정, retryable/permanent 오류 분류 등 **다음 실행에서 어떻게 복구하는가**는  [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 설명합니다.
 
 ## 2. Processing Model at a Glance
 
@@ -113,7 +111,7 @@ Listener는 event type이나 partition별로 batch를 분리하지 않습니다.
 
 ### 5.3 Batch를 사용하는 효과와 비용
 
-Batch는 한 poll에서 여러 document key를 확보해 in-process executor에 병렬 공급할 수 있게 한다. default `max.poll.records=10`과 executor size 5는 최대 record 수가 pool size의 두 배인 구성입니다.
+Batch는 한 poll에서 여러 document key를 확보해 in-process executor에 병렬 공급할 수 있게 합니다. default `max.poll.records=10`과 executor size 5는 최대 record 수가 pool size의 두 배인 구성입니다.
 
 대신 Kafka offset 처리는 batch completion barrier 뒤로 묶입니다. 한 key group이 오래 걸리면 먼저 끝난 다른 group도 ACK를 기다립니다. Batch는 DB atomicity를 제공하지 않습니다.
 
@@ -121,7 +119,7 @@ Batch는 한 poll에서 여러 document key를 확보해 in-process executor에 
 
 #### Scheduling algorithm
 
-Listener의 실행 순서는 다음과 같다.
+Listener의 실행 순서는 다음과 같습니다.
 
 1. `records.groupBy { it.key() }`
 2. 각 group list마다 `executor.submit { sameKeyRecords.forEach(::processRecord) }`
@@ -153,7 +151,7 @@ C → C1
 
 #### Completion detection order
 
-Future는 group task를 제출한 순서대로 `get()`한다. 따라서 뒤쪽 Future가 이미 실패했어도 앞쪽의 긴 Future가 끝날 때까지 listener가 그 실패를 관측하지 못할 수 있습니다.
+Future는 group task를 제출한 순서대로 `get()`합니다. 따라서 뒤쪽 Future가 이미 실패했어도 앞쪽의 긴 Future가 끝날 때까지 listener가 그 실패를 관측하지 못할 수 있습니다.
 
 DB failure는 발견한 뒤에도 나머지 Future를 모두 확인하도록 구현되어 있습니다. 예상하지 못한 비-DB failure는 발견 즉시 `ExecutionException`을 던지므로 제출 순서상 뒤에 있는 task가 계속 실행 중인 채 listener callback이 끝날 수 있습니다.
 
@@ -184,7 +182,7 @@ flowchart LR
 
 ### 6.1 Kafka consumer/listener thread
 
-Consumer thread가 하는 일은 다음과 같다.
+Consumer thread가 하는 일은 다음과 같습니다.
 
 - batch 수신과 key grouping
 - group task 제출
@@ -192,7 +190,7 @@ Consumer thread가 하는 일은 다음과 같다.
 - DB failure 집계
 - `Acknowledgment.acknowledge()` 또는 `nack()` 호출
 
-실제 document download/parse/chunk/embed/publication은 이 thread에서 직접 실행하지 않는다. 그러나 Future를 blocking wait하므로 consumer thread가 그동안 next poll을 수행할 수 있는 것은 아닙니다.
+실제 document download/parse/chunk/embed/publication은 이 thread에서 직접 실행하지 않습니다. 그러나 Future를 blocking wait하므로 consumer thread가 그동안 next poll을 수행할 수 있는 것은 아닙니다.
 
 ### 6.2 Indexing batch executor
 
@@ -208,17 +206,15 @@ Timeout이면 `future.cancel(true)`와 `shutdownNow()` 가능한 구조지만 pa
 
 ### 6.4 Retry thread occupancy
 
-Retry는 Kafka redelivery나 별도 scheduler가 아니라 같은 `IndexingPipelineRunner.run()` loop 안에서 수행된다. Retryable failure가 `RETRY_WAIT`으로 기록되면 `ThreadSleepRetryWaiter`가 DB 시각 기준 남은 시간 동안 `Thread.sleep()`한다.
+Retry는 Kafka redelivery나 별도 scheduler가 아니라 같은 `IndexingPipelineRunner.run()` loop 안에서 수행됩니다. Retryable failure가 `RETRY_WAIT`으로 기록되면 `ThreadSleepRetryWaiter`가 DB 시각 기준 남은 시간 동안 `Thread.sleep()`합니다.
 
-이 sleep은 indexing executor thread를 pool에 반환하지 않는다. 따라서 retry/backoff 중인 document group 하나가 기본 5개 slot 중 하나를 계속 차지한다. 해당 group의 뒤 record도 같이 대기한다.
+이 sleep은 indexing executor thread를 pool에 반환하지 않습니다. 따라서 retry/backoff 중인 document group 하나가 기본 5개 slot 중 하나를 계속 차지합니다. 해당 group의 뒤 record도 같이 대기합니다.
 
 ### 6.5 Queue와 natural backpressure
 
 Unbounded queue 자체에는 application-level capacity limit이 없습니다. 다만 정상 success/DB-NACK 경로에서는 listener가 현재 batch 완료까지 반환하지 않으므로 한 consumer가 다음 batch를 계속 poll해 queue를 무한히 채우는 구조는 아닙니다.
 
 Default batch에서는 group task 수가 최대 10이고, 5개가 실행 중이면 나머지가 queue에서 기다립니다. `INDEXING_BATCH_SIZE`를 크게 올리면 한 batch가 만드는 queued task도 그만큼 늘 수 있습니다.
-
-예상하지 못한 비-DB failure는 뒤 Future를 모두 기다리지 않고 listener로 전파되므로 이미 제출된 task가 남을 수 있습니다. Container error handling이 listener를 다시 호출하면 이전 invocation task와 새 task가 겹쳐 queue가 한 batch 범위를 넘을 가능성이 있습니다. 이 경로의 실제 broker/container 동작은 통합 테스트되지 않았다.
 
 ## 7. Record Processing Lifecycle과 Execution Boundary
 
@@ -250,11 +246,11 @@ Kafka poll batch와 key group은 DB transaction 단위가 아닙니다. DB trans
 
 ### 8.1 Success condition
 
-Batch ACK 조건은 다음과 같다.
+Batch ACK 조건은 다음과 같습니다.
 
-1. 모든 key group Future를 제출한다.
-2. 제출 순서대로 `Future.get()`이 정상 반환합니다.
-3. escaped `DataAccessException`이 하나도 집계되지 않는다.
+1. 모든 key group Future를 제출합니다.
+2. 제출 순서대로 호출한 `Future.get()`이 모두 정상적으로 반환됩니다.
+3. escaped `DataAccessException`이 하나도 집계되지 않습니다.
 4. `ack.acknowledge()`를 한 번 호출합니다.
 
 Record별 ACK나 partial batch ACK API는 사용하지 않습니다.
@@ -284,11 +280,11 @@ sequenceDiagram
     K->>K: next consumer loop / poll
 ```
 
-`AckMode.MANUAL`에서는 acknowledgment가 container에 처리 완료 offset을 전달한다. Current Spring Kafka container의 `syncCommits` 기본값이 true이므로 container가 실제 commit을 수행할 때 synchronous commit 경로를 사용합니다. 그러나 application은 broker commit 결과 callback을 별도로 기록하지 않으며 `KAFKA_BATCH_ACK` 로그도 `acknowledge()` 호출 직후, listener return 전에 출력된다. 따라서 이 로그를 broker commit 완료 증거로 사용하면 안 된다.
+`AckMode.MANUAL`에서는 acknowledgment가 container에 처리 완료 offset을 전달합니다. Current Spring Kafka container의 `syncCommits` 기본값이 true이므로 container가 실제 commit을 수행할 때 synchronous commit 경로를 사용합니다. 그러나 application은 broker commit 결과 callback을 별도로 기록하지 않으며 `KAFKA_BATCH_ACK` 로그도 `acknowledge()` 호출 직후, listener return 전에 출력됩니다. 따라서 이 로그는 broker commit 완료 증거가 아닙니다.
 
 ### 8.3 Offset boundary
 
-정상 ACK 시 현재 poll batch에서 처리된 partition별 마지막 record 다음 offset이 commit 대상이 된다. Batch가 여러 partition의 record를 포함하면 각 partition의 offset이 함께 처리됩니다.
+정상 ACK 시 현재 poll batch에서 처리된 partition별 마지막 record 다음 offset이 commit 대상이 됩니다. Batch가 여러 partition의 record를 포함하면 각 partition의 offset이 함께 처리됩니다.
 
 DB에서는 record별 transaction이 이미 독립 commit될 수 있지만 Kafka offset은 batch barrier 뒤에서 처리됩니다. 이 차이 때문에 일부 DB 성공과 uncommitted Kafka record가 동시에 존재할 수 있습니다.
 
@@ -300,101 +296,17 @@ Executor Future의 direct cause가 `DataAccessException`이면 listener는 첫 D
 ack.nack(0, INDEXING_DB_HEALTH_PAUSE_NACK_DELAY)
 ```
 
-Default delay는 5초다. Batch listener의 index 0 NACK이므로 index보다 앞서 commit할 record는 없고, 현재 batch의 record 전체가 partition별 seek/redelivery 대상이 될 수 있습니다. NACK delay 동안 consumer 전체가 pause되는 효과가 있으며 단일 실패 record만 별도 retry하는 모델이 아닙니다.
+Default delay는 5초입니다. Batch listener의 index 0 NACK이므로 index보다 앞서 commit할 record는 없고, 현재 batch의 record 전체가 partition별 seek/redelivery 대상이 될 수 있습니다. NACK delay 동안 consumer 전체가 pause되는 효과가 있으며 단일 실패 record만 별도 retry하는 모델이 아닙니다.
 
-NACK 호출 후 listener는 즉시 return한다. 이미 성공한 group의 DB transaction은 rollback되지 않는다. 이후 redelivery의 idempotency와 상태별 복구는 [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 다룹니다.
+NACK 호출 후 listener는 즉시 반환합니다. 이미 성공한 group의 DB transaction은 rollback되지 않습니다. 이후 redelivery의 idempotency와 상태별 복구는 [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 다룹니다.
 
 ### 8.5 Unexpected exception
 
-Non-DB `ExecutionException`과 listener wait의 `InterruptedException`은 explicit ACK/NACK 없이 container로 전파된다. 이 저장소에는 별도 `CommonErrorHandler` configuration이 없으므로 live container의 재호출 횟수와 delay를 application 정책으로 정의하지 않는다.
+Non-DB `ExecutionException`과 listener wait의 `InterruptedException`은 explicit ACK/NACK 없이 container로 전파됩니다. 이 저장소에는 별도 `CommonErrorHandler` configuration이 없으므로 live container의 재호출 횟수와 delay를 application 정책으로 정의하지 않습니다.
 
-또한 pipeline 내부에서 처리 정책에 의해 정상 반환된 오류는 listener의 explicit ACK/NACK 판단에서 이미 결론 난 task로 보인다. Listener까지 exception이 전파되는 구체적인 오류 분류와 상태 기록 실패의 복구 정책은 [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 설명합니다.
+또한 pipeline 내부에서 처리 정책에 의해 정상 반환된 오류는 listener의 explicit ACK/NACK 판단에서 이미 결론 난 task로 보입니다. Listener까지 exception이 전파되는 구체적인 오류 분류와 상태 기록 실패의 복구 정책은 [Failure Handling & Recovery](FAILURE_HANDLING.md)에서 설명합니다.
 
-## 9. Processing Time과 Consumer Liveness
-
-### 9.1 Executor 분리가 poll thread를 자유롭게 하지는 않는다
-
-실제 indexing은 executor thread에서 수행되지만 listener thread는 모든 Future가 끝날 때까지 blocking한다. 따라서 이전 poll에서 record를 받은 시점부터 listener가 return하고 다음 poll로 갈 때까지의 전체 batch 시간이 `max.poll.interval.ms` budget에 포함된다.
-
-### 9.2 Heartbeat와 poll interval
-
-| Mechanism | 현재 값 | 이 Worker에서의 의미 |
-|---|---:|---|
-| `heartbeat.interval.ms` | 3초 | process가 살아 있는 동안 consumer membership heartbeat를 보냅니다. |
-| `session.timeout.ms` | 45초 | process 종료/통신 단절로 heartbeat가 사라진 경우의 broker 판단 축입니다. |
-| `max.poll.interval.ms` | 15분 | process가 살아 있어도 listener callback 때문에 poll로 돌아오지 못하는 경우의 판단 축입니다. |
-
-Worker thread에서 실행한다고 heartbeat와 poll 문제가 모두 해결되는 것은 아닙니다. Heartbeat는 유지될 수 있지만 consumer thread의 다음 poll은 batch completion barrier 뒤에 있기 때문에 15분을 넘을 수 있습니다.
-
-### 9.3 Batch time model
-
-한 poll batch의 record 수를 `N`, 서로 다른 record key 수를 `K`, executor thread 수를 `M`이라 하자. 현재 default는 `N ≤ 10`, `M = 5`다.
-
-같은 key group `g`의 시간은 다음과 같다.
-
-```text
-T_group(g) = Σ T_record(r),  r ∈ group(g)
-```
-
-각 record는 retry를 포함한다.
-
-```text
-T_record
-  = Σ T_attempt(i)
-  + Σ T_backoff(i)
-```
-
-Group task들은 fixed pool에서 실행되므로 batch 시간은 단순히 항상 `max(T_group)`이 아닙니다.
-
-```text
-T_batch
-  = makespan_M(T_group(1), ..., T_group(K))
-  + listener/commit scheduling overhead
-```
-
-- `K ≤ M`: 충분한 thread가 있다면 대체로 가장 느린 group이 지배한다.
-- `K > M`: queue에서 다음 group이 기다리므로 여러 execution wave가 생깁니다.
-- 한 key에 record가 몰리면 해당 group 안에서 합산되어 executor thread 수를 늘려도 그 group은 병렬화되지 않는다.
-
-Consumer membership을 안정적으로 유지하려면 실제 운용에서 poll 사이 시간이 `900초`보다 작아야 합니다. 이 저장소에는 이를 end-to-end로 검증하는 test가 없습니다.
-
-### 9.4 Default retry backoff로 계산 가능한 하한
-
-Worker attempt 기본 상한은 5이고 backoff는 `30초 × attempt_count` 선형입니다. 다섯 번째 attempt에서 끝난다면 sleep은 attempt 1~4 실패 뒤 발생합니다.
-
-```text
-한 record의 최대 Worker-level backoff
-= 30 + 60 + 90 + 120
-= 300초
-```
-
-이 값에는 download, parse, embedding, DB 시간이 포함되지 않습니다.
-
-| Default batch shape | In-process scheduling | backoff만으로 생길 수 있는 batch 시간 |
-|---|---|---:|
-| 10 record, key 10개 | pool 5에서 최대 5 group 동시, 이후 queued group | 모든 record가 retry 소진 시 최소 약 2 wave × 300초 = 600초 |
-| 10 record, key 1개 | group 하나에서 10 record 직렬 | 모든 record가 retry 소진 시 10 × 300초 = 3,000초 |
-| key 일부 편중 | 긴 group과 queued group의 조합 | key별 record 수와 pool scheduling에 따라 달라지며 가장 긴 group이 크게 지배 |
-
-같은-key 10건 경로는 backoff sleep만으로 15분 poll interval을 넘는다. 서로 다른 key 10건도 backoff 후 남는 이론상 여유는 약 300초뿐이며 실제 attempt 실행시간이 추가된다.
-
-### 9.5 Attempt time의 확인 가능한 요소
-
-| 단계 | 확인된 시간 관련 설정 | Processing thread 영향 |
-|---|---|---|
-| S3 download | API call timeout 기본 30초 | indexing thread block |
-| parsing | parse timeout 기본 60초 | indexing thread와 parser thread 모두 점유 |
-| embedding | Spring AI/OpenAI client default request timeout 60초, client retry 최대 3 | embedding request batch를 순차 호출하며 indexing thread block |
-| Worker retry | 최대 5 attempt, 총 backoff 최대 300초/record | sleep 동안 indexing thread 점유 |
-| DB publication | query/transaction timeout 별도 설정 없음, chunk 최대 기본 5,000행을 행별 UPSERT | indexing thread block |
-
-Embedding은 document를 여러 API request로 나눌 수 있고 각 request에서 provider retry가 발생할 수 있습니다. DB에도 end-to-end record timeout이 없습니다. 따라서 `T_attempt`의 신뢰 가능한 전체 상한을 현재 code/config만으로 계산할 수 없습니다.
-
-### 9.6 현재 safety margin 판단
-
-현재 설정만으로 “15분 안에 항상 다음 poll로 돌아온다”고 판단할 수 없습니다. 오히려 같은 key 집중, inline retry, provider retry, 여러 embedding request, 행별 DB UPSERT가 겹치면 초과 가능한 경로가 명확합니다.
-
-## 10. Scaling과 Backpressure
+## 9. Scaling과 Backpressure
 
 Kafka 수준의 병렬성은 topic partition 수와 consumer 수에 의해 제한되고, 한 consumer 안에서는 현재 batch의 서로 다른 key group을 executor가 추가로 병렬 처리합니다.
 
@@ -410,7 +322,7 @@ Partition 수를 `P`, group consumer 수를 `C`라 하면 동시에 partition을
 
 Partition이 하나여도 한 poll batch에 서로 다른 key가 여러 개 있으면 executor가 여러 group을 병렬 실행할 수 있습니다. 반대로 partition이나 executor thread가 많아도 같은 key에 record가 집중되거나 embedding API, object storage, DB가 병목이면 처리량이 비례해 증가하지 않습니다.
 
-### 10.1 Backpressure와 Bottleneck
+### 9.1 Backpressure와 Bottleneck
 
 #### Natural backpressure
 
@@ -428,52 +340,41 @@ Listener가 현재 batch barrier를 기다리는 구조는 consumer가 다음 ba
 | embedding latency/quota | 여러 group이 동시에 API 호출 | latency와 retry 증가, pool slot 장기 점유 |
 | batch completion barrier | 한 group이 오래 걸림 | 먼저 성공한 group도 ACK와 next poll 대기 |
 
-## 11. Processing Design Decisions
+## 10. Processing Design Decisions
 
-### 11.1 Batch listener
+### 10.1 Batch listener
 
 - **Context**: 한 poll의 여러 document 작업을 확보해 한 consumer 안에서도 병렬화할 필요가 있습니다.
 - **Decision**: batch listener와 `max.poll.records`를 사용합니다.
 - **Consequence**: key group 병렬화가 가능하지만 ACK/NACK과 next poll이 가장 느린 task에 묶입니다.
 
-### 11.2 Record-key grouping
+### 10.2 Record-key grouping
 
 - **Context**: 같은 문서의 연속 event는 순차 실행하고 다른 문서는 병렬 실행해야 합니다.
 - **Decision**: `ConsumerRecord.key()`별 group task를 만들고 group 내부 `forEach`를 사용합니다.
 - **Consequence**: 단순한 in-memory scheduling으로 순차성이 생기지만 producer key/partition contract를 Worker가 검증하지 않습니다.
 
-### 11.3 Fixed executor
+### 10.3 Fixed executor
 
 - **Context**: 외부 API와 local resource를 사용하는 document group의 무제한 동시 실행을 피해야 합니다.
 - **Decision**: 기본 5개 thread의 fixed pool을 사용합니다.
 - **Consequence**: active concurrency는 제한되지만 queue는 unbounded이고 retry sleep이 slot을 점유합니다.
 
-### 11.4 Blocking completion barrier
+### 10.4 Blocking completion barrier
 
 - **Context**: executor에 제출했다는 사실만으로 record 처리가 끝난 것은 아닙니다.
 - **Decision**: listener가 `Future.get()`으로 결과를 기다립니다.
-- **Consequence**: 처리 전 ACK를 막지만 executor 분리에도 consumer poll interval은 전체 batch 시간의 영향을 받는다.
+- **Consequence**: 처리 전 ACK를 막지만 executor 분리에도 consumer poll interval은 전체 batch 시간의 영향을 받습니다.
 
-### 11.5 Manual batch ACK와 DB NACK
+### 10.5 Manual batch ACK와 DB NACK
 
 - **Context**: Job별 DB 결과를 확인한 뒤 Kafka offset을 진행해야 합니다.
 - **Decision**: 정상 결론이면 batch ACK 한 번, escaped DB failure면 index 0 NACK을 사용합니다.
 - **Consequence**: application completion과 offset 진행이 연결되지만 partial success record도 재전달될 수 있고 DB/Kafka atomicity는 없습니다.
 
-## 12. Known Processing Limitations
-
-1. **Executor offload가 poll lifecycle을 분리하지 않습니다.** Listener가 Future barrier를 기다리므로 전체 batch 시간이 15분 `max.poll.interval.ms`에 포함됩니다.
-
-2. **현재 default worst case가 poll interval을 넘을 수 있습니다.** 같은 key 10건이 각각 retry budget을 소진하면 backoff만 50분이며 실제 pipeline 시간은 여기에 더해집니다.
-
-3. **Retry가 thread를 반납하지 않습니다.** `Thread.sleep()` 중인 Job은 indexing pool slot을 계속 점유합니다.
-
-4. **Non-DB failure는 완전한 barrier를 깨뜨릴 수 있습니다.** Future 제출 순서에 따라 뒤 task가 실행 중인 채 listener exception이 container로 전파될 수 있습니다.
-
-5. **Batch completion barrier의 영향 범위가 넓습니다.** 한 group이 오래 걸리면 먼저 성공한 다른 group도 batch ACK와 next poll을 기다립니다.
-
-## 13. Related Documents
+## 11. Related Documents
 
 - [README](../README.md)
 - [Worker Architecture](ARCHITECTURE.md): Worker의 책임과 경계, building block, 데이터·transaction 구조와 architecture decision
 - [Failure Handling & Recovery](FAILURE_HANDLING.md): 장애 모델, retry, redelivery, 상태별 복구와 보장 범위
+- [Code Conventions](CODE_CONVENTIONS.md): 코드 작성과 검토 규칙

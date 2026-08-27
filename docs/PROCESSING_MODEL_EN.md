@@ -1,18 +1,7 @@
 # Kafka Processing Model
 
-This document describes the model used by the document indexing Worker for the
-2026 Open Source Software Developer Competition's TmaxTibero corporate challenge,
-“AI Document Management and Vector Synchronization System Based on Tmax
-OpenSQL,” to execute Kafka records. It is based on the repository's current
-production code, `application.yml`, resolved Gradle dependencies, tests, and
-Dockerfile.
-
-Its scope begins after a Kafka poll: records are delivered to the batch listener,
-executed as per-key tasks, connected to either ACK or NACK, and returned to the
-consumer loop. See [Worker Architecture](ARCHITECTURE_EN.md) for the overall
-system structure and database transaction design, and [Failure Handling &
-Recovery](FAILURE_HANDLING_EN.md) for detailed recovery policies covering
-crashes, duplication, redelivery, and retries.
+This document describes how records move from a Kafka poll to the batch listener,
+execute as per-key tasks, lead to ACK or NACK, and return to the consumer loop.
 
 ## 1. Purpose and Scope
 
@@ -299,12 +288,6 @@ With the default batch, at most 10 group tasks are created. If five are running,
 the rest wait in the queue. Increasing `INDEXING_BATCH_SIZE` can increase the
 number of tasks queued by one batch accordingly.
 
-An unexpected non-database failure propagates to the listener without waiting
-for every later Future, so previously submitted tasks can remain. If container
-error handling invokes the listener again, tasks from the previous invocation
-and the new invocation may overlap, allowing the queue to grow beyond one batch.
-Actual broker/container behavior on this path has not been integration-tested.
-
 ## 7. Record Processing Lifecycle and Execution Boundary
 
 Each record is routed on an indexing-executor thread to either the indexing or
@@ -432,112 +415,7 @@ appears to the listener's explicit ACK/NACK decision as a concluded task. See
 classification and the recovery policy when state recording fails and an
 exception reaches the listener.
 
-## 9. Processing Time and Consumer Liveness
-
-### 9.1 Executor Offloading Does Not Free the Poll Thread
-
-Actual indexing runs on executor threads, but the listener thread blocks until
-all Futures complete. Therefore, the entire batch time from receiving records in
-the previous poll until the listener returns and the next poll begins counts
-against the `max.poll.interval.ms` budget.
-
-### 9.2 Heartbeat and Poll Interval
-
-| Mechanism | Current value | Meaning for this Worker |
-|---|---:|---|
-| `heartbeat.interval.ms` | 3 seconds | Send consumer-membership heartbeats while the process is alive. |
-| `session.timeout.ms` | 45 seconds | Broker threshold when heartbeats disappear because of process termination or communication loss. |
-| `max.poll.interval.ms` | 15 minutes | Threshold when the process remains alive but cannot return to poll because of the listener callback. |
-
-Moving work to Worker threads does not solve both heartbeat and poll issues.
-Heartbeats may continue, but the consumer thread cannot make its next poll until
-the batch-completion barrier, which may take longer than 15 minutes.
-
-### 9.3 Batch-Time Model
-
-Let `N` be the number of records in one poll batch, `K` the number of distinct
-record keys, and `M` the number of executor threads. The current defaults are
-`N ≤ 10` and `M = 5`.
-
-The time for one key group `g` is:
-
-```text
-T_group(g) = Σ T_record(r),  r ∈ group(g)
-```
-
-Each record includes retries:
-
-```text
-T_record
-  = Σ T_attempt(i)
-  + Σ T_backoff(i)
-```
-
-Because group tasks run in a fixed pool, batch time is not always simply
-`max(T_group)`.
-
-```text
-T_batch
-  = makespan_M(T_group(1), ..., T_group(K))
-  + listener/commit scheduling overhead
-```
-
-- `K ≤ M`: With enough threads, the slowest group generally dominates.
-- `K > M`: Groups wait in the queue, creating multiple execution waves.
-- If records concentrate on one key, their times add within that group;
-  increasing the executor thread count does not parallelize the group.
-
-To maintain stable consumer membership, actual operating time between polls
-must remain below `900 seconds`. This repository has no end-to-end test for that
-condition.
-
-### 9.4 Lower Bound Calculable from Default Retry Backoff
-
-The default maximum number of Worker attempts is 5, with linear backoff of
-`30 seconds × attempt_count`. If the fifth attempt terminates the job, sleeps
-occur after attempts 1 through 4 fail.
-
-```text
-Maximum Worker-level backoff for one record
-= 30 + 60 + 90 + 120
-= 300 seconds
-```
-
-This value does not include download, parsing, embedding, or database time.
-
-| Default batch shape | In-process scheduling | Batch time possible from backoff alone |
-|---|---|---:|
-| 10 records, 10 keys | Up to 5 groups concurrently in a pool of 5, then queued groups | If every record exhausts retries, at least about 2 waves × 300 seconds = 600 seconds |
-| 10 records, 1 key | 10 records sequentially in one group | If every record exhausts retries, 10 × 300 seconds = 3,000 seconds |
-| Some keys heavily concentrated | Combination of long and queued groups | Depends on records per key and pool scheduling; the longest group strongly dominates |
-
-The same-key path with 10 records exceeds the 15-minute poll interval from
-backoff sleep alone. Even the 10-distinct-key case leaves only about 300 seconds
-of theoretical margin after backoff, before actual attempt time is added.
-
-### 9.5 Verifiable Components of Attempt Time
-
-| Stage | Verified time-related setting | Impact on processing threads |
-|---|---|---|
-| S3 download | Default API call timeout of 30 seconds | Blocks an indexing thread |
-| Parsing | Default parse timeout of 60 seconds | Occupies both an indexing thread and parser thread |
-| Embedding | Spring AI/OpenAI client default request timeout of 60 seconds, up to 3 client retries | Calls embedding request batches sequentially while blocking an indexing thread |
-| Worker retry | Up to 5 attempts, total backoff up to 300 seconds per record | Occupies an indexing thread during sleep |
-| Database publication | No separate query/transaction timeout; up to 5,000 chunks by default, UPSERTed row by row | Blocks an indexing thread |
-
-A document may be split across multiple embedding API requests, each of which
-may trigger provider retries. The database also has no end-to-end record timeout.
-Consequently, a reliable overall upper bound for `T_attempt` cannot be computed
-from the current code and configuration alone.
-
-### 9.6 Current Safety-Margin Assessment
-
-The current settings do not justify the conclusion that the consumer always
-returns to poll within 15 minutes. Clear paths exceed it when same-key
-concentration, inline retries, provider retries, multiple embedding requests,
-and row-by-row database UPSERT overlap.
-
-## 10. Scaling and Backpressure
+## 9. Scaling and Backpressure
 
 Kafka-level parallelism is bounded by topic partition count and consumer count.
 Within one consumer, the executor additionally processes distinct key groups
@@ -562,7 +440,7 @@ partitions or executor threads, throughput does not increase proportionally if
 records concentrate on one key or if the embedding API, Object Storage, or
 database becomes the bottleneck.
 
-### 10.1 Backpressure and Bottlenecks
+### 9.1 Backpressure and Bottlenecks
 
 #### Natural Backpressure
 
@@ -584,9 +462,9 @@ next poll and the batch ACK.
 | Embedding latency/quota | Several groups call the API concurrently | Increases latency and retries and occupies pool slots for long periods |
 | Batch-completion barrier | One group runs for a long time | Groups that succeeded earlier also wait for ACK and the next poll |
 
-## 11. Processing Design Decisions
+## 10. Processing Design Decisions
 
-### 11.1 Batch Listener
+### 10.1 Batch Listener
 
 - **Context**: One poll must obtain multiple document tasks so a single consumer
   can process them in parallel.
@@ -594,7 +472,7 @@ next poll and the batch ACK.
 - **Consequence**: Key groups can run in parallel, but ACK/NACK and the next poll
   depend on the slowest task.
 
-### 11.2 Record-Key Grouping
+### 10.2 Record-Key Grouping
 
 - **Context**: Consecutive events for the same document must run sequentially,
   while different documents should run in parallel.
@@ -603,7 +481,7 @@ next poll and the batch ACK.
 - **Consequence**: Simple in-memory scheduling provides sequential execution,
   but the Worker does not validate the producer key/partition contract.
 
-### 11.3 Fixed Executor
+### 10.3 Fixed Executor
 
 - **Context**: Concurrency for document groups using external APIs and local
   resources must be bounded.
@@ -611,7 +489,7 @@ next poll and the batch ACK.
 - **Consequence**: Active concurrency is bounded, but the queue is unbounded and
   retry sleeps occupy slots.
 
-### 11.4 Blocking Completion Barrier
+### 10.4 Blocking Completion Barrier
 
 - **Context**: Submitting work to an executor does not mean that record
   processing has completed.
@@ -619,7 +497,7 @@ next poll and the batch ACK.
 - **Consequence**: This prevents an ACK before processing, but even with executor
   offloading the consumer poll interval is affected by the full batch time.
 
-### 11.5 Manual Batch ACK and Database NACK
+### 10.5 Manual Batch ACK and Database NACK
 
 - **Context**: Kafka offsets should advance only after checking each job's
   database result.
@@ -629,28 +507,7 @@ next poll and the batch ACK.
   partially successful records can be redelivered and there is no
   database/Kafka atomicity.
 
-## 12. Known Processing Limitations
-
-1. **Executor offloading does not separate the poll lifecycle.** Because the
-   listener waits at the Future barrier, the full batch time counts against the
-   15-minute `max.poll.interval.ms`.
-
-2. **The current default worst case can exceed the poll interval.** If 10 records
-   with the same key each exhaust their retry budget, backoff alone totals 50
-   minutes, before adding actual pipeline time.
-
-3. **Retries do not release their threads.** A job in `Thread.sleep()` continues
-   to occupy an indexing-pool slot.
-
-4. **Non-database failure can break the complete barrier.** Depending on Future
-   submission order, a listener exception may propagate to the container while
-   a later task remains active.
-
-5. **The batch-completion barrier has a broad impact.** If one group takes a long
-   time, other groups that finish earlier also wait for batch ACK and the next
-   poll.
-
-## 13. Related Documents
+## 11. Related Documents
 
 - [README](../README_EN.md)
 - [Worker Architecture](ARCHITECTURE_EN.md): Worker responsibilities and
@@ -658,3 +515,4 @@ next poll and the batch ACK.
   decisions
 - [Failure Handling & Recovery](FAILURE_HANDLING_EN.md): Failure model, retries,
   redelivery, state-specific recovery, and guarantees
+- [Code Conventions](CODE_CONVENTIONS_EN.md): Code authoring and review rules

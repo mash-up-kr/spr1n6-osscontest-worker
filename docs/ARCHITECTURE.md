@@ -1,8 +1,6 @@
 # Worker Architecture
 
-> 구현 기준일: 2026-08-26
->
-> 이 문서는 현재 저장소의 소스 코드, 설정, 테스트, Dockerfile을 기준으로 작성합니다. 물리 DB 스키마는 이 저장소에 migration이 없으므로 Worker가 사용하는 계약만 설명합니다.
+이 문서는 Worker의 전체 구조와 구성 요소 간 책임, 데이터 흐름, 트랜잭션 경계 및 주요 설계 결정을 설명합니다.
 
 ## 1. 문서 목적과 범위
 
@@ -45,7 +43,7 @@ Kafka poll·batch·thread·ACK/NACK의 상세 실행 모델은 [Processing Model
 
 ### 3.1 메시징과 처리 수명
 
-- 입력은 기본 topic `doc.events.v1`의 `INDEXING_REQUESTED`, `DOCUMENT_DELETED` 이벤트다.
+- 입력은 기본 topic `doc.events.v1`의 `INDEXING_REQUESTED`, `DOCUMENT_DELETED` 이벤트입니다.
 - Worker는 Spring Kafka batch listener와 manual acknowledgment를 사용합니다.
 - 같은 문서의 순서는 producer가 `documentId`를 Kafka key로 사용한다는 계약에 의존합니다.
 - Kafka offset과 DB 상태는 하나의 transaction으로 묶이지 않으므로, ACK 전 crash나 NACK에 따른 record 재전달 가능성을 전제로 합니다.
@@ -57,7 +55,7 @@ consumer group, listener concurrency, batch 크기, heartbeat/session timeout, `
 - Worker는 Core/Server가 migration한 공유 스키마를 사용합니다. 이 저장소에는 migration이 없고 `spring.jpa.hibernate.ddl-auto=none`입니다.
 - Kafka offset과 DB 변경은 하나의 분산 transaction으로 묶이지 않습니다.
 - 다운로드, hash 계산, parsing, chunking, embedding 호출은 DB transaction 밖에서 실행됩니다.
-- 성공 publication만 chunk, document version, searchable version, Job 완료를 하나의 DB transaction으로 묶는다.
+- 성공 publication만 chunk, document version, searchable version, Job 완료를 하나의 DB transaction으로 묶습니다.
 - 단계별 Job 상태와 phase는 짧은 repository transaction으로 먼저 commit됩니다.
 - pgvector column과 embedding 결과의 크기는 현재 1,536차원으로 고정돼 있습니다. 설정 모델과 Java 검증 상수, entity column 정의가 모두 이 값에 결합돼 있습니다.
 
@@ -70,7 +68,7 @@ consumer group, listener concurrency, batch 크기, heartbeat/session timeout, `
 
 ## 4. System Context & Scope
 
-아래 그림의 Web, Server, Outbox, Relay, Search/MCP는 전체 프로젝트 맥락입니다. 이 저장소에서 확인되는 경계는 Kafka event 계약, S3 호출, 공유 DB 접근, embedding 호출까지다. 외부 컴포넌트의 내부 구현은 이 문서가 보증하지 않습니다.
+아래 그림의 Web, Server, Outbox, Relay, Search/MCP는 전체 프로젝트 맥락입니다. 이 저장소에서 확인되는 경계는 Kafka event 계약, S3 호출, 공유 DB 접근, embedding 호출까지입니다. 외부 컴포넌트의 내부 구현은 이 문서가 보증하지 않습니다.
 
 ```mermaid
 flowchart LR
@@ -241,7 +239,7 @@ sequenceDiagram
     L->>K: acknowledgment.acknowledge()
 ```
 
-핵심 경계는 다음과 같다.
+핵심 경계는 다음과 같습니다.
 
 1. `insertIfAbsent()`, `start()`, 각 `updatePhase()`는 repository method가 반환될 때 각각 commit됩니다.
 2. 따라서 `PROCESSING`과 `EMBEDDING`은 embedding API 호출 전에 DB에서 관찰할 수 있습니다.
@@ -281,7 +279,7 @@ Worker process가 ACK 전에 종료되면 partition 재할당과 record 재전�
 
 ### 8.1 논리 데이터 관계
 
-아래는 Worker의 entity와 SQL이 사용하는 논리 관계다. 정확한 physical constraint와 index DDL의 소유자는 외부 Core/Server schema다. 이 저장소의 통합 테스트는 준비된 외부 schema를 대상으로 일부 constraint를 검증하지만 schema를 생성하지 않습니다.
+아래는 Worker의 entity와 SQL이 사용하는 논리 관계입니다. 정확한 physical constraint와 index DDL의 소유자는 외부 Core/Server schema입니다. 이 저장소의 통합 테스트는 준비된 외부 schema를 대상으로 일부 constraint를 검증하지만 schema를 생성하지 않습니다.
 
 ```mermaid
 erDiagram
@@ -367,7 +365,7 @@ Worker는 `document`에서 `id`, `tenant_id`, `searchable_version_id`, `deleted_
 
 Worker가 쓰는 chunk 필드는 `tenant_id`, document/version ID, `chunk_no`, 본문, Nori `content_tokens`, content hash, token 수, page 범위, section path, JSONB metadata, 1,536차원 vector, embedding 시각입니다.
 
-- 저장은 `(document_version_id, chunk_no)` conflict target의 UPSERT다.
+- 저장은 `(document_version_id, chunk_no)` conflict target의 UPSERT 방식으로 수행합니다.
 - 재처리 결과의 chunk 수가 줄면 새 마지막 번호보다 큰 trailing row를 삭제합니다.
 - 저장 후 version별 row 수가 예상 chunk 수와 같은지 확인합니다.
 - `tenant_id`는 event 값을 직접 쓰지 않고 `document` row에서 `INSERT ... SELECT`로 가져옵니다.
@@ -375,7 +373,7 @@ Worker가 쓰는 chunk 필드는 `tenant_id`, document/version ID, `chunk_no`, �
 
 ### 8.4 `indexing_job`
 
-`indexing_job`은 queue가 아니라 Kafka 처리와 DB publication 사이의 durable execution record다.
+`indexing_job`은 queue가 아니라 Kafka 처리와 DB publication 사이의 durable execution record입니다.
 
 | 역할 | 실제 필드 |
 |---|---|
@@ -451,12 +449,12 @@ metric exporter, dashboard, alert rule은 이 문서의 범위가 아닙니다. 
 | 결정 | Context | Decision | Consequence |
 |---|---|---|---|
 | 비동기 indexing boundary | 문서 처리는 외부 I/O와 CPU 작업을 포함합니다. | Kafka 이후 별도 Worker에서 실행합니다. | 업로드 실행 수명과 분리되지만 Kafka/DB 간 중복 가능성을 다뤄야 합니다. |
-| at-least-once + DB 수렴 | Worker crash와 redelivery로 같은 작업이 다시 실행될 수 있습니다. | exactly-once transaction 대신 durable Job, 결정적 chunking, UPSERT와 version fencing을 사용합니다. | DB 결과를 수렴시킬 수 있지만 외부 API 중복 호출과 중첩 실행 가능성은 남는다. |
-| durable `indexing_job` | 장시간 작업의 상태를 process memory에만 두면 crash 후 복구 판단이 어렵다. | status, phase, attempt, Worker와 Kafka record identity를 공유 DB에 영속화합니다. | 다른 실행이 이전 처리 상태를 조회할 수 있지만 공유 schema 계약에 의존합니다. |
+| at-least-once + DB 수렴 | Worker crash와 redelivery로 같은 작업이 다시 실행될 수 있습니다. | exactly-once transaction 대신 durable Job, 결정적 chunking, UPSERT와 version fencing을 사용합니다. | DB 결과를 수렴시킬 수 있지만 외부 API 중복 호출과 중첩 실행 가능성은 남습니다. |
+| durable `indexing_job` | 장시간 작업의 상태를 process memory에만 두면 crash 후 복구 판단이 어렵습니다. | status, phase, attempt, Worker와 Kafka record identity를 공유 DB에 영속화합니다. | 다른 실행이 이전 처리 상태를 조회할 수 있지만 공유 schema 계약에 의존합니다. |
 | key 기반 bounded parallelism | 같은 문서는 순서가 필요하고 다른 문서는 병렬화할 수 있습니다. | 같은 Kafka key는 순차 처리하고 서로 다른 key group만 제한된 executor에서 병렬 처리합니다. | 순서와 처리량을 함께 고려할 수 있지만 정확성은 producer key 계약에 의존합니다. |
 | 짧은 state transaction과 단일 publication | 외부 호출 중 DB lock을 잡고 싶지 않지만 성공 결과는 함께 공개해야 합니다. | 상태/phase는 개별 commit, 외부 I/O는 transaction 밖, 성공 publication은 하나의 transaction으로 둡니다. | 진행 상태가 crash 뒤 남고 성공 결과는 원자적이지만 Kafka offset과는 원자적이지 않습니다. |
 | 공유 schema consumer | 문서 lifecycle schema는 Server/Core가 소유합니다. | Worker는 `ddl-auto=none`과 native SQL/JPA mapping으로 합의된 schema를 사용합니다. | 책임은 분리되지만 schema 변화와 Worker 배포의 호환성 관리가 외부 계약에 의존합니다. |
-| 조건부 searchable version 승격 | 버전별 처리 시간이 달라 완료 순서가 바뀔 수 있습니다. | 더 높은 `embedding_version_no`만 검색 pointer를 갱신합니다. | 구버전 chunk 저장은 보존하면서 검색 대상의 역행을 막는다. |
+| 조건부 searchable version 승격 | 버전별 처리 시간이 달라 완료 순서가 바뀔 수 있습니다. | 더 높은 `embedding_version_no`만 검색 pointer를 갱신합니다. | 구버전 chunk 저장은 보존하면서 검색 대상의 역행을 막습니다. |
 | 삭제 event + 보정 sweep | 삭제 이벤트 누락이나 인덱싱과의 경합으로 chunk가 남을 수 있습니다. | event 기반 삭제와 동일한 멱등 삭제 서비스를 주기적 sweep에서도 호출합니다. | 즉시 원자적 삭제를 보장하지는 않지만 잔여 데이터를 반복적으로 정리하는 수렴 경로를 둡니다. |
 
 ## 11. Quality Requirements
@@ -466,13 +464,13 @@ metric exporter, dashboard, alert rule은 이 문서의 범위가 아닙니다. 
 | Reliability | Worker 중단이나 record 재전달이 발생합니다. | durable Job과 idempotent publication을 사용해 재실행 결과가 같은 DB 상태로 수렴하도록 합니다. |
 | Ordering | 같은 문서의 여러 event가 처리됩니다. | 같은 Kafka key는 순차 처리하고 검색 버전은 `embedding_version_no`로 추가 fencing합니다. |
 | Idempotency | 같은 logical event 또는 같은 Kafka record가 다시 입력됩니다. | event/record identity, 결정적 chunk 번호, UPSERT, terminal Job 판정을 조합합니다. |
-| Consistency | chunk 저장과 version/Job 완료가 함께 공개되어야 합니다. | 성공 publication을 하나의 DB transaction으로 묶는다. |
+| Consistency | chunk 저장과 version/Job 완료가 함께 공개되어야 합니다. | 성공 publication을 하나의 DB transaction으로 묶습니다. |
 | Recoverability | 장시간 처리 중 process가 종료되거나 일시 오류가 발생합니다. | status, phase, attempt, Worker와 Kafka 위치를 영속화해 후속 실행이 복구 여부를 판단할 수 있게 합니다. |
 | Resource safety | 큰 문서나 parser hang이 Worker 자원을 무제한 점유할 수 있습니다. | 파일·chunk·token 상한, parsing timeout, bounded executor를 둡니다. |
 | Traceability | 특정 event가 어느 Worker와 Kafka record에서 처리됐는지 추적해야 합니다. | `indexing_job`과 structured log에 Worker ID, trace ID, topic/partition/offset을 연결합니다. |
 | Deletion convergence | 삭제 event 누락 또는 처리 경합으로 chunk가 남을 수 있습니다. | 멱등 삭제와 scheduled sweep으로 잔여 데이터를 반복 정리합니다. |
 
-세부 실행 모델의 검증 포인트는 [Processing Model](PROCESSING_MODEL.md), 장애 복구의 상태별 보장과 한계는 [Failure Handling](FAILURE_HANDLING.md)에서 다룬다.
+세부 실행 모델의 검증 포인트는 [Processing Model](PROCESSING_MODEL.md), 장애 복구의 상태별 보장과 한계는 [Failure Handling](FAILURE_HANDLING.md)에서 다룹니다.
 
 ## 12. Architecture Risks & Limitations
 
@@ -483,14 +481,14 @@ metric exporter, dashboard, alert rule은 이 문서의 범위가 아닙니다. 
 | 공유 schema에 강하게 결합 | migration이 저장소에 없어 unique constraint, composite FK, vector extension, native SQL column의 배포 호환성을 Worker만으로 재현할 수 없습니다. |
 | OpenSQL HA는 Worker 외부 책임 | Worker는 JDBC 관점에서 DB를 사용하며 cluster HA 구성과 failover orchestration을 구현하지 않습니다. |
 | publication과 deletion의 전체 lifecycle이 하나의 transaction이 아님 | 성공 publication 자체는 원자적이지만 삭제 처리 및 실행 중 작업과의 경합까지 하나의 transaction으로 묶이지 않아 보정 경로에 의존합니다. |
-| 외부 시스템 의존 | Object Storage와 OpenAI 장애 또는 지연은 Worker 처리 수명에 직접 영향을 준다. provider failover는 구현되어 있지 않습니다. |
+| 외부 시스템 의존 | Object Storage와 OpenAI 장애 또는 지연은 Worker 처리 수명에 직접 영향을 줍니다. provider failover는 구현되어 있지 않습니다. |
 | metadata pipeline 미완성 | schema와 publication은 `extracted_metadata`를 지원하지만 현재 attempt context는 항상 `null`을 전달합니다. |
 | process-only health check | Docker health check는 Java PID 생존만 확인하므로 Kafka/DB/storage/OpenAI 연결 불능을 readiness로 구분하지 못합니다. |
 | 관측 export 부재 | Micrometer 계측은 있지만 exporter, dashboard, alert가 없어 deployment에서 별도 연결하지 않으면 process 밖에서 사용할 수 없습니다. |
 
-처리 시간 budget, executor 점유, listener concurrency와 batch replay 범위 같은 실행 모델의 한계는 [Processing Model](PROCESSING_MODEL.md)에서 다룬다. lease/fencing 부재, retry/poison event, duplicate republish, 상태 경합과 같은 복구 한계는 [Failure Handling](FAILURE_HANDLING.md)에서 다룬다.
+처리 시간 budget, executor 점유, listener concurrency와 batch replay 범위 같은 실행 모델의 한계는 [Processing Model](PROCESSING_MODEL.md)에서 다룹니다. lease/fencing 부재, retry/poison event, duplicate republish, 상태 경합과 같은 복구 한계는 [Failure Handling](FAILURE_HANDLING.md)에서 다룹니다.
 
-이 저장소에서 확인되지 않아 현재 architecture로 포함하지 않은 기능은 다음과 같다.
+이 저장소에서 확인되지 않아 현재 architecture로 포함하지 않은 기능은 다음과 같습니다.
 
 - Kafka exactly-once transaction 또는 DB/Kafka atomic commit
 - OpenSQL HA orchestration과 failover 검증
@@ -506,5 +504,3 @@ metric exporter, dashboard, alert rule은 이 문서의 범위가 아닙니다. 
 - [Processing Model](PROCESSING_MODEL.md): Kafka batch, partition, ordering, executor, ACK/NACK과 consumer liveness
 - [Failure Handling](FAILURE_HANDLING.md): 장애 모델, retry, redelivery, 복구 알고리즘과 보장 범위
 - [Code Conventions](CODE_CONVENTIONS.md): 코드 작성과 검토 규칙
-
-일부 기존 설계·계획 문서는 작성 시점의 목표나 과거 package 상태를 담고 있을 수 있습니다. 현재 동작을 판단할 때는 이 문서와 실제 소스 코드·설정을 우선합니다.

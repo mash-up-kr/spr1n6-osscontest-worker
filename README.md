@@ -1,10 +1,12 @@
-[KO](README.md) / [EN](README_EN.md)
+[한국어](README.md) / [English](README_EN.md)
 
 # AI Document Indexing Worker
 
 ![Java 21](https://img.shields.io/badge/Java-21-007396?logo=openjdk&logoColor=white)
 ![Kotlin 2.3.21](https://img.shields.io/badge/Kotlin-2.3.21-7F52FF?logo=kotlin&logoColor=white)
 ![Spring Boot 4.1.0](https://img.shields.io/badge/Spring%20Boot-4.1.0-6DB33F?logo=springboot&logoColor=white)
+
+> 2026 공개SW 개발자대회 TmaxTibero 기업과제<br>
 
 Tmax OpenSQL 기반 AI 문서 관리 시스템의 비동기 인덱싱 Worker입니다. Kafka로
 전달된 문서 이벤트를 받아 원문 다운로드, 파싱, 청킹, 임베딩, pgvector
@@ -13,9 +15,6 @@ Tmax OpenSQL 기반 AI 문서 관리 시스템의 비동기 인덱싱 Worker입�
 장시간 수행되는 AI 작업에서 발생할 수 있는 **Worker 장애, 중복 이벤트,
 외부 API 장애, DB 장애**를 고려해 재처리와 멱등성을 중심으로 설계했습니다.
 
-> 2026 공개SW 개발자대회 TmaxTibero 기업과제<br>
-> **「Tmax OpenSQL 기반 AI 문서 관리 및 벡터 동기화 시스템」**
-
 ## 프로젝트 소개
 
 전체 시스템은 업로드된 문서를 검색 가능한 벡터 데이터로 변환하고, 의미
@@ -23,7 +22,7 @@ Tmax OpenSQL 기반 AI 문서 관리 시스템의 비동기 인덱싱 Worker입�
 API나 검색 API가 아니라 **Kafka 이후의 문서 인덱싱과 삭제 후처리**를
 담당합니다.
 
-Worker가 처리하는 주요 범위는 다음과 같다.
+Worker가 처리하는 주요 범위는 다음과 같습니다.
 
 -   `INDEXING_REQUESTED`와 `DOCUMENT_DELETED` Kafka 이벤트 소비
 -   S3 호환 Object Storage에서 원문 다운로드 및 SHA-256 무결성 확인
@@ -42,9 +41,28 @@ Worker가 처리하는 주요 범위는 다음과 같다.
 | 의미·키워드 검색 | Search/MCP가 검색 인터페이스 제공 | pgvector와 Nori 토큰 데이터를 준비 |
 | 처리 안정성 | 각 컴포넌트가 소유 구간의 실패를 관리 | 수동 ACK, 멱등 저장, Job 재획득, 재시도 담당 |
 
+시스템을 구성하는 소스 코드 저장소는 총 4개입니다. 업로드한 문서는 아래의 과정을 통해 최종 검색 가능한 상태가 됩니다.
+
+```mermaid
+flowchart LR
+    web[web] -->|업로드| server[server]
+    server -->|Outbox| relay[relay]
+    relay -->|Kafka| worker[worker]
+    worker -->|청크·임베딩 저장| server
+```
+
+| 저장소 | 역할 |
+|---|---|
+| [server](https://github.com/mash-up-kr/spr1n6-osscontest-server) | API 서버. 업로드·권한·검색을 담당하고 Outbox 이벤트를 남깁니다 |
+| [relay](https://github.com/mash-up-kr/spr1n6-osscontest-relay) | Outbox 행을 읽어 카프카로 발행합니다 |
+| [worker](https://github.com/mash-up-kr/spr1n6-osscontest-worker) | 문서를 청크로 나누고 임베딩해 저장합니다 |
+| [web](https://github.com/mash-up-kr/spr1n6-osscontest-web) | React SPA |
+
+이 저장소는 `worker`입니다.
+
 ## 시스템 아키텍처
 
-아래에서 강조된 Worker가 이 저장소의 범위다. Web, Server, Outbox, Relay,
+아래에서 강조된 Worker가 이 저장소의 범위입니다. Web, Server, Outbox, Relay,
 Search/MCP의 세부 구현은 다른 컴포넌트의 책임입니다.
 
 ```mermaid
@@ -89,7 +107,7 @@ sequenceDiagram
     W->>K: Batch 처리 완료 후 Acknowledge
 ```
 
-지원 MIME type은 다음과 같다.
+지원 MIME type은 다음과 같습니다.
 
 -   PDF: `application/pdf`
 -   DOCX:
@@ -99,9 +117,9 @@ sequenceDiagram
 
 청킹 전략은 Worker 인스턴스의 전역 설정으로 선택합니다.
 
--   `FIXED_TOKEN`: 전체 추출 텍스트를 토큰 상한으로 분할한다.
--   `PARAGRAPH`: 문단 경계를 유지하고 긴 문단만 분할한다.
--   `PARAGRAPH_OVERLAP`: 긴 문단을 overlap을 두고 분할한다.
+-   `FIXED_TOKEN`: 전체 추출 텍스트를 토큰 상한으로 분할합니다.
+-   `PARAGRAPH`: 문단 경계를 유지하고 긴 문단만 분할합니다.
+-   `PARAGRAPH_OVERLAP`: 긴 문단을 overlap을 두고 분할합니다.
 
 Kafka Batch 처리, key별 병렬 실행, acknowledgment와 poll lifecycle의
 상세 설계는 [Processing Model](docs/PROCESSING_MODEL.md)에서 설명합니다.
@@ -193,9 +211,6 @@ set +a
 -   원문이 저장된 S3 호환 Object Storage
 -   OpenAI API key
 
-이 저장소에는 Docker Compose와 DB migration이 없습니다. Worker만 실행하기
-전에 외부 의존성과 공용 스키마를 먼저 준비해야 합니다.
-
 ### 환경 변수
 
 `.env.example`을 복사하고 빈 값을 실행 환경에 맞게 채웁니다.
@@ -204,7 +219,7 @@ set +a
 cp .env.example .env
 ```
 
-필수 런타임 설정은 다음과 같다.
+필수 런타임 설정은 다음과 같습니다.
 
 | 환경 변수 | 설명 |
 |---|---|
@@ -215,7 +230,7 @@ cp .env.example .env
 | `OPENAI_API_KEY` | OpenAI embedding API key |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | AWS SDK 기본 자격 증명 체인에서 환경변수를 사용할 때 필요 |
 
-주요 선택 설정은 다음과 같다.
+주요 선택 설정은 다음과 같습니다.
 
 | 환경 변수 | 기본값 | 설명 |
 |---|---|---|
