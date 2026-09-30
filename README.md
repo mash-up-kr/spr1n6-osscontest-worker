@@ -6,7 +6,8 @@
 ![Kotlin 2.3.21](https://img.shields.io/badge/Kotlin-2.3.21-7F52FF?logo=kotlin&logoColor=white)
 ![Spring Boot 4.1.0](https://img.shields.io/badge/Spring%20Boot-4.1.0-6DB33F?logo=springboot&logoColor=white)
 
-> 2026 공개SW 개발자대회 TmaxTibero 기업과제<br>
+> 2026 오픈소스 개발자 대회 · 티맥스티베로 기업 과제 <br>
+> **1차 서면평가 합격 (상위 3팀)**
 
 Tmax OpenSQL 기반 AI 문서 관리 시스템의 비동기 인덱싱 Worker입니다. Kafka로
 전달된 문서 이벤트를 받아 원문 다운로드, 파싱, 청킹, 임베딩, pgvector
