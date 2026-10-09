@@ -17,4 +17,7 @@ class DocumentEntity(
     var searchableVersionId: Long?,
     @Column(name = "deleted_at")
     var deletedAt: LocalDateTime?,
+    // 엔티티로 갱신하지 않는다. 읽어 둔 값으로 UPDATE하면 SQL이 올린 실행 번호를 되돌릴 수 있다.
+    @Column(name = "execution_epoch", nullable = false, updatable = false)
+    var executionEpoch: Long = 0,
 )
