@@ -3,8 +3,12 @@ spring:
     url: ${DB_URL}
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
+    hikari:
+      connection-timeout: ${INDEXING_DB_CONNECTION_TIMEOUT_MS:3000}
   jpa:
     open-in-view: false
+    properties:
+      hibernate.jdbc.time_zone: UTC
     hibernate:
       ddl-auto: none
   ai:
@@ -16,43 +20,29 @@ spring:
         model: text-embedding-3-small
         dimensions: 1536
         encoding-format: float
-  kafka:
-    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
-    consumer:
-      group-id: indexing-worker
-      enable-auto-commit: false
-      auto-offset-reset: earliest
-      # 한 배치가 문서별 병렬 처리 한도를 넘지 않도록 listener 동시성의 두 배로 제한한다.
-      max-poll-records: ${INDEXING_BATCH_SIZE:10}
-      properties:
-        # 같은 key 10건이 문서당 최대 5분의 retry backoff로 순차 처리되는 50분에, 다운로드·파싱·임베딩·DB 처리와 commit 여유 20분을 더해 70분으로 설정한다.
-        max.poll.interval.ms: 4200000
-        # 브로커 장애를 45초 안에 감지하고 그보다 충분히 짧은 3초마다 heartbeat를 보낸다.
-        session.timeout.ms: 45000
-        heartbeat.interval.ms: 3000
-    listener:
-      ack-mode: manual
-      type: batch
 
 indexing:
-  consumer:
-    topic: ${INDEXING_KAFKA_TOPIC:doc.events.v1}
-    supported-schema-versions: ${INDEXING_SUPPORTED_SCHEMA_VERSIONS:1}
-    # 파티션 수와 외부 임베딩 API 쿼터를 함께 고려한 기본 병렬 처리 수다.
-    concurrency: ${INDEXING_CONSUMER_CONCURRENCY:5}
   retry:
-    # 일시 장애를 흡수하되 한 레코드가 listener를 장시간 점유하지 않도록 5회로 제한한다.
+    # 일반 처리 실패와 API 재시도를 합쳐 최대 5회로 제한한다.
     max-attempts: ${INDEXING_MAX_ATTEMPTS:5}
-    # 선형 백오프의 기준 간격 — Thread.sleep(base-delay * attempt_count), §3.8.
+    # 선형 백오프의 기준 간격이다.
     base-delay: ${INDEXING_RETRY_BASE_DELAY:PT30S}
-  db-health-gate:
-    # Kafka 재시도 지연과 같은 5초 간격으로 DB 복구 여부를 확인한다.
-    check-interval-ms: ${INDEXING_DB_HEALTH_CHECK_INTERVAL_MS:5000}
-    pause-nack-delay: ${INDEXING_DB_HEALTH_PAUSE_NACK_DELAY:PT5S}
+  queue:
+    enabled: ${INDEXING_DB_QUEUE_ENABLED:true}
+    worker-id: ${INDEXING_WORKER_ID:${random.uuid}}
+    concurrency: ${INDEXING_QUEUE_CONCURRENCY:5}
+    poll-interval: ${INDEXING_QUEUE_POLL_INTERVAL:PT1S}
+    lease-duration: ${INDEXING_LEASE_DURATION:PT60S}
+    heartbeat-interval: ${INDEXING_HEARTBEAT_INTERVAL:PT10S}
+  database:
+    check-interval: ${INDEXING_DB_CHECK_INTERVAL:PT5S}
+    query-timeout: ${INDEXING_DB_QUERY_TIMEOUT:PT3S}
+    connect-timeout-seconds: ${INDEXING_DB_CONNECT_TIMEOUT_SECONDS:3}
+    socket-timeout-seconds: ${INDEXING_DB_SOCKET_TIMEOUT_SECONDS:15}
   limits:
     # 시연 환경 메모리와 임시 디스크 용량을 고려해 원문을 200 MiB로 제한한다.
     max-file-size-bytes: ${INDEXING_MAX_FILE_SIZE_BYTES:209715200}
-    # Kafka poll 제한보다 충분히 짧게 실패를 감지하도록 파싱 한도를 60초로 둔다.
+    # 장시간 파싱이 활성 슬롯을 점유하지 않도록 60초로 제한한다.
     parse-timeout: ${INDEXING_PARSE_TIMEOUT:PT60S}
   chunking:
     # FIXED_TOKEN | PARAGRAPH | PARAGRAPH_OVERLAP
@@ -72,14 +62,8 @@ indexing:
     bucket: ${INDEXING_STORAGE_BUCKET}
     endpoint: ${INDEXING_STORAGE_ENDPOINT:}
     region: ${INDEXING_STORAGE_REGION:us-east-1}
-    # 200 MiB 원문을 내부망에서 내려받을 시간을 허용하되 poll 제한보다 짧게 30초로 둔다.
+    # 원문 다운로드가 활성 슬롯을 장시간 점유하지 않도록 30초로 제한한다.
     download-timeout: ${INDEXING_STORAGE_DOWNLOAD_TIMEOUT:PT30S}
-  deletion:
-    # 이벤트 유실 보정 속도와 DB 부하를 맞추기 위해 1분마다 최대 50개를 정리한다.
-    sweep-interval-ms: ${INDEXING_DELETION_SWEEP_INTERVAL_MS:60000}
-    batch-size: ${INDEXING_DELETION_BATCH_SIZE:50}
-    # 애플리케이션 초기화와 경쟁하지 않도록 첫 스윕을 1분 늦춘다.
-    initial-delay-ms: ${INDEXING_DELETION_INITIAL_DELAY_MS:60000}
 
 fault-injection:
   enabled: ${FAULT_INJECTION_ENABLED:false}

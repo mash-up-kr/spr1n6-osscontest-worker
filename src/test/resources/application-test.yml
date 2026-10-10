@@ -9,5 +9,7 @@ spring:
   jpa:
     hibernate:
       ddl-auto: none
-  kafka:
-    bootstrap-servers: localhost:9092
+
+indexing:
+  queue:
+    enabled: false

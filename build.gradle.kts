@@ -22,11 +22,9 @@ repositories {
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
-    // Kafka listener 컨테이너와 관련 자동 설정을 함께 사용한다.
-    implementation("org.springframework.boot:spring-boot-starter-kafka")
-    // MeterRegistry와 Kafka consumer 메트릭을 자동으로 등록한다.
+    // MeterRegistry와 Worker 메트릭을 자동으로 등록한다.
     implementation("org.springframework.boot:spring-boot-starter-actuator")
-    // 이벤트 역직렬화에 사용하는 Jackson 3 ObjectMapper를 자동 설정한다.
+    // 청크 메타데이터 직렬화에 사용하는 Jackson 3 ObjectMapper를 자동 설정한다.
     implementation("org.springframework.boot:spring-boot-starter-jackson")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation("org.hibernate.orm:hibernate-vector")
@@ -56,7 +54,6 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     // Boot 4의 JPA 테스트 슬라이스 어노테이션을 제공한다.
     testImplementation("org.springframework.boot:spring-boot-starter-data-jpa-test")
-    testImplementation("org.springframework.kafka:spring-kafka-test")
     testImplementation("com.h2database:h2")
     testImplementation("org.mockito.kotlin:mockito-kotlin:5.4.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

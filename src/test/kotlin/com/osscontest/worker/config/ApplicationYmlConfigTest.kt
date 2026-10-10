@@ -7,26 +7,6 @@ import org.springframework.core.io.ClassPathResource
 
 class ApplicationYmlConfigTest {
     @Test
-    fun `Kafka topic은 환경변수 미설정 시 doc events v1을 사용한다`() {
-        val factory = YamlPropertiesFactoryBean()
-        factory.setResources(ClassPathResource("application.yml"))
-        val props = factory.getObject()!!
-
-        assertThat(props.getProperty("indexing.consumer.topic"))
-            .isEqualTo("\${INDEXING_KAFKA_TOPIC:doc.events.v1}")
-    }
-
-    @Test
-    fun `max poll interval ms는 4200초(4200000)로 설정돼 있다`() {
-        val factory = YamlPropertiesFactoryBean()
-        factory.setResources(ClassPathResource("application.yml"))
-        val props = factory.getObject()!!
-
-        assertThat(props.getProperty("spring.kafka.consumer.properties.max.poll.interval.ms"))
-            .isEqualTo("4200000")
-    }
-
-    @Test
     fun `임베딩 차원은 DB vector 타입과 같은 1536으로 고정한다`() {
         val factory = YamlPropertiesFactoryBean()
         factory.setResources(ClassPathResource("application.yml"))

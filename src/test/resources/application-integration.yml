@@ -6,8 +6,6 @@ spring:
   ai:
     openai:
       api-key: ${INTEGRATION_OPENAI_API_KEY}
-  kafka:
-    bootstrap-servers: ${INTEGRATION_KAFKA_BOOTSTRAP_SERVERS}
 
 indexing:
   storage:

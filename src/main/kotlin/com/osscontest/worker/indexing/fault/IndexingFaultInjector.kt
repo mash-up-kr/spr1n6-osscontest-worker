@@ -1,6 +1,6 @@
 package com.osscontest.worker.indexing.fault
 
-import com.osscontest.worker.indexing.consumer.KafkaRecordIdentity
+import com.osscontest.worker.indexing.queue.ExecutionToken
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import java.util.UUID
@@ -8,8 +8,7 @@ import java.util.concurrent.CountDownLatch
 
 data class FaultInjectionContext(
     val sourceEventId: UUID,
-    val workerId: String,
-    val recordIdentity: KafkaRecordIdentity,
+    val executionToken: ExecutionToken,
 )
 
 @Component
@@ -29,13 +28,13 @@ class IndexingFaultInjector(
 
         log.warn(
             "FAULT_INJECTION_BLOCKED documentVersionId={} phase={} workerId={} " +
-                "sourceEventId={} partition={} offset={}",
+                "sourceEventId={} jobId={} executionEpoch={}",
             documentVersionId,
             phase,
-            context.workerId,
+            context.executionToken.workerId,
             context.sourceEventId,
-            context.recordIdentity.partition,
-            context.recordIdentity.offset,
+            context.executionToken.jobId,
+            context.executionToken.epoch,
         )
         blocker.await()
     }

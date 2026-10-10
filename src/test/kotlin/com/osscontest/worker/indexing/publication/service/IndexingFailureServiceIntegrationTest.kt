@@ -17,21 +17,16 @@ import org.springframework.test.context.ActiveProfiles
 import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.annotation.Transactional
 import java.time.Duration
-import java.time.LocalDateTime
+import java.time.Instant
+import com.osscontest.worker.indexing.queue.ExecutionToken
+import com.osscontest.worker.support.QueueIntegrationConfiguration
 import java.util.UUID
 
-// recordFailure()는 @Transactional(REQUIRES_NEW)다 — 별도 커넥션/트랜잭션으로 즉시 커밋되어야
-// 바깥 트랜잭션이 롤백돼도 실패 기록이 남는다. @DataJpaTest의 기본 동작(테스트 메서드당
-// 트랜잭션으로 감싸고 종료 시 롤백)을 그대로 두면, REQUIRES_NEW 트랜잭션이 별도 커넥션을 쓰므로
-// 바깥 트랜잭션에서 커밋되지 않은 시딩/저장 데이터를 보지 못한다(READ COMMITTED 격리 하에서
-// 보이지 않음). 그래서 클래스 레벨에서 @Transactional(propagation = NOT_SUPPORTED)로
-// 테스트 트랜잭션 래핑 자체를 비활성화하고, 각 문장이 즉시 커밋되게 한 뒤 @AfterEach에서
-// 직접 정리한다.
 @Tag("integration")
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("integration")
-@Import(IndexingFailureService::class)
+@Import(IndexingFailureService::class, QueueIntegrationConfiguration::class)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class IndexingFailureServiceIntegrationTest(
     private val indexingFailureService: IndexingFailureService,
@@ -86,12 +81,10 @@ class IndexingFailureServiceIntegrationTest(
                     lastErrorCode = null,
                     lastErrorMessage = null,
                     traceId = null,
-                    startedAt = LocalDateTime.now(),
-                    completedAt = if (status == IndexingJobStatus.COMPLETED) LocalDateTime.now() else null,
-                    updatedAt = LocalDateTime.now(),
-                    kafkaTopic = "indexing",
-                    kafkaPartition = 0,
-                    kafkaOffset = 1L,
+                    startedAt = Instant.now(),
+                    completedAt = if (status == IndexingJobStatus.COMPLETED) Instant.now() else null,
+                    updatedAt = Instant.now(),
+                    executionEpoch = 1, leaseUntil = Instant.now().plusSeconds(60),
                 ),
             )
         return job.id!!
@@ -100,24 +93,23 @@ class IndexingFailureServiceIntegrationTest(
     @Test
     fun `recordFailure는 permanent=false에 상한 미만이면 RETRY_WAIT로 전이시킨다`() {
         val jobId = seedJob(status = IndexingJobStatus.PROCESSING, attemptCount = 1)
-        val failedAt = LocalDateTime.now()
+        val failedAt = Instant.now()
 
         val result =
             indexingFailureService.recordFailure(
-                jobId = jobId,
+                token = ExecutionToken(jobId, "worker-1", 1),
                 errorCode = "SOME_ERROR",
                 errorMessage = "some message",
                 permanent = false,
                 maxAttempts = 5,
                 baseDelay = BASE_DELAY,
-                failedAt = failedAt,
             )
 
         assertThat(result).isEqualTo(IndexingJobStatus.RETRY_WAIT)
         val reloaded = indexingJobRepository.findById(jobId).orElseThrow()
         assertThat(reloaded.status).isEqualTo(IndexingJobStatus.RETRY_WAIT)
         // §3.8 선형 백오프: attempt_count=1 → failedAt + base_delay * 1
-        assertThat(reloaded.nextRetryAt).isEqualTo(failedAt.plus(BASE_DELAY))
+        assertThat(reloaded.nextRetryAt).isBetween(failedAt.plus(BASE_DELAY), Instant.now().plus(BASE_DELAY))
         assertThat(reloaded.lastErrorCode).isEqualTo("SOME_ERROR")
     }
 
@@ -125,39 +117,37 @@ class IndexingFailureServiceIntegrationTest(
     @Test
     fun `recordFailure는 next_retry_at을 base_delay와 attempt_count의 곱으로 계산한다`() {
         val jobId = seedJob(status = IndexingJobStatus.PROCESSING, attemptCount = 3)
-        val failedAt = LocalDateTime.now()
+        val failedAt = Instant.now()
 
         val result =
             indexingFailureService.recordFailure(
-                jobId = jobId,
+                token = ExecutionToken(jobId, "worker-1", 1),
                 errorCode = "SOME_ERROR",
                 errorMessage = "some message",
                 permanent = false,
                 maxAttempts = 5,
                 baseDelay = BASE_DELAY,
-                failedAt = failedAt,
             )
 
         assertThat(result).isEqualTo(IndexingJobStatus.RETRY_WAIT)
         val reloaded = indexingJobRepository.findById(jobId).orElseThrow()
-        assertThat(reloaded.nextRetryAt).isEqualTo(failedAt.plus(BASE_DELAY.multipliedBy(3)))
+        assertThat(reloaded.nextRetryAt).isBetween(failedAt.plus(BASE_DELAY.multipliedBy(3)), Instant.now().plus(BASE_DELAY.multipliedBy(3)))
         assertThat(reloaded.nextRetryAt).isNotEqualTo(failedAt.plus(BASE_DELAY))
     }
 
     @Test
     fun `recordFailure는 permanent=false여도 상한 도달이면 FAILED로 전이시킨다`() {
         val jobId = seedJob(status = IndexingJobStatus.PROCESSING, attemptCount = 5)
-        val failedAt = LocalDateTime.now()
+        val failedAt = Instant.now()
 
         val result =
             indexingFailureService.recordFailure(
-                jobId = jobId,
+                token = ExecutionToken(jobId, "worker-1", 1),
                 errorCode = "SOME_ERROR",
                 errorMessage = "some message",
                 permanent = false,
                 maxAttempts = 5,
                 baseDelay = BASE_DELAY,
-                failedAt = failedAt,
             )
 
         assertThat(result).isEqualTo(IndexingJobStatus.FAILED)
@@ -170,17 +160,16 @@ class IndexingFailureServiceIntegrationTest(
     @Test
     fun `recordFailure는 permanent=true면 attempt_count가 상한 미만이어도 즉시 FAILED로 전이시킨다`() {
         val jobId = seedJob(status = IndexingJobStatus.PROCESSING, attemptCount = 1)
-        val failedAt = LocalDateTime.now()
+        val failedAt = Instant.now()
 
         val result =
             indexingFailureService.recordFailure(
-                jobId = jobId,
+                token = ExecutionToken(jobId, "worker-1", 1),
                 errorCode = "TENANT_MISMATCH",
                 errorMessage = "some message",
                 permanent = true,
                 maxAttempts = 5,
                 baseDelay = BASE_DELAY,
-                failedAt = failedAt,
             )
 
         assertThat(result).isEqualTo(IndexingJobStatus.FAILED)
@@ -194,17 +183,16 @@ class IndexingFailureServiceIntegrationTest(
     @Test
     fun `recordFailure는 PROCESSING이 아니면 조용히 무시한다`() {
         val jobId = seedJob(status = IndexingJobStatus.COMPLETED, attemptCount = 1)
-        val failedAt = LocalDateTime.now()
+        val failedAt = Instant.now()
 
         val result =
             indexingFailureService.recordFailure(
-                jobId = jobId,
+                token = ExecutionToken(jobId, "worker-1", 1),
                 errorCode = "SOME_ERROR",
                 errorMessage = "some message",
                 permanent = false,
                 maxAttempts = 5,
                 baseDelay = BASE_DELAY,
-                failedAt = failedAt,
             )
 
         assertThat(result).isEqualTo(IndexingJobStatus.COMPLETED)

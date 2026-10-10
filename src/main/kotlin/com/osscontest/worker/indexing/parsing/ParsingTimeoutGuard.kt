@@ -20,11 +20,11 @@ import java.util.concurrent.TimeoutException
 class ParsingTimeoutGuard(
     @Value("\${indexing.limits.parse-timeout:PT60S}")
     private val parseTimeout: Duration,
-    @Value("\${indexing.consumer.concurrency:5}")
+    @Value("\${indexing.queue.concurrency:5}")
     concurrency: Int,
     private val meterRegistry: MeterRegistry,
 ) {
-    // 문서 처리 executor와 분리해 파싱 지연이 다른 단계의 작업 슬롯을 직접 점유하지 않게 한다.
+    // 파싱을 별도 executor에서 수행해 호출 스레드에서 제한 시간과 취소를 관리한다.
     private val parseExecutor = Executors.newFixedThreadPool(concurrency)
 
     fun parse(

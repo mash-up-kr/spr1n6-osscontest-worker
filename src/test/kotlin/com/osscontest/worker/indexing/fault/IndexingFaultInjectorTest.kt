@@ -1,6 +1,6 @@
 package com.osscontest.worker.indexing.fault
 
-import com.osscontest.worker.indexing.consumer.KafkaRecordIdentity
+import com.osscontest.worker.indexing.queue.ExecutionToken
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import java.util.UUID
@@ -13,8 +13,7 @@ class IndexingFaultInjectorTest {
     private val context =
         FaultInjectionContext(
             sourceEventId = UUID.randomUUID(),
-            workerId = "worker-1",
-            recordIdentity = KafkaRecordIdentity("indexing", 2, 137L),
+            executionToken = ExecutionToken(137L, "worker-1", 2),
         )
 
     @Test

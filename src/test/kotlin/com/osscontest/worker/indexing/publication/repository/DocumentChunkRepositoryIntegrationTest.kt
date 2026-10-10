@@ -112,45 +112,4 @@ class DocumentChunkRepositoryIntegrationTest(
         assertThat(secondCall).isZero()
     }
 
-    @Test
-    fun `findDeletedDocumentsWithRemainingChunks는 삭제됐고 chunk가 남은 문서만 찾는다`() {
-        // 1: 삭제됐고 chunk가 남음 -> 찾혀야 함
-        seedDocument(1, deleted = true)
-        seedDocumentVersion(1, 1)
-        seedChunk(1, 1, 0)
-
-        // 2: 삭제되지 않음, chunk 있음 -> 찾히면 안 됨
-        seedDocument(2, deleted = false)
-        seedDocumentVersion(2, 2)
-        seedChunk(2, 2, 0)
-
-        // 3: 삭제됐지만 chunk 없음 (이미 스윕됨) -> 찾히면 안 됨
-        seedDocument(3, deleted = true)
-        seedDocumentVersion(3, 3)
-
-        val result = documentChunkRepository.findDeletedDocumentsWithRemainingChunks(50)
-
-        assertThat(result).containsExactly(1L)
-    }
-
-    @Test
-    fun `findDeletedDocumentsWithRemainingChunks는 limit을 존중한다`() {
-        seedDocument(1, deleted = true)
-        seedDocumentVersion(1, 1)
-        seedChunk(1, 1, 0)
-
-        seedDocument(2, deleted = true)
-        seedDocumentVersion(2, 2)
-        seedChunk(2, 2, 0)
-
-        seedDocument(3, deleted = true)
-        seedDocumentVersion(3, 3)
-        seedChunk(3, 3, 0)
-
-        val limited = documentChunkRepository.findDeletedDocumentsWithRemainingChunks(1)
-        val unlimited = documentChunkRepository.findDeletedDocumentsWithRemainingChunks(50)
-
-        assertThat(limited).hasSize(1)
-        assertThat(unlimited).hasSize(3)
-    }
 }

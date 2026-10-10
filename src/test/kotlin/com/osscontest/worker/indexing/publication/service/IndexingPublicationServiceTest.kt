@@ -9,6 +9,13 @@ import com.osscontest.worker.indexing.publication.repository.DocumentRepository
 import com.osscontest.worker.indexing.publication.repository.DocumentVersionRepository
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
 import org.assertj.core.api.Assertions.assertThat
+import com.osscontest.worker.indexing.queue.*
+import com.osscontest.worker.indexing.publication.entity.DocumentEntity
+import com.osscontest.worker.support.*
+import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.mockito.kotlin.times
+import org.mockito.kotlin.never
+import org.mockito.kotlin.any
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.verify
@@ -21,6 +28,7 @@ class IndexingPublicationServiceTest {
     private val documentVersionRepository: DocumentVersionRepository = mock()
     private val documentRepository: DocumentRepository = mock()
     private val indexingJobRepository: IndexingJobRepository = mock()
+    private val store: JobQueueStore = mock<JobQueueStore>().apply { whenever(dbNow()).thenReturn(testNow) }
     private val service =
         IndexingPublicationService(
             documentChunkWriter,
@@ -28,11 +36,14 @@ class IndexingPublicationServiceTest {
             documentVersionRepository,
             documentRepository,
             indexingJobRepository,
+            JobOwnershipGuard(indexingJobRepository, store),
         )
 
     @Test
-    fun `검색 버전 승격이 스킵되어도 Job은 COMPLETED로 종결한다`() {
+    fun `청크와 검색 버전 저장 후 같은 실행만 완료한다`() {
         val context = context()
+        whenever(indexingJobRepository.findByIdForUpdate(1)).thenReturn(processingJob())
+        whenever(documentRepository.findByIdForUpdate(2)).thenReturn(DocumentEntity(2, 1, null, null))
         val chunks = listOf(chunk(0), chunk(1))
         whenever(documentChunkRepository.countByDocumentVersionId(context.documentVersionId)).thenReturn(2)
         whenever(
@@ -44,15 +55,41 @@ class IndexingPublicationServiceTest {
             ),
         ).thenReturn(1)
         whenever(documentRepository.promoteSearchableVersion(context.documentId, context.documentVersionId))
-            .thenReturn(0)
-        whenever(indexingJobRepository.complete(context.jobId)).thenReturn(1)
+            .thenReturn(1)
+        whenever(indexingJobRepository.complete(context.jobId, testToken.workerId, testToken.epoch)).thenReturn(1)
 
         val status = service.publish(context, chunks)
 
         assertThat(status).isEqualTo(IndexingJobStatus.COMPLETED)
         verify(documentChunkWriter).upsertAll(chunks)
         verify(documentChunkRepository).deleteTrailingChunks(context.documentVersionId, 1)
-        verify(indexingJobRepository).complete(context.jobId)
+        verify(indexingJobRepository).complete(context.jobId, testToken.workerId, testToken.epoch)
+    }
+
+    @Test
+    fun `커밋 응답 유실 후 같은 완료 실행은 결과를 다시 쓰지 않는다`() {
+        val job = processingJob(status = com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.COMPLETED)
+        whenever(indexingJobRepository.findByIdForUpdate(1)).thenReturn(job)
+        assertThat(service.publish(context(), listOf(chunk(0))))
+            .isEqualTo(com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.COMPLETED)
+        verify(documentChunkWriter, never()).upsertAll(any())
+        verify(indexingJobRepository, never()).complete(any(), any(), any())
+    }
+
+    @Test
+    fun `회수된 이전 epoch의 결과는 쓰지 않는다`() {
+        val job = processingJob().apply { executionEpoch++ }
+        whenever(indexingJobRepository.findByIdForUpdate(1)).thenReturn(job)
+        assertThatThrownBy { service.publish(context(), listOf(chunk(0))) }.isInstanceOf(ExecutionLostException::class.java)
+        verify(documentChunkWriter, never()).upsertAll(any())
+    }
+
+    @Test
+    fun `만료된 lease이면 청크를 쓰기 전에 트랜잭션을 종료한다`() {
+        val job = processingJob().apply { leaseUntil = testNow.minusSeconds(1) }
+        whenever(indexingJobRepository.findByIdForUpdate(1)).thenReturn(job)
+        assertThatThrownBy { service.publish(context(), listOf(chunk(0))) }.isInstanceOf(LeaseExpiredException::class.java)
+        verify(documentChunkWriter, never()).upsertAll(any())
     }
 
     private fun context() =
@@ -62,6 +99,7 @@ class IndexingPublicationServiceTest {
             documentVersionId = 3L,
             versionNo = 1L,
             extractedMetadata = mapOf("language" to "ko"),
+            executionToken = testToken,
         )
 
     private fun chunk(no: Int) =
