@@ -1,18 +1,12 @@
 package com.osscontest.worker.indexing.queue
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
-import com.osscontest.worker.indexing.pipeline.service.RetryWaiter
-import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
-import java.time.Duration
 
 @Component
 class ExecutionOperations(
     private val database: DatabaseOperations,
     private val store: JobQueueStore,
-    private val waiter: RetryWaiter,
-    private val properties: DatabaseWaitProperties,
-    @Value("\${indexing.retry.max-attempts:5}") private val maxAttempts: Int,
 ) {
     fun checkpoint(token: ExecutionToken, allowCompleted: Boolean = false) {
         database.execute {
@@ -43,18 +37,13 @@ class ExecutionOperations(
         }
     }
 
-    fun awaitRetry(token: ExecutionToken) {
+    /** Resolve a released failure before the normal recovery checkpoint rejects its cleared owner. */
+    fun <T> failure(token: ExecutionToken, action: () -> T): T {
         while (true) {
-            checkpoint(token)
-            val snapshot = database(token) { checkNotNull(store.snapshot(token)) }
-            if (snapshot.status == IndexingJobStatus.PROCESSING) return // prior resume committed
-            if (snapshot.status != IndexingJobStatus.RETRY_WAIT) throw ExecutionLostException(token)
-            val deadline = checkNotNull(snapshot.retryAt)
-            val remaining = Duration.between(snapshot.now, deadline)
-            if (remaining.isPositive) {
-                waiter.waitFor(minOf(remaining, properties.checkInterval))
-            } else if (database(token) { store.resumeRetry(token, maxAttempts) } == 1) {
-                return
+            try {
+                return database.execute(action = action)
+            } catch (_: LeaseExpiredException) {
+                checkpoint(token, allowCompleted = true)
             }
         }
     }

@@ -5,6 +5,7 @@ import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.publication.domain.DocumentChunk
 import com.osscontest.worker.indexing.publication.service.IndexingPublicationService
+import com.osscontest.worker.indexing.publication.service.IndexingFailureService
 import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
@@ -17,6 +18,7 @@ import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.support.TransactionTemplate
+import java.time.Duration
 import java.time.LocalDateTime
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -33,6 +35,7 @@ class DbJobQueueIntegrationTest(
     private val transactions: PlatformTransactionManager,
     private val publication: IndexingPublicationService,
     private val deletion: DocumentDeletionService,
+    private val failures: IndexingFailureService,
 ) {
     @BeforeEach
     fun fixture() {
@@ -61,7 +64,7 @@ class DbJobQueueIntegrationTest(
 
     private fun claim(): ClaimedJob {
         queue.enqueue(UUID.randomUUID(), 800001, 800001, JobType.INDEX, null)
-        return checkNotNull(queue.claim(false, 5) {})
+        return checkNotNull(queue.claim(5) {})
     }
 
     private fun expire(job: ClaimedJob) {
@@ -88,7 +91,7 @@ class DbJobQueueIntegrationTest(
         try {
             val winner = pool.submit {
                 TransactionTemplate(transactions).execute {
-                    if (renewFirst) queue.renew(job.token) else queue.recover(5)
+                    if (renewFirst) queue.renew(job.token) else queue.recover(5, Duration.ofSeconds(30))
                     locked.countDown()
                     check(commit.await(5, TimeUnit.SECONDS))
                 }
@@ -96,7 +99,7 @@ class DbJobQueueIntegrationTest(
             check(locked.await(5, TimeUnit.SECONDS))
             val loser = pool.submit<Long> {
                 competing.countDown()
-                if (renewFirst) queue.recover(5) else queue.renew(job.token).toLong()
+                if (renewFirst) queue.recover(5, Duration.ofSeconds(30)) else queue.renew(job.token).toLong()
             }
             check(competing.await(5, TimeUnit.SECONDS))
             assertThatThrownBy { loser.get(100, TimeUnit.MILLISECONDS) }.isInstanceOf(TimeoutException::class.java)
@@ -133,15 +136,20 @@ class DbJobQueueIntegrationTest(
     }
 
     @Test
-    fun `retry PROCESSING이 완료될 때까지 새 Job은 claim되지 않는다`() {
+    fun `재시도 대기 중 다른 문서는 claim되고 같은 Job은 due 이후 새 실행을 받는다`() {
         val job = claim()
         queue.enqueue(UUID.randomUUID(), 800002, 800002, JobType.INDEX, null)
-        jdbc.update("UPDATE indexing_job SET status = 'RETRY_WAIT', next_retry_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
-        assertThat(queue.claim(false, 5) {}).isNull()
-        assertThat(queue.resumeRetry(job.token, 5)).isEqualTo(1)
-        assertThat(queue.claim(false, 5) {}).isNull()
-        publication.publish(context(job), listOf(chunk(0)))
-        assertThat(queue.claim(false, 5) {}!!.documentId).isEqualTo(800002)
+        jdbc.update("UPDATE indexing_job SET status = 'RETRY_WAIT', worker_id = NULL, lease_until = NULL, " +
+            "next_retry_at = clock_timestamp() + INTERVAL '1 minute' WHERE id = ?", job.token.jobId)
+        val other = checkNotNull(queue.claim(5) {})
+        assertThat(other.documentId).isEqualTo(800002)
+        assertThat(queue.claim(5) {}).isNull()
+        jdbc.update("UPDATE indexing_job SET next_retry_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
+        val retry = checkNotNull(queue.claim(5) {})
+        assertThat(retry.token.jobId).isEqualTo(job.token.jobId)
+        assertThat(retry.sourceEventId).isEqualTo(job.sourceEventId)
+        assertThat(retry.token.epoch).isEqualTo(job.token.epoch + 1)
+        assertThat(queue.snapshot(retry.token)!!.retryAt).isNull()
     }
 
     @Test
@@ -150,12 +158,84 @@ class DbJobQueueIntegrationTest(
         publication.publish(context(old), listOf(chunk(0)))
         jdbc.update("UPDATE document SET deleted_at = clock_timestamp() WHERE id = 800001")
         queue.enqueue(UUID.randomUUID(), 800001, null, JobType.DELETE, null)
-        val job = checkNotNull(queue.claim(false, 5) {})
+        val job = checkNotNull(queue.claim(5) {})
         deletion.delete(job)
         deletion.delete(job)
         publication.publish(context(old), listOf(chunk(0))) // old completion is acknowledged without writes
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM document_chunk WHERE document_id = 800001", Long::class.java)).isZero()
         assertThat(queue.snapshot(job.token)!!.status).isEqualTo(IndexingJobStatus.COMPLETED)
+    }
+
+    @Test
+    fun `실제 실패 커밋 재호출은 해제 상태와 같은 식별자 순서 횟수 deadline을 보존한다`() {
+        val job = claim()
+        val original = jdbc.queryForMap("SELECT * FROM indexing_job WHERE id = ?", job.token.jobId)
+        assertThat(failures.recordFailure(job.token, "TEMP", "temporary", false, 5, Duration.ofSeconds(30)))
+            .isEqualTo(IndexingJobStatus.RETRY_WAIT)
+        val committed = jdbc.queryForMap("SELECT * FROM indexing_job WHERE id = ?", job.token.jobId)
+        assertThat(committed["worker_id"]).isNull()
+        assertThat(committed["lease_until"]).isNull()
+        for (column in listOf("source_event_id", "enqueue_seq", "attempt_count", "execution_epoch")) {
+            assertThat(committed[column]).isEqualTo(original[column])
+        }
+        failures.recordFailure(job.token, "OTHER", "replayed", false, 5, Duration.ofSeconds(60))
+        val replayed = jdbc.queryForMap("SELECT * FROM indexing_job WHERE id = ?", job.token.jobId)
+        assertThat(replayed).isEqualTo(committed)
+        assertThat(queue.claim(5) {}).isNull()
+        jdbc.update("UPDATE indexing_job SET next_retry_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
+        val next = checkNotNull(queue.claim(5) {})
+        assertThat(next.sourceEventId).isEqualTo(job.sourceEventId)
+        assertThat(next.attemptCount).isEqualTo(job.attemptCount + 1)
+        assertThat(next.token.epoch).isEqualTo(job.token.epoch + 1)
+        assertThat(jdbc.queryForMap("SELECT * FROM indexing_job WHERE id = ?", next.token.jobId)["enqueue_seq"])
+            .isEqualTo(original["enqueue_seq"])
+    }
+
+    @Test
+    fun `다른 Worker 오래된 epoch 만료 lease는 실패 상태를 반영하지 못한다`() {
+        val job = claim()
+        for (token in listOf(job.token.copy(workerId = "other"), job.token.copy(epoch = job.token.epoch - 1))) {
+            assertThatThrownBy { failures.recordFailure(token, "TEMP", "error", false, 5, Duration.ofSeconds(30)) }
+                .isInstanceOf(ExecutionLostException::class.java)
+        }
+        expire(job)
+        assertThatThrownBy { failures.recordFailure(job.token, "TEMP", "error", false, 5, Duration.ofSeconds(30)) }
+            .isInstanceOf(LeaseExpiredException::class.java)
+        assertThat(queue.snapshot(job.token)!!.status).isEqualTo(IndexingJobStatus.PROCESSING)
+    }
+
+    @Test
+    fun `만료 복구도 선형 지터를 적용하고 실패 반영에서 횟수와 epoch를 소비하지 않는다`() {
+        val job = claim()
+        jdbc.update("UPDATE indexing_job SET attempt_count = 3 WHERE id = ?", job.token.jobId)
+        expire(job)
+        val before = queue.dbNow()
+        assertThat(queue.recover(5, Duration.ofSeconds(30))).isEqualTo(1)
+        val after = queue.dbNow()
+        val recovered = checkNotNull(queue.snapshot(job.token))
+        assertThat(recovered.status).isEqualTo(IndexingJobStatus.RETRY_WAIT)
+        assertThat(recovered.retryAt).isBetween(before.plusSeconds(72), after.plusSeconds(108))
+        assertThat(recovered.epoch).isEqualTo(job.token.epoch)
+        assertThat(recovered.workerId).isNull()
+        assertThat(recovered.leaseUntil).isNull()
+        assertThat(queue.claim(5) {}).isNull()
+        assertThat(jdbc.queryForObject("SELECT attempt_count FROM indexing_job WHERE id = ?", Int::class.java, job.token.jobId))
+            .isEqualTo(3)
+    }
+
+    @Test
+    fun `마지막 실행 lease 만료는 FAILED로 종결하고 재시도를 예약하지 않는다`() {
+        val job = claim()
+        jdbc.update("UPDATE indexing_job SET attempt_count = 5 WHERE id = ?", job.token.jobId)
+        expire(job)
+        queue.recover(5, Duration.ofSeconds(30))
+        val recovered = checkNotNull(queue.snapshot(job.token))
+        assertThat(recovered.status).isEqualTo(IndexingJobStatus.FAILED)
+        assertThat(recovered.retryAt).isNull()
+        assertThat(recovered.epoch).isEqualTo(job.token.epoch)
+        assertThat(recovered.workerId).isNull()
+        assertThat(recovered.leaseUntil).isNull()
+        assertThat(queue.claim(5) {}).isNull()
     }
 
     private fun context(job: ClaimedJob) = IndexingContext(job.token.jobId, 800001, 800001, 1, null, job.token)

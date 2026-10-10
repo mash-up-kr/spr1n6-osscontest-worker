@@ -10,7 +10,7 @@ import org.mockito.kotlin.*
 
 class ExecutionOperationsTest {
     private val store: JobQueueStore = mock()
-    private val execution = ExecutionOperations(directDatabase(), store, RetryWaiter {}, DatabaseWaitProperties(), 5)
+    private val execution = ExecutionOperations(directDatabase(), store)
     private fun snapshot(epoch: Long = testToken.epoch, expired: Boolean = false) = JobSnapshot(testToken.workerId, epoch,
         IndexingJobStatus.PROCESSING, testNow.plusSeconds(if (expired) -1 else 60), null, testNow)
 
@@ -38,4 +38,20 @@ class ExecutionOperationsTest {
         assertThat(result).isEqualTo("retained")
         assertThat(calls).isEqualTo(2)
     }
+    @Test
+    fun `실패 커밋 응답 유실 후 해제된 실행은 일반 checkpoint 없이 실패 결과를 확인한다`() {
+        val database = DatabaseOperations(org.springframework.jdbc.core.JdbcTemplate(
+            org.springframework.jdbc.datasource.DriverManagerDataSource("jdbc:h2:mem:failure-loss", "sa", "")),
+            RetryWaiter {}, DatabaseWaitProperties(java.time.Duration.ofMillis(1), java.time.Duration.ofSeconds(1)),
+            io.micrometer.core.instrument.simple.SimpleMeterRegistry())
+        var calls = 0
+        val result = ExecutionOperations(database, store).failure(testToken) {
+            if (++calls == 1) throw org.springframework.dao.DataAccessResourceFailureException("commit response lost")
+            IndexingJobStatus.RETRY_WAIT
+        }
+        assertThat(result).isEqualTo(IndexingJobStatus.RETRY_WAIT)
+        assertThat(calls).isEqualTo(2)
+        verifyNoInteractions(store)
+    }
+
 }

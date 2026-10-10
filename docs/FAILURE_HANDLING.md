@@ -33,13 +33,13 @@ claim·heartbeat·phase·실패 기록·결과 저장·삭제 모두 DB 경계�
 ## 실행권과 조건부 lease 갱신
 
 실행 토큰은 `job_id + worker_id + execution_epoch`입니다.
-Job 상태가 `PROCESSING` 또는 `RETRY_WAIT`이고 lease가 존재해야 소유한 실행으로 인정합니다.
+Job 상태가 `PROCESSING`이고 lease가 존재해야 소유한 실행으로 인정합니다.
 실제 처리를 재개할 때는 lease가 DB 시각보다 미래여야 합니다.
 
 만료됐어도 같은 토큰이면 `renew()`를 시도합니다. 갱신 조건은 Job ID, Worker ID, epoch,
 소유 상태, lease 존재입니다. 만료 시각이 미래라는 조건은 갱신에 넣지 않습니다.
 갱신 이후 상태와 lease를 다시 확인합니다. 회수 UPDATE는 만료 조건을 확인해 소유자·lease를 비우고
-epoch를 증가시킵니다. 같은 행 잠금 아래에서 먼저 반영된 UPDATE의 결과로 나머지 조건이 재평가됩니다.
+epoch는 유지합니다. 새 epoch는 다음 claim에서 발급합니다. 같은 행 잠금 아래에서 먼저 반영된 UPDATE의 결과로 나머지 조건이 재평가됩니다.
 
 - 갱신이 먼저 성공하면 회수 UPDATE의 만료 조건이 거짓이 됩니다.
 - 회수가 먼저 성공하면 갱신의 소유자·epoch 조건이 거짓이 됩니다.
@@ -62,25 +62,30 @@ Job `COMPLETED`를 하나의 `@Transactional` 메서드에서 처리합니다.
 `publication`은 이 결과 저장 트랜잭션을 뜻합니다.
 
 claim은 UPDATE 전에 예정 토큰을 기록하고 복구 후 해당 claim이 반영됐는지 조회합니다.
-실패 기록도 이미 `RETRY_WAIT`·`FAILED`·`COMPLETED`로 반영된 같은 실행이면
-다시 시도 횟수를 소비하거나 deadline을 미루지 않습니다.
+실패 기록은 Worker·lease를 해제하므로 일반 소유권 checkpoint와 별도로 결과를 확인합니다.
+같은 epoch의 해제된 `RETRY_WAIT`·`FAILED`이면 재호출은 상태만 반환하고 deadline을 미루지 않습니다.
+더 새로운 epoch 또는 다른 Worker의 실행은 거절합니다. 같은 토큰의 `COMPLETED`도 추가 실패 쓰기 없이 반환합니다.
 
 ## 429와 일반 재시도
 
-429는 애플리케이션에서 처리하며 SDK 자동 재시도는 비활성화합니다.
-로컬 대기 표식을 먼저 세우고 `RATE_LIMITED`, `RETRY_WAIT`, `next_retry_at`을 저장합니다.
-`Retry-After`는 초 또는 HTTP 날짜를 지원하며 부재·오류 시 기본 backoff를 사용합니다.
-같은 실행은 heartbeat를 유지하며 실패한 임베딩 배치만 재호출합니다.
+SDK 자동 재시도는 비활성화합니다. 일반 오류와 429는 runner의 공통 실패 경로로 전파합니다.
+일시 오류이고 `attempt_count < maxAttempts`이면 `RETRY_WAIT`, 영구 오류나 한도 소진이면 `FAILED`입니다.
+실패 쓰기는 상태·Worker·epoch·유효 lease를 검증하고 Worker·lease 해제까지 같은 트랜잭션으로 반영합니다.
+실패한 실행은 종료하여 슬롯을 반환합니다. 다음 claim이 시도 횟수와 epoch를 증가시켜 전체 파이프라인을 실행합니다.
 
-다른 Worker는 DB deadline을 확인합니다. Worker 종료 후 회수는 deadline을 유지하므로
-새 claim도 대기 시각을 존중합니다. 성공 배치의 메모리 결과는 새 실행으로 전달되지 않습니다.
-재개한 `PROCESSING` Job에도 deadline 표식을 유지해 재시도 집합이 종결되기 전 신규 claim을 막습니다.
-재시도 요청 직렬화는 Worker 내부에서만 적용하며 외부 API circuit breaker는 없습니다.
+`next_retry_at = DB 시각 + base-delay × max(attempt_count, 1) × U(0.8, 1.2)`입니다.
+429는 `Retry-After` 초 또는 HTTP 날짜가 유효하면 이 시각과 선형 지터 deadline 중 더 늦은 값을 저장합니다.
+재시도는 같은 Job·`source_event_id`·`enqueue_seq`를 유지합니다. 미래의 선행 재시도는 같은 문서의 후속 Job을 막지만 다른 문서는 막지 않습니다.
+성공한 임베딩 배치의 메모리 결과는 다음 실행으로 전달하지 않습니다. 외부 API circuit breaker는 없습니다.
 
-일반 일시 실패는 기본 `base-delay * attempt_count`만큼 대기하고 전체 시도를 반복합니다.
-파일 해시 불일치, 미지원 MIME, 손상 파일, 크기·청크·토큰 한도 초과,
-잘못된 임베딩 결과와 거절된 요청 등은 영구 오류로 분류합니다.
-기본 시도 한도는 5회입니다. DB 대기·헬스 조회는 처리 시도 횟수를 소비하지 않습니다.
+만료 복구 함수도 같은 시도 한도·선형 지터 설정을 사용합니다. 만료 `PROCESSING`은 잔여 횟수가 있으면
+`RETRY_WAIT`, 소진이면 `FAILED`가 됩니다. 기존 `RETRY_WAIT`의 deadline은 보존하며 시도 횟수·epoch는 증가시키지 않습니다.
+DB 스케줄러도 Worker와 같은 `max_attempts`, `base_delay_ms`를 전달해야 합니다.
+
+해시 불일치, 미지원 MIME, 손상 파일, 크기·청크·토큰 한도 초과, 잘못된 임베딩과 거절된 요청은 영구 오류입니다.
+Core의 업로드 성공 후 INDEX Job 등록 계약을 확인한 배포에서만 `INDEXING_JOB_AFTER_UPLOAD_CONFIRMED=true`로 설정합니다.
+이때 명시적인 `NoSuchKey`를 영구 오류로 분류합니다. 일반 404나 스토리지 오류 전체를 영구 오류로 취급하지 않습니다.
+기본 시도 한도는 5회입니다. DB 장애 대기·헬스 조회는 처리 시도 횟수를 소비하지 않습니다.
 
 ## 삭제와 버전 보호
 
@@ -100,7 +105,9 @@ Server의 과거 버전 재시도 제한은 외부 의존성이며 Worker도 부
 | 청크 UPSERT 후 검증 실패 | 청크와 완료 상태 모두 롤백 |
 | 저장 커밋 후 응답 유실 | 같은 실행 완료 확인, 재저장·외부 호출 반복 방지 |
 | claim 커밋 응답 유실 | 예정 토큰으로 기존 claim 확인 |
-| 여러 임베딩 배치 중 429 | 성공 배치 유지, 실패 배치만 재시도 |
+| 여러 임베딩 배치 중 429 | DB 재시도 예약 후 슬롯 반환, 다음 claim에서 전체 처리 |
+| 실패 커밋 응답 유실 | 같은 epoch의 해제 상태 확인, deadline·횟수 변경 없음 |
+| 선행 Job의 재시도 시각이 미래 | 같은 문서 후속 Job 차단, 다른 문서 실행 가능 |
 | 재시도 중 Worker 종료 | 회수 시 deadline 유지, 새 실행은 전체 처리 가능 |
 | DELETE 완료 재호출·오래된 INDEX 저장 | 멱등 완료 및 실행권 거절 |
 
@@ -108,7 +115,7 @@ Server의 과거 버전 재시도 제한은 외부 의존성이며 Worker도 부
 전용 DB에 공용 스키마와 [큐 계약](sql/DB_JOB_QUEUE_CONTRACT.sql)을 적용한 뒤 실행해야 합니다.
 이 문서는 운영 DB 적용이나 통합 테스트 실행 완료를 의미하지 않습니다.
 
-메트릭: `indexing_db_wait_total`, `indexing_inline_retry_total`,
+메트릭: `indexing_db_wait_total`, `indexing_retry_scheduled_total{errorCode}`,
 `indexing_job_failed_total{errorCode}`, `indexing_job_duration_seconds{phase=total}`,
 `parse_timeout_total`.
 

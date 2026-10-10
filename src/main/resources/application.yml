@@ -23,9 +23,9 @@ spring:
 
 indexing:
   retry:
-    # 일반 처리 실패와 API 재시도를 합쳐 최대 5회로 제한한다.
+    # 일반 처리 오류와 429 모두 Job claim 기준으로 최대 5회 시도한다.
     max-attempts: ${INDEXING_MAX_ATTEMPTS:5}
-    # 선형 백오프의 기준 간격이다.
+    # DB 예약 재시도의 선형 backoff 기준 간격. 각 회차에 ±20% 지터를 적용한다.
     base-delay: ${INDEXING_RETRY_BASE_DELAY:PT30S}
   queue:
     enabled: ${INDEXING_DB_QUEUE_ENABLED:true}
@@ -59,6 +59,8 @@ indexing:
     # OpenAI 임베딩 API의 요청당 토큰 상한(300,000)에 맞춘 값이다.
     max-tokens-per-request: ${INDEXING_EMBEDDING_MAX_TOKENS_PER_REQUEST:300000}
   storage:
+    # Core가 객체 업로드 성공 후 INDEX Job을 등록하는 계약을 확인한 경우만 true로 설정한다.
+    job-after-upload-confirmed: ${INDEXING_JOB_AFTER_UPLOAD_CONFIRMED:false}
     bucket: ${INDEXING_STORAGE_BUCKET}
     endpoint: ${INDEXING_STORAGE_ENDPOINT:}
     region: ${INDEXING_STORAGE_REGION:us-east-1}
