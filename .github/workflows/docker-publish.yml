@@ -23,6 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # GitHub 러너는 amd64라 arm64 이미지는 QEMU 에뮬레이션으로 빌드한다.
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -35,6 +38,8 @@ jobs:
         with:
           context: .
           push: true
+          # 기존 ghcr 이미지와 같은 멀티 아키텍처(amd64, arm64)로 유지한다.
+          platforms: linux/amd64,linux/arm64
           tags: |
             ghcr.io/mash-up-kr/spr1n6-osscontest-worker:latest
             ghcr.io/mash-up-kr/spr1n6-osscontest-worker:${{ github.sha }}
