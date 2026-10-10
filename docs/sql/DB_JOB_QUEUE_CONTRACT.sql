@@ -4,7 +4,7 @@ BEGIN;
 
 ALTER TABLE indexing_job
     ADD COLUMN execution_epoch BIGINT NOT NULL DEFAULT 0,
-    ADD COLUMN lease_expires_at TIMESTAMPTZ,
+    ADD COLUMN lease_until TIMESTAMPTZ,
     ADD COLUMN job_type VARCHAR(20) NOT NULL DEFAULT 'INDEX',
     ALTER COLUMN document_version_id DROP NOT NULL,
     DROP COLUMN kafka_topic,
@@ -23,14 +23,14 @@ ALTER TABLE indexing_job
     ),
     ADD CONSTRAINT ck_indexing_job_epoch CHECK (execution_epoch >= 0),
     ADD CONSTRAINT ck_indexing_job_lease CHECK (
-        (lease_expires_at IS NULL AND (worker_id IS NULL OR status IN ('COMPLETED', 'FAILED'))) OR
-        (worker_id IS NOT NULL AND lease_expires_at IS NOT NULL)
+        (lease_until IS NULL AND (worker_id IS NULL OR status IN ('COMPLETED', 'FAILED'))) OR
+        (worker_id IS NOT NULL AND lease_until IS NOT NULL)
     ),
     ADD CONSTRAINT fk_indexing_job_document FOREIGN KEY (document_id) REFERENCES document(id);
 
 CREATE INDEX idx_indexing_job_document_order ON indexing_job (document_id, id)
     WHERE status IN ('PENDING', 'PROCESSING', 'RETRY_WAIT');
-CREATE INDEX idx_indexing_job_expired_lease ON indexing_job (lease_expires_at)
+CREATE INDEX idx_indexing_job_expired_lease ON indexing_job (lease_until)
     WHERE worker_id IS NOT NULL AND status IN ('PROCESSING', 'RETRY_WAIT');
 CREATE INDEX idx_indexing_job_retry_admission ON indexing_job (next_retry_at)
     WHERE next_retry_at IS NOT NULL AND status IN ('PENDING', 'PROCESSING', 'RETRY_WAIT');
@@ -41,10 +41,10 @@ CREATE FUNCTION recover_expired_indexing_jobs() RETURNS BIGINT LANGUAGE SQL AS $
     WITH recovered AS (
         UPDATE indexing_job SET
             status = CASE WHEN status = 'RETRY_WAIT' THEN 'RETRY_WAIT' ELSE 'PENDING' END,
-            worker_id = NULL, lease_expires_at = NULL,
+            worker_id = NULL, lease_until = NULL,
             execution_epoch = execution_epoch + 1, updated_at = clock_timestamp()
         WHERE worker_id IS NOT NULL AND status IN ('PROCESSING', 'RETRY_WAIT')
-          AND lease_expires_at <= clock_timestamp()
+          AND lease_until <= clock_timestamp()
         RETURNING id
     ) SELECT COUNT(*) FROM recovered;
 $$;

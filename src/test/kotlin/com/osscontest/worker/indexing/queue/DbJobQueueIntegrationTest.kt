@@ -65,7 +65,7 @@ class DbJobQueueIntegrationTest(
     }
 
     private fun expire(job: ClaimedJob) {
-        jdbc.update("UPDATE indexing_job SET lease_expires_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
+        jdbc.update("UPDATE indexing_job SET lease_until = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
     }
 
     @Test

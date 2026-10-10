@@ -86,7 +86,7 @@ class IndexingPublicationServiceTest {
 
     @Test
     fun `만료된 lease이면 청크를 쓰기 전에 트랜잭션을 종료한다`() {
-        val job = processingJob().apply { leaseExpiresAt = testNow.minusSeconds(1) }
+        val job = processingJob().apply { leaseUntil = testNow.minusSeconds(1) }
         whenever(indexingJobRepository.findByIdForUpdate(1)).thenReturn(job)
         assertThatThrownBy { service.publish(context(), listOf(chunk(0))) }.isInstanceOf(LeaseExpiredException::class.java)
         verify(documentChunkWriter, never()).upsertAll(any())

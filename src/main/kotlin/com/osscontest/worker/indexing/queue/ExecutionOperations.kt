@@ -22,12 +22,12 @@ class ExecutionOperations(
                 if (allowCompleted) return@execute
                 throw ExecutionCompletedException(token)
             }
-            if (job.status !in ownedStatuses || job.leaseExpiresAt == null) throw ExecutionLostException(token)
-            if (job.leaseExpiresAt <= job.now) {
+            if (job.status !in ownedStatuses || job.leaseUntil == null) throw ExecutionLostException(token)
+            if (job.leaseUntil <= job.now) {
                 if (store.renew(token) != 1) throw ExecutionLostException(token)
                 job = store.snapshot(token) ?: throw ExecutionLostException(token)
                 if (!job.matches(token) || job.status !in ownedStatuses) throw ExecutionLostException(token)
-                if (job.leaseExpiresAt == null || job.leaseExpiresAt <= job.now) throw LeaseExpiredException()
+                if (job.leaseUntil == null || job.leaseUntil <= job.now) throw LeaseExpiredException()
             }
         }
     }

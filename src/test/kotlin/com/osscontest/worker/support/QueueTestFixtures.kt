@@ -19,7 +19,7 @@ fun processingJob(token: ExecutionToken = testToken, status: IndexingJobStatus =
     id = token.jobId, sourceEventId = UUID.randomUUID(), documentId = 2, documentVersionId = 3,
     status = status, attemptCount = attempt, nextRetryAt = null, workerId = token.workerId,
     lastErrorCode = null, lastErrorMessage = null, traceId = null, startedAt = testNow,
-    completedAt = null, updatedAt = testNow, executionEpoch = token.epoch, leaseExpiresAt = testNow.plusSeconds(60),
+    completedAt = null, updatedAt = testNow, executionEpoch = token.epoch, leaseUntil = testNow.plusSeconds(60),
 )
 
 fun directDatabase(): DatabaseOperations = mock<DatabaseOperations>().apply {

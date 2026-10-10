@@ -15,7 +15,7 @@ class JobOwnershipGuard(private val jobs: IndexingJobRepository, private val sto
     }
 
     fun requireProcessing(job: IndexingJobEntity, token: ExecutionToken) {
-        if (job.status != IndexingJobStatus.PROCESSING || job.leaseExpiresAt == null) throw ExecutionLostException(token)
-        if (!job.leaseExpiresAt!!.isAfter(store.dbNow())) throw LeaseExpiredException()
+        if (job.status != IndexingJobStatus.PROCESSING || job.leaseUntil == null) throw ExecutionLostException(token)
+        if (!job.leaseUntil!!.isAfter(store.dbNow())) throw LeaseExpiredException()
     }
 }

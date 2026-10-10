@@ -22,7 +22,7 @@ data class JobSnapshot(
     val workerId: String?,
     val epoch: Long,
     val status: IndexingJobStatus,
-    val leaseExpiresAt: Instant?,
+    val leaseUntil: Instant?,
     val retryAt: Instant?,
     val now: Instant,
 ) {

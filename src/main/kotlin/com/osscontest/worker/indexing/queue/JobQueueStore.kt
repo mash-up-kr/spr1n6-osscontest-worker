@@ -27,7 +27,7 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
         val candidates = jdbc.query(
             """
             SELECT j.* FROM indexing_job j
-            WHERE j.worker_id IS NULL AND j.lease_expires_at IS NULL
+            WHERE j.worker_id IS NULL AND j.lease_until IS NULL
               AND j.attempt_count < :maxAttempts
               AND (j.status = 'PENDING' OR (j.status = 'RETRY_WAIT' AND j.next_retry_at <= $UTC_NOW))
               AND NOT EXISTS (
@@ -54,7 +54,7 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
         jdbc.update(
             """
             UPDATE indexing_job SET status = 'PROCESSING', worker_id = :workerId,
-                execution_epoch = :epoch, lease_expires_at = clock_timestamp() + :leaseMillis * INTERVAL '1 millisecond',
+                execution_epoch = :epoch, lease_until = clock_timestamp() + :leaseMillis * INTERVAL '1 millisecond',
                 attempt_count = attempt_count + 1, started_at = COALESCE(started_at, $UTC_NOW), updated_at = $UTC_NOW
             WHERE id = :id AND worker_id IS NULL AND execution_epoch = :previousEpoch
             """.trimIndent(),
@@ -71,22 +71,22 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
 
     fun snapshot(token: ExecutionToken): JobSnapshot? = jdbc.query(
         """
-        SELECT worker_id, execution_epoch, status, lease_expires_at,
+        SELECT worker_id, execution_epoch, status, lease_until,
                next_retry_at AS retry_at, clock_timestamp() AS db_now
         FROM indexing_job WHERE id = :id
         """.trimIndent(), token.params(),
     ) { rs, _ ->
         JobSnapshot(rs.getString("worker_id"), rs.getLong("execution_epoch"),
-            IndexingJobStatus.valueOf(rs.getString("status")), rs.getTimestamp("lease_expires_at")?.toInstant(),
+            IndexingJobStatus.valueOf(rs.getString("status")), rs.getTimestamp("lease_until")?.toInstant(),
             rs.getTimestamp("retry_at")?.toInstant(), rs.getTimestamp("db_now").toInstant())
     }.firstOrNull()
 
     fun renew(token: ExecutionToken): Int = jdbc.update(
         """
-        UPDATE indexing_job SET lease_expires_at = clock_timestamp() + :leaseMillis * INTERVAL '1 millisecond',
+        UPDATE indexing_job SET lease_until = clock_timestamp() + :leaseMillis * INTERVAL '1 millisecond',
             updated_at = $UTC_NOW
         WHERE id = :id AND worker_id = :workerId AND execution_epoch = :epoch
-          AND status IN ('PROCESSING', 'RETRY_WAIT') AND lease_expires_at IS NOT NULL
+          AND status IN ('PROCESSING', 'RETRY_WAIT') AND lease_until IS NOT NULL
         """.trimIndent(), token.params() + ("leaseMillis" to properties.leaseDuration.toMillis()),
     )
 
@@ -95,7 +95,7 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
         UPDATE indexing_job SET status = 'PROCESSING', attempt_count = attempt_count + 1, updated_at = $UTC_NOW
         WHERE id = :id AND worker_id = :workerId AND execution_epoch = :epoch
           AND status = 'RETRY_WAIT' AND next_retry_at <= $UTC_NOW
-          AND lease_expires_at > clock_timestamp() AND attempt_count < :maxAttempts
+          AND lease_until > clock_timestamp() AND attempt_count < :maxAttempts
         """.trimIndent(), token.params() + ("maxAttempts" to maxAttempts),
     )
 
@@ -132,7 +132,7 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
             """
             UPDATE indexing_job j SET status = 'FAILED', completed_at = $UTC_NOW, updated_at = $UTC_NOW,
                 last_error_code = 'DOCUMENT_INELIGIBLE', next_retry_at = NULL,
-                worker_id = NULL, lease_expires_at = NULL, execution_epoch = execution_epoch + 1
+                worker_id = NULL, lease_until = NULL, execution_epoch = execution_epoch + 1
             WHERE j.job_type = 'INDEX' AND j.status IN ('PENDING','PROCESSING','RETRY_WAIT')
               AND EXISTS (
                 SELECT 1 FROM document d JOIN document_version candidate ON candidate.id = j.document_version_id

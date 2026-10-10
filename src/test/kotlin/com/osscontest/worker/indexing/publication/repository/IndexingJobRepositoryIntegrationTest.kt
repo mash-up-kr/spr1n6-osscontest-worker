@@ -85,7 +85,7 @@ class IndexingJobRepositoryIntegrationTest(
     fun `회수 전에 만료 lease를 연장하면 복구 함수가 회수하지 않는다`() {
         queue.enqueue(UUID.randomUUID(), 1, 1, JobType.INDEX, null)
         val job = checkNotNull(queue.claim(false, 5) {})
-        jdbcTemplate.update("UPDATE indexing_job SET lease_expires_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
+        jdbcTemplate.update("UPDATE indexing_job SET lease_until = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
         assertThat(queue.renew(job.token)).isEqualTo(1)
         assertThat(queue.recover(5)).isZero()
         assertThat(queue.snapshot(job.token)!!.matches(job.token)).isTrue()
@@ -95,7 +95,7 @@ class IndexingJobRepositoryIntegrationTest(
     fun `회수와 새 claim 이후 이전 epoch로 연장 phase 완료할 수 없다`() {
         queue.enqueue(UUID.randomUUID(), 1, 1, JobType.INDEX, null)
         val job = checkNotNull(queue.claim(false, 5) {})
-        jdbcTemplate.update("UPDATE indexing_job SET lease_expires_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
+        jdbcTemplate.update("UPDATE indexing_job SET lease_until = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
         assertThat(queue.recover(5)).isEqualTo(1)
         val next = checkNotNull(queue.claim(false, 5) {})
         assertThat(next.token.epoch).isGreaterThan(job.token.epoch)
@@ -109,7 +109,7 @@ class IndexingJobRepositoryIntegrationTest(
         queue.enqueue(UUID.randomUUID(), 1, 1, JobType.INDEX, null)
         val job = checkNotNull(queue.claim(false, 5) {})
         jdbcTemplate.update("UPDATE indexing_job SET status = 'RETRY_WAIT', next_retry_at = clock_timestamp() + INTERVAL '1 minute', " +
-            "lease_expires_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
+            "lease_until = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
         val deadline = queue.snapshot(job.token)!!.retryAt
         queue.recover(5)
         assertThat(queue.snapshot(job.token)!!.retryAt).isEqualTo(deadline)

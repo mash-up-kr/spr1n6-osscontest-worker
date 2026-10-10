@@ -11,7 +11,6 @@ import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
 import jakarta.persistence.Table
 import java.time.Instant
-import java.time.LocalDateTime
 import java.util.UUID
 
 @Entity
@@ -57,10 +56,8 @@ class IndexingJobEntity(
     var enqueueSeq: Long? = null,
     @Column(name = "execution_epoch", nullable = false)
     var executionEpoch: Long = 0,
-    @Column(name = "lease_until")
-    var leaseUntil: LocalDateTime? = null,
     @Column(name = "outcome")
     var outcome: String? = null,
-    @Column(name = "lease_expires_at")
-    var leaseExpiresAt: Instant? = null,
+    @Column(name = "lease_until")
+    var leaseUntil: Instant? = null,
 )

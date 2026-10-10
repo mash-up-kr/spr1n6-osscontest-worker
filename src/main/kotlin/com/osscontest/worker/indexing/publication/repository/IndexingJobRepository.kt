@@ -24,7 +24,7 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
         UPDATE indexing_job SET status = 'COMPLETED', completed_at = clock_timestamp(),
             next_retry_at = NULL, updated_at = clock_timestamp()
         WHERE id = :jobId AND worker_id = :workerId AND execution_epoch = :epoch
-          AND status = 'PROCESSING' AND lease_expires_at > clock_timestamp()
+          AND status = 'PROCESSING' AND lease_until > clock_timestamp()
     """, nativeQuery = true)
     fun complete(@Param("jobId") jobId: Long, @Param("workerId") workerId: String, @Param("epoch") epoch: Long): Int
 
@@ -33,7 +33,7 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
     @Query(value = """
         UPDATE indexing_job SET phase = :phase, updated_at = clock_timestamp()
         WHERE id = :jobId AND worker_id = :workerId AND execution_epoch = :epoch
-          AND status = 'PROCESSING' AND lease_expires_at > clock_timestamp()
+          AND status = 'PROCESSING' AND lease_until > clock_timestamp()
     """, nativeQuery = true)
     fun updatePhase(@Param("jobId") jobId: Long, @Param("phase") phase: String,
                     @Param("workerId") workerId: String, @Param("epoch") epoch: Long): Int

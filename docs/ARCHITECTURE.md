@@ -42,7 +42,7 @@ flowchart TD
 ## 데이터 계약
 
 `indexing_job`은 `source_event_id` 멱등 키, `document_id`, nullable `document_version_id`,
-`job_type`, `status`, `attempt_count`, `worker_id`, `execution_epoch`, `lease_expires_at`,
+`job_type`, `status`, `attempt_count`, `worker_id`, `execution_epoch`, `lease_until`,
 `next_retry_at`, 오류·추적 정보를 보관합니다. `INDEX`는 버전 ID가 필요하고 `DELETE`는
 버전 ID 없이 문서 단위로 처리합니다. 시각은 TIMESTAMPTZ와 DB 시계를 사용합니다.
 

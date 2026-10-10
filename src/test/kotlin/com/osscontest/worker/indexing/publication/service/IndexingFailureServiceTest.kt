@@ -28,7 +28,7 @@ class IndexingFailureServiceTest {
             status = IndexingJobStatus.PROCESSING, attemptCount = attemptCount, nextRetryAt = null, workerId = testToken.workerId,
             lastErrorCode = null, lastErrorMessage = null, traceId = null, startedAt = null,
             completedAt = null, updatedAt = testNow,
-            executionEpoch = testToken.epoch, leaseExpiresAt = testNow.plusSeconds(60),
+            executionEpoch = testToken.epoch, leaseUntil = testNow.plusSeconds(60),
         )
 
     @Test
