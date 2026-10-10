@@ -1,4 +1,4 @@
-[KO](README.md) / [EN](README_EN.md)
+[한국어](README.md) / [English](README_EN.md)
 
 # AI Document Indexing Worker
 
@@ -6,344 +6,167 @@
 ![Kotlin 2.3.21](https://img.shields.io/badge/Kotlin-2.3.21-7F52FF?logo=kotlin&logoColor=white)
 ![Spring Boot 4.1.0](https://img.shields.io/badge/Spring%20Boot-4.1.0-6DB33F?logo=springboot&logoColor=white)
 
-> 2026 Open Source Software Developer Competition, TmaxTibero Corporate Challenge<br>
+> 2026 Open Source Developer Competition · Tmax Tibero corporate challenge <br>
+> **Passed the first written evaluation (top 3 teams)**
 
-This is the asynchronous indexing worker for an AI document management system
-built on Tmax OpenSQL. It consumes document events from Kafka and downloads,
-parses, chunks, and embeds source documents before storing them in pgvector.
+An asynchronous document indexing Worker for an AI document management system built on
+Tmax OpenSQL. It claims durable rows from `indexing_job`, downloads and parses documents,
+creates chunks and embeddings, and saves pgvector results or performs deletion cleanup.
 
-The worker is designed around retryability and idempotency to handle **worker
-failures, duplicate events, external API failures, and database failures** that
-can occur during long-running AI workloads.
-
-## Project Overview
-
-The overall system converts uploaded documents into searchable vector data and
-synchronizes it for semantic search and MCP search. This repository is not the
-upload API or search API; it is responsible for **document indexing and deletion
-post-processing after Kafka**.
-
-The worker's main responsibilities are:
-
-- Consuming `INDEXING_REQUESTED` and `DOCUMENT_DELETED` Kafka events
-- Downloading source documents from S3-compatible Object Storage and verifying
-  SHA-256 integrity
-- Parsing PDF, DOCX, HWP, TXT, and Markdown files
-- Configurable token- and paragraph-based chunking
-- Generating OpenAI embeddings and validating 1,536-dimensional results
-- UPSERTing `document_chunk` rows, completing document versions, and
-  conditionally promoting searchable versions
-- Tracking status, retries, and worker handoffs through `indexing_job`
-- Processing document deletion events and running a reconciliation sweep for
-  missed deletions
-
-| Challenge perspective | Role of the overall system | Role of this repository |
-|---|---|---|
-| Document upload and version management | The Server creates source files and document versions | Reads the created `document` and `document_version` rows |
-| Change event synchronization | Outbox and Relay publish events to Kafka | Consumes Kafka events and performs indexing or deletion |
-| Automatic embedding | Builds an asynchronous post-upload pipeline | Performs parsing, chunking, OpenAI embedding, and vector storage |
-| Semantic and keyword search | Search/MCP provides search interfaces | Prepares pgvector and Nori token data |
-| Processing reliability | Each component manages failures within its ownership boundary | Handles manual ACK, idempotent storage, job reacquisition, and retries |
-
-The system consists of four source code repositories. An uploaded document
-becomes searchable through the following flow:
-
-```mermaid
-flowchart LR
-    web[web] -->|upload| server[server]
-    server -->|Outbox| relay[relay]
-    relay -->|Kafka| worker[worker]
-    worker -->|store chunks and embeddings| server
-```
-
-| Repository | Role |
-|---|---|
-| [server](https://github.com/mash-up-kr/spr1n6-osscontest-server) | API server responsible for uploads, authorization, and search; writes Outbox events |
-| [relay](https://github.com/mash-up-kr/spr1n6-osscontest-relay) | Reads Outbox rows and publishes them to Kafka |
-| [worker](https://github.com/mash-up-kr/spr1n6-osscontest-worker) | Chunks documents, generates embeddings, and stores the results |
-| [web](https://github.com/mash-up-kr/spr1n6-osscontest-web) | React SPA |
-
-This repository is the `worker`.
-
-## System Architecture
-
-The highlighted Worker below is the scope of this repository. The detailed
-implementations of Web, Server, Outbox, Relay, and Search/MCP belong to other
-components.
+## System boundary
 
 ```mermaid
 flowchart LR
     Web[Web] --> Server[API Server]
-    Server --> Storage[(S3-compatible<br/>Object Storage)]
-    Server --> Outbox[(Transactional Outbox)]
-    Outbox --> Relay[Relay]
-    Relay --> Kafka[(Kafka)]
-    Kafka --> Worker[Document Indexing Worker]
+    Server --> Storage[(Object Storage)]
+    Server --> Queue[(OpenSQL indexing_job)]
+    Queue --> Worker[Document Indexing Worker]
     Storage --> Worker
-    Worker --> OpenSQL[(Tmax OpenSQL /<br/>PostgreSQL + pgvector)]
-    OpenSQL --> Search[Search / MCP]
-
-    style Worker fill:#6DB33F,color:#fff,stroke:#2f6b22,stroke-width:3px
+    Worker --> Results[(OpenSQL chunks / vectors)]
+    Results --> Search[Search / MCP]
 ```
 
-Using Kafka as the boundary separates upload requests from indexing, so file
-parsing and external embedding API calls do not directly occupy upload response
-time. In exchange, the system assumes duplicate Kafka delivery and worker
-interruptions and is designed so that database results converge to the same
-state.
+The Server owns uploads, permissions, search, and the shared schema. Producers must create
+`INDEX` or `DELETE` Jobs in the document mutation transaction. The Worker executes existing
+Jobs; removing source objects remains the Server's responsibility.
 
-## Core Design
+**Deployment dependencies:** The [DB queue contract SQL](docs/sql/DB_JOB_QUEUE_CONTRACT.sql)
+is a proposal for the schema owner; the Worker does not execute it automatically.
+Durable Job production and restrictions on historical version retries must be implemented
+and verified in the Server repository. Worker changes do not migrate the Server.
 
-### Indexing Flow
+Related repositories: [Server](https://github.com/mash-up-kr/spr1n6-osscontest-server),
+[Web](https://github.com/mash-up-kr/spr1n6-osscontest-web).
 
-```mermaid
-sequenceDiagram
-    participant K as Kafka
-    participant W as Worker
-    participant S as Object Storage
-    participant E as OpenAI Embedding
-    participant D as OpenSQL
+## Execution and recovery
 
-    K->>W: INDEXING_REQUESTED
-    W->>D: Create/check indexing_job
-    W->>S: Download source document
-    W->>W: Parse & Chunk
-    W->>E: Embedding
-    E-->>W: vectors
-    W->>D: Store chunks + vectors
-    W->>D: Job COMPLETED
-    W->>K: Acknowledge after batch completion
-```
-
-Supported MIME types are:
-
-- PDF: `application/pdf`
-- DOCX:
-  `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
-- HWP: `application/x-hwp`, `application/haansofthwp`
-- Text/Markdown: `text/plain`, `text/markdown`
-
-The chunking strategy is selected through a worker-wide configuration setting.
-
-- `FIXED_TOKEN`: Splits the entire extracted text at the token limit.
-- `PARAGRAPH`: Preserves paragraph boundaries and splits only long paragraphs.
-- `PARAGRAPH_OVERLAP`: Splits long paragraphs with overlapping tokens.
-
-See the [Processing Model](docs/PROCESSING_MODEL_EN.md) for the detailed design
-of Kafka batch processing, per-key parallel execution, acknowledgment, and the
-poll lifecycle.
-
-### Job State and Idempotency
+- Claim one Job at a time only when a slot is free. The default is five active Jobs per Worker.
+- An active predecessor blocks later Jobs for the same document; different documents run concurrently.
+- Ownership uses `job_id + worker_id + execution_epoch` and a lease. Heartbeats run on a separate thread.
+- Database connection failures wait at the failed database call. Transactions finish before periodic `SELECT 1` probes; temporary files and computed results remain available.
+- Once a database outage is detected, new claims and subsequent external calls wait. Requests already in progress may complete.
+- After recovery, the same owner resumes at the suspended point. An expired lease may be renewed conditionally; if recovery invalidates ownership first, the current execution exits.
+- Chunk UPSERT, version completion, searchable pointer promotion, and Job completion share one transaction. Replaying a save checks whether the same execution already completed before writing again.
+- Application code handles 429 and `Retry-After`, persists `RETRY_WAIT` and `next_retry_at`, and retains heartbeats. Fresh Jobs remain blocked until the retry cohort reaches terminal states.
+- A `DELETE` Job removes chunks for a deleted document.
 
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING
-    PENDING --> PROCESSING
-    PROCESSING --> RETRY_WAIT: retryable failure
-    RETRY_WAIT --> PROCESSING
-    PROCESSING --> COMPLETED
-    PROCESSING --> FAILED
+    PENDING --> PROCESSING: claim / increment epoch
+    PROCESSING --> RETRY_WAIT: transient failure
+    RETRY_WAIT --> PROCESSING: deadline reached / same execution
+    PROCESSING --> COMPLETED: atomic result save
+    PROCESSING --> FAILED: permanent error or budget exhausted
+    PROCESSING --> PENDING: lease recovery / increment epoch
 ```
 
-The worker persists processing status and Kafka record identity in
-`indexing_job`, allowing it to track work independently of process memory. See
-[Failure Handling](docs/FAILURE_HANDLING_EN.md) for details on repeated-event
-detection, job reacquisition conditions, and state-specific recovery behavior.
+Recovery preserves retry deadlines. Losing ownership or restarting a Worker can cause the
+entire pipeline to run again under a new claim. Repeated external API costs are accepted.
 
-### Failure Response
+## Document pipeline
 
-| Failure scenario | Response |
-|---|---|
-| Worker exits before batch ACK | Redeliver uncommitted Kafka records and reprocess recoverable existing jobs |
-| Same event is published more than once | Handle idempotently using `source_event_id` and the first Kafka record identity |
-| Same Kafka record is redelivered | Detect redelivery using the stored `(topic, partition, offset)` and reacquire the job |
-| OpenAI 429, 5xx, network error, and similar failures | Apply limited worker-level retries and backoff after OpenAI client retries |
-| Transient Object Storage or parsing failure | Treat as a retryable error |
-| Database access failure | Defer batch completion and reprocess through NACK and the database health gate |
-| Permanent error or retry limit reached | Terminate in the `FAILED` state |
-| Missed document deletion event | Periodically find and idempotently delete residual chunks for deleted documents |
+Supported formats: PDF, DOCX, HWP (`application/x-hwp`, `application/haansofthwp`), TXT,
+and Markdown. The Worker verifies SHA-256 and supports `FIXED_TOKEN`, `PARAGRAPH`, and
+`PARAGRAPH_OVERLAP` chunking. It stores 1,536-dimensional `text-embedding-3-small` vectors,
+Nori keyword tokens, and JSONB metadata. Chunks UPSERT on `(document_version_id, chunk_no)`.
 
-See [Failure Handling & Recovery](docs/FAILURE_HANDLING_EN.md) for detailed
-failure detection conditions, state transitions, retry policy,
-redelivery/republish decisions, and current guarantees.
+`execution_epoch` identifies a Job ownership generation. Document `version_no` separately
+prevents regression of the searchable pointer. The Worker does not use document version
+`embedding_version_no` for execution fencing.
 
-## Use of OpenSQL
+## Running
 
-The worker uses Tmax OpenSQL as the persistent store for indexing results and
-job state. It stores chunks and 1,536-dimensional embeddings in
-`document_chunk`, and records processing status and Kafka record identity in
-`indexing_job`.
-
-| Data | How the worker uses it |
-|---|---|
-| `document` | Validates the tenant and deletion status, and promotes only versions with a higher `embedding_version_no` as searchable |
-| `document_version` | Reads source location, MIME, hash, and version information; updates the chunk count and `indexed_at` on completion |
-| `document_chunk` | UPSERTs by `(document_version_id, chunk_no)` and stores Nori tokens, JSONB metadata, and `vector(1536)` |
-| `indexing_job` | Stores the event idempotency key, processing state, attempt count, worker, error, and Kafka position |
-
-## Design Documents
-
-| Document | Description |
-|---|---|
-| [Architecture](docs/ARCHITECTURE_EN.md) | Worker responsibilities and boundaries, system context, key components, and design decisions |
-| [Processing Model](docs/PROCESSING_MODEL_EN.md) | Kafka batches, partitions, ordering, parallel processing, ACK/NACK, and the poll lifecycle |
-| [Failure Handling](docs/FAILURE_HANDLING_EN.md) | Failure model, idempotency, reprocessing strategy, state transitions, and guarantees |
-
-## Testing
-
-The default tests use H2 and test doubles without external services to verify
-listener ACK/NACK behavior, per-key ordering, parsers, deterministic chunking,
-retry classification, and publication calls.
-
-```bash
-./gradlew test
-```
-
-Tests tagged `integration` use a real shared PostgreSQL/pgvector schema to verify
-job state transitions, unique constraints, chunk deletion, and pipeline retries.
-For safety, the database name must contain `test` or `integration`.
-
-```bash
-set -a
-source .env
-set +a
-./gradlew integrationTest
-```
-
-Tests that call OpenAI run only when `OPENAI_API_KEY` is set.
-
-## Getting Started
-
-### Requirements
-
-- JDK 21 or Docker
-- Kafka broker
-- A Tmax OpenSQL or PostgreSQL + pgvector database with the Server/Core
-  migrations applied
-- S3-compatible Object Storage containing the source documents
-- OpenAI API key
-
-### Environment Variables
-
-Copy `.env.example` and fill in the empty values for your environment.
+Required: JDK 21, OpenSQL/PostgreSQL with pgvector and the queue contract applied,
+S3-compatible storage, and an OpenAI API key.
 
 ```bash
 cp .env.example .env
-```
-
-The required runtime settings are:
-
-| Environment variable | Description |
-|---|---|
-| `DB_URL` | OpenSQL/PostgreSQL JDBC URL |
-| `DB_USERNAME`, `DB_PASSWORD` | Database credentials |
-| `KAFKA_BOOTSTRAP_SERVERS` | Kafka bootstrap servers |
-| `INDEXING_STORAGE_BUCKET` | Object Storage bucket containing source documents |
-| `OPENAI_API_KEY` | OpenAI embedding API key |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Required when using environment variables in the AWS SDK default credential chain |
-
-The main optional settings are:
-
-| Environment variable | Default | Description |
-|---|---|---|
-| `INDEXING_WORKER_ID` | UUID generated at startup | Worker identifier recorded in jobs and logs |
-| `INDEXING_KAFKA_TOPIC` | `doc.events.v1` | Topic to consume |
-| `INDEXING_SUPPORTED_SCHEMA_VERSIONS` | `1` | List of accepted event schema versions |
-| `INDEXING_BATCH_SIZE` | `10` | `max.poll.records` |
-| `INDEXING_CONSUMER_CONCURRENCY` | `5` | Batch-task and parsing executor size; not Kafka listener concurrency |
-| `INDEXING_MAX_ATTEMPTS` | `5` | Maximum number of job attempts |
-| `INDEXING_RETRY_BASE_DELAY` | `PT30S` | Base interval for linear backoff |
-| `INDEXING_CHUNKING_STRATEGY` | `FIXED_TOKEN` | `FIXED_TOKEN`, `PARAGRAPH`, or `PARAGRAPH_OVERLAP` |
-| `INDEXING_MAX_TOKENS_PER_CHUNK` | `512` | Token limit per chunk |
-| `INDEXING_OVERLAP_TOKENS` | `64` | Number of overlapping tokens for overlap strategies |
-| `INDEXING_MAX_CHUNKS` | `5000` | Chunk limit per document |
-| `INDEXING_MAX_TOTAL_TOKENS` | `2000000` | Total token limit per document |
-| `INDEXING_MAX_FILE_SIZE_BYTES` | `209715200` | Source file size limit checked before download |
-| `INDEXING_PARSE_TIMEOUT` | `PT60S` | Parsing timeout |
-| `INDEXING_EMBEDDING_MAX_TOKENS_PER_REQUEST` | `300000` | Threshold for splitting embedding requests |
-| `INDEXING_STORAGE_ENDPOINT` | Empty | Endpoint override for S3-compatible services such as MinIO |
-| `INDEXING_STORAGE_REGION` | `us-east-1` | Storage region |
-| `INDEXING_STORAGE_DOWNLOAD_TIMEOUT` | `PT30S` | Storage API call timeout |
-| `FAULT_INJECTION_ENABLED` | `false` | Enables blocking for failure reproduction |
-| `FAULT_INJECTION_PHASE` | `EMBEDDING` | Blocking phase |
-
-See [`application.yml`](src/main/resources/application.yml) for the remaining
-settings, including the database health gate and deletion sweep interval.
-
-### Running Locally
-
-```bash
 set -a
 source .env
 set +a
-
 ./gradlew bootRun
 ```
 
-To run the JAR:
+| Environment variables | Default or purpose |
+|---|---|
+| `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` | Required database connection |
+| `INDEXING_STORAGE_BUCKET` | Required source bucket |
+| `OPENAI_API_KEY` | Required embedding key |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | When using environment credentials in the AWS default chain |
+| `INDEXING_DB_QUEUE_ENABLED` | `true` |
+| `INDEXING_WORKER_ID` | Generated UUID; must be unique per active process |
+| `INDEXING_QUEUE_CONCURRENCY` | `5`; also sets parser pool size |
+| `INDEXING_QUEUE_POLL_INTERVAL` | `PT1S` |
+| `INDEXING_LEASE_DURATION`, `INDEXING_HEARTBEAT_INTERVAL` | `PT60S`, `PT10S` |
+| `INDEXING_DB_CHECK_INTERVAL`, `INDEXING_DB_QUERY_TIMEOUT` | `PT5S`, `PT3S` |
+| `INDEXING_DB_CONNECTION_TIMEOUT_MS` | `3000`; pool connection acquisition |
+| `INDEXING_DB_CONNECT_TIMEOUT_SECONDS`, `INDEXING_DB_SOCKET_TIMEOUT_SECONDS` | `3`, `15`; PostgreSQL driver timeouts |
+| `INDEXING_MAX_ATTEMPTS`, `INDEXING_RETRY_BASE_DELAY` | `5`, `PT30S` |
+| `INDEXING_CHUNKING_STRATEGY` | `FIXED_TOKEN` |
+| `INDEXING_MAX_TOKENS_PER_CHUNK`, `INDEXING_OVERLAP_TOKENS` | `512`, `64` |
+| `INDEXING_MAX_CHUNKS`, `INDEXING_MAX_TOTAL_TOKENS` | `5000`, `2000000` |
+| `INDEXING_MAX_FILE_SIZE_BYTES`, `INDEXING_PARSE_TIMEOUT` | `209715200`, `PT60S` |
+| `INDEXING_EMBEDDING_MAX_TOKENS_PER_REQUEST` | `300000` |
+| `INDEXING_STORAGE_ENDPOINT`, `INDEXING_STORAGE_REGION` | Empty, `us-east-1` |
+| `INDEXING_STORAGE_DOWNLOAD_TIMEOUT` | `PT30S` |
+| `FAULT_INJECTION_ENABLED`, `FAULT_INJECTION_PHASE` | `false`, `EMBEDDING` |
+
+See [application.yml](src/main/resources/application.yml) for all settings. Active Job limits
+and retry request serialization are per Worker. Other Workers consult shared retry deadlines
+and claim admission in the database. There is no global external request concurrency limiter.
 
 ```bash
 ./gradlew bootJar
 java -jar build/libs/spr1n6-osscontest-worker-0.0.1-SNAPSHOT.jar
 ```
 
-### Running with Docker
-
 ```bash
 docker build -t osscontest-indexing-worker .
-
-docker run --rm \
-  --name aidocs-worker \
-  --env-file .env \
-  osscontest-indexing-worker
+docker run --rm --name aidocs-worker --env-file .env osscontest-indexing-worker
 ```
 
-The database, Kafka, and Object Storage addresses must be reachable from the
-container. Stop it with:
+The container must reach the database and storage. It runs as the non-root `worker` user;
+the health check tests Java PID 1 liveness.
+
+## Tests and documentation
 
 ```bash
-docker stop aidocs-worker
+./gradlew test
+./gradlew integrationTest
 ```
 
-The Docker image runs as the non-root `worker` user. Its health check verifies
-that Java is alive as PID 1 rather than checking an HTTP endpoint.
+Unit tests cover parsers, chunking, queue capacity, database waits, ownership, and API retries
+without external services. Integration tests require a dedicated PostgreSQL/pgvector database,
+the shared schema, and the queue contract. Its name must contain `test` or `integration`.
+Configure `INTEGRATION_*` settings from `.env.example`. Live embedding tests run only when
+the key conditions in their test code are met.
 
-## Technology Stack
-
-| Area | Technology |
+| Document | Contents |
 |---|---|
-| Language / Runtime | Kotlin 2.3.21, Java 21 |
-| Build | Gradle Wrapper 8.14 |
-| Application | Spring Boot 4.1.0, Spring Kafka, Spring Data JPA, Spring JDBC, Micrometer |
-| Embedding | Spring AI 2.0.0 BOM, OpenAI `text-embedding-3-small`, 1,536 dimensions |
-| Database | Tmax OpenSQL/PostgreSQL-compatible SQL, pgvector, JSONB, Hibernate Vector |
-| Storage | AWS SDK for Java 2.46.7 BOM, S3-compatible API |
-| Parsing | PDFBox 3.0.3, Apache POI 5.3.0, hwplib 1.1.9 |
-| Tokenization | jtokkit 1.1.0 (`CL100K_BASE`), Lucene Nori 9.11.1 |
-| Container | Eclipse Temurin 21, multi-stage Docker build |
-
-## Project Structure
+| [Architecture](docs/ARCHITECTURE_EN.md) | Components and shared database contract |
+| [Processing Model](docs/PROCESSING_MODEL_EN.md) | Claims, concurrency, heartbeat, deletion |
+| [Failure Handling](docs/FAILURE_HANDLING_EN.md) | Database waits, lease races, uncertain commits, 429 |
 
 ```text
 src/main/kotlin/com/osscontest/worker/indexing
-├── consumer/      # Kafka batch listener, event validation, ACK/NACK, DB health gate
-├── retrieval/     # Download source documents from S3-compatible storage
-├── parsing/       # MIME-specific parsers and timeout guard
-├── chunking/      # Chunking strategies, tokenization, and chunk limits
-├── embedding/     # OpenAI embedding, result validation, and Nori token generation
-├── pipeline/      # Job acquisition, stage coordination, retry, and recovery decisions
-├── publication/   # DB entities/repositories, chunk UPSERT, and completion transaction
-├── deletion/      # Deletion-event post-processing and reconciliation sweep
-└── fault/         # Environment-variable-based failure injection
+├── queue/         # Claims, ownership, DB waits, heartbeats, API backoff
+├── retrieval/     # Source downloads
+├── parsing/       # MIME parsers and timeouts
+├── chunking/      # Strategies and token limits
+├── embedding/     # Embeddings and Nori tokens
+├── pipeline/      # Claimed Job coordination and retries
+├── publication/   # Chunk UPSERT and atomic completion
+├── deletion/      # DELETE Job cleanup and completion
+└── fault/         # Environment-driven fault injection
 ```
 
-## Contributing
+Stack: Kotlin 2.3.21, Java 21, Gradle 8.14, Spring Boot 4.1.0, Spring Data JPA/JDBC,
+Micrometer, Spring AI 2.0.0, pgvector/JSONB, AWS SDK 2.46.7, PDFBox 3.0.3,
+Apache POI 5.3.0, hwplib 1.1.9, jtokkit 1.1.0, and Lucene Nori 9.11.1.
 
-Before making changes, review the package boundaries and shared database
-contracts, and make sure at least `./gradlew test` passes. If a change affects
-the actual database contract or OpenAI integration, also run
-`./gradlew integrationTest` against a dedicated integration database.
+## Contributing / License
 
-## License
-
-This project is distributed under the [MIT License](LICENSE).
+Follow the [code conventions](docs/CODE_CONVENTIONS_EN.md) and shared DB contract, then run
+`./gradlew test`. Validate actual database changes in a dedicated integration database.
+Distributed under the [MIT License](LICENSE).

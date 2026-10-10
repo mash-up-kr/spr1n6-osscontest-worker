@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
 @Tag("integration")
-@SpringBootTest(properties = ["indexing.queue.enabled=false", "spring.kafka.listener.auto-startup=false"])
+@SpringBootTest(properties = ["indexing.queue.enabled=false"])
 @ActiveProfiles("integration")
 class DbJobQueueIntegrationTest(
     private val queue: JobQueueStore,

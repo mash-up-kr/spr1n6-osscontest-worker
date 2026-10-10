@@ -2,9 +2,6 @@ package com.osscontest.worker.indexing.pipeline.service
 
 import com.osscontest.worker.indexing.chunking.domain.Chunk
 import com.osscontest.worker.indexing.chunking.service.*
-import com.osscontest.worker.indexing.consumer.*
-import com.osscontest.worker.indexing.deletion.service.DocumentDeletionService
-import com.osscontest.worker.indexing.fault.IndexingFaultInjector
 import com.osscontest.worker.indexing.parsing.*
 import com.osscontest.worker.indexing.publication.entity.*
 import com.osscontest.worker.indexing.publication.repository.*
@@ -24,7 +21,7 @@ import java.util.UUID
 class IndexingPipelineRunnerTest {
     private val jobs: IndexingJobRepository = mock()
     private val documents: DocumentRepository = mock()
-    private val validator: IndexingEventValidator = mock()
+    private val versions: DocumentVersionRepository = mock()
     private val download: DocumentDownloadClient = mock()
     private val parsers: DocumentParserRegistry = mock()
     private val parse: ParsingTimeoutGuard = mock()
@@ -34,9 +31,8 @@ class IndexingPipelineRunnerTest {
     private val execution = directExecution()
     private val store: JobQueueStore = mock()
     private val runner get() = createRunner(execution)
-    private fun createRunner(operation: ExecutionOperations) = IndexingPipelineRunner(jobs, documents, validator, download, parsers, parse,
-        chunker, mock(), processor, failures, mock(), operation, directDatabase(), store, mock(),
-        QueueProperties(workerId = testToken.workerId), 5, java.time.Duration.ofMillis(1), 10000,
+    private fun createRunner(operation: ExecutionOperations) = IndexingPipelineRunner(jobs, documents, versions, download, parsers, parse,
+        chunker, mock(), processor, failures, mock(), operation, store, mock(), 5, java.time.Duration.ofMillis(1), 10000,
         ChunkingStrategy.FIXED_TOKEN, SimpleMeterRegistry())
     private val job = ClaimedJob(testToken, JobType.INDEX, UUID.randomUUID(), 2, 3, null)
 
@@ -44,8 +40,8 @@ class IndexingPipelineRunnerTest {
         whenever(store.snapshot(testToken)).thenReturn(JobSnapshot(testToken.workerId, testToken.epoch,
             IndexingJobStatus.PROCESSING, testNow.plusSeconds(60), null, testNow))
         whenever(documents.findById(2)).thenReturn(Optional.of(DocumentEntity(2, 1, null, null)))
-        whenever(validator.validate(any())).thenReturn(DocumentVersionEntity(3, 2, 1, "key", "text/plain",
-            "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", fileSize = 11))
+        whenever(versions.findById(3)).thenReturn(Optional.of(DocumentVersionEntity(3, 2, 1, "key", "text/plain",
+            "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", fileSize = 11)))
         whenever(jobs.updatePhase(any(), any(), any(), any())).thenReturn(1)
         whenever(parsers.findParser(any())).thenReturn(mock())
         whenever(parse.parse(any(), any(), any())).thenReturn(emptyList())
@@ -107,6 +103,35 @@ class IndexingPipelineRunnerTest {
     }
 
     @Test
+    fun `Job 버전이 없으면 외부 호출 없이 영구 실패로 종결한다`() {
+        setup()
+        whenever(versions.findById(3)).thenReturn(Optional.empty())
+        whenever(failures.recordFailure(any(), any(), any(), any(), any(), any(), anyOrNull()))
+            .thenReturn(IndexingJobStatus.FAILED)
+
+        runner.run(job)
+
+        verify(failures).recordFailure(eq(testToken), eq("DOCUMENT_VERSION_NOT_FOUND"), any(), eq(true), eq(5), any(), anyOrNull())
+        verifyNoInteractions(download)
+        assertThat(processor.calls).isEmpty()
+    }
+
+    @Test
+    fun `Job과 버전의 문서가 다르면 외부 호출 없이 영구 실패로 종결한다`() {
+        setup()
+        val version = versions.findById(3).orElseThrow()
+        version.documentId = 99
+        whenever(failures.recordFailure(any(), any(), any(), any(), any(), any(), anyOrNull()))
+            .thenReturn(IndexingJobStatus.FAILED)
+
+        runner.run(job)
+
+        verify(failures).recordFailure(eq(testToken), eq("DOCUMENT_MISMATCH"), any(), eq(true), eq(5), any(), anyOrNull())
+        verifyNoInteractions(download)
+        assertThat(processor.calls).isEmpty()
+    }
+
+    @Test
     fun `다운로드 이후 DB 장애는 파일을 유지하고 실패한 phase 기록부터 재개한다`() {
         setup()
         var downloaded: java.nio.file.Path? = null
@@ -134,12 +159,4 @@ class IndexingPipelineRunnerTest {
         assertThat(Files.exists(checkNotNull(downloaded))).isFalse()
     }
 
-    @Test
-    fun `Kafka 진입점은 Job만 영속화하며 파이프라인을 실행하지 않는다`() {
-        setup()
-        val event = IndexingEvent(job.sourceEventId, "INDEXING_REQUESTED", 1, 1, 2, 3, testNow, null)
-        runner.run(event, KafkaRecordIdentity("events", 0, 10))
-        verify(store).enqueue(job.sourceEventId, 2, 3, JobType.INDEX, null, "events", 0, 10)
-        verifyNoInteractions(download)
-    }
 }

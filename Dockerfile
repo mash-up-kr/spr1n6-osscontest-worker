@@ -26,7 +26,7 @@ USER worker
 
 ENV JAVA_OPTS=""
 
-# HTTP 서버가 없는(Kafka 컨슈머 전용) 워커라 actuator/health를 HTTP로 못 때린다.
+# HTTP 서버를 제공하지 않아 actuator health 엔드포인트를 사용하지 않는다.
 # PID 1(exec로 교체된 java 프로세스)이 살아 있는지로 liveness만 확인한다.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD grep -qa app.jar /proc/1/cmdline || exit 1

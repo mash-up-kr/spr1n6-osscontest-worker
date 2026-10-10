@@ -7,9 +7,9 @@ ALTER TABLE indexing_job
     ADD COLUMN lease_expires_at TIMESTAMPTZ,
     ADD COLUMN job_type VARCHAR(20) NOT NULL DEFAULT 'INDEX',
     ALTER COLUMN document_version_id DROP NOT NULL,
-    ALTER COLUMN kafka_topic SET DEFAULT 'db-job-queue',
-    ALTER COLUMN kafka_partition SET DEFAULT 0,
-    ALTER COLUMN kafka_offset SET DEFAULT 0;
+    DROP COLUMN kafka_topic,
+    DROP COLUMN kafka_partition,
+    DROP COLUMN kafka_offset;
 
 -- Old PROCESSING rows have no issued lease. Invalidate them at cutover.
 UPDATE indexing_job SET status = CASE WHEN status = 'PROCESSING' THEN 'PENDING' ELSE status END,

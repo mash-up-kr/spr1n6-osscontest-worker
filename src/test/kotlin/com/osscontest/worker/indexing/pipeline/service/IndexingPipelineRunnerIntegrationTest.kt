@@ -1,8 +1,7 @@
 package com.osscontest.worker.indexing.pipeline.service
 
 import com.osscontest.worker.indexing.queue.JobQueueStore
-import com.osscontest.worker.indexing.consumer.IndexingEvent
-import com.osscontest.worker.indexing.consumer.KafkaRecordIdentity
+import com.osscontest.worker.indexing.queue.JobType
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
 import com.osscontest.worker.indexing.retrieval.DocumentDownloadClient
@@ -24,7 +23,6 @@ import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.context.bean.override.mockito.MockitoBean
 import org.springframework.test.context.jdbc.Sql
 import java.nio.file.Files
-import java.time.Instant
 import java.util.UUID
 
 // 이 테스트는 pipelineRunner.run()을 직접 호출해 단일 실행 경로(인프로세스 재시도 포함)만
@@ -32,7 +30,6 @@ import java.util.UUID
 @Tag("integration")
 @SpringBootTest(
     properties = [
-        "spring.kafka.listener.auto-startup=false",
         "indexing.queue.enabled=false",
         "indexing.database.check-interval=PT0.01S",
         "indexing.retry.base-delay=PT0.01S",
@@ -102,15 +99,15 @@ class IndexingPipelineRunnerIntegrationTest(
             Files.createTempFile("integration-test-", ".tmp")
                 .also { Files.write(it, "hello world".toByteArray()) }
         }
-        val event = sampleEvent(documentId = 900001L, documentVersionId = 900001L)
+        val sourceEventId = UUID.randomUUID()
+        queue.enqueue(sourceEventId, 900001L, 900001L, JobType.INDEX, null)
 
         // 처음 두 번은 실패(재시도 가능한 RuntimeException), 세 번째는 성공하도록 설정.
         fakeIndexingProcessor.failuresBeforeSuccess = 2
 
-        pipelineRunner.run(event, recordIdentity(offset = 900001L))
         pipelineRunner.run(checkNotNull(queue.claim(false, 5) {}))
 
-        val job = indexingJobRepository.findBySourceEventId(event.eventId)
+        val job = indexingJobRepository.findBySourceEventId(sourceEventId)
         assertThat(job).isNotNull
         assertThat(job!!.status).isEqualTo(IndexingJobStatus.COMPLETED)
         assertThat(job.attemptCount).isEqualTo(3)
@@ -136,14 +133,14 @@ class IndexingPipelineRunnerIntegrationTest(
             Files.createTempFile("integration-test-", ".tmp")
                 .also { Files.write(it, "hello world".toByteArray()) }
         }
-        val event = sampleEvent(documentId = 900002L, documentVersionId = 900002L)
+        val sourceEventId = UUID.randomUUID()
+        queue.enqueue(sourceEventId, 900002L, 900002L, JobType.INDEX, null)
 
         fakeIndexingProcessor.failuresBeforeSuccess = Int.MAX_VALUE // 계속 실패
 
-        pipelineRunner.run(event, recordIdentity(offset = 900002L))
         pipelineRunner.run(checkNotNull(queue.claim(false, 5) {}))
 
-        val job = indexingJobRepository.findBySourceEventId(event.eventId)
+        val job = indexingJobRepository.findBySourceEventId(sourceEventId)
         assertThat(job).isNotNull
         assertThat(job!!.status).isEqualTo(IndexingJobStatus.FAILED)
         assertThat(job.attemptCount).isEqualTo(5) // indexing.retry.max-attempts 기본값
@@ -170,33 +167,16 @@ class IndexingPipelineRunnerIntegrationTest(
             Files.createTempFile("integration-test-", ".tmp")
                 .also { Files.write(it, "different content".toByteArray()) }
         }
-        val event = sampleEvent(documentId = 900003L, documentVersionId = 900003L)
+        val sourceEventId = UUID.randomUUID()
+        queue.enqueue(sourceEventId, 900003L, 900003L, JobType.INDEX, null)
 
-        pipelineRunner.run(event, recordIdentity(offset = 900003L))
         pipelineRunner.run(checkNotNull(queue.claim(false, 5) {}))
 
-        val job = indexingJobRepository.findBySourceEventId(event.eventId)
+        val job = indexingJobRepository.findBySourceEventId(sourceEventId)
         assertThat(job).isNotNull
         assertThat(job!!.status).isEqualTo(IndexingJobStatus.FAILED)
         assertThat(job.attemptCount).isEqualTo(1) // 재시도 없이 1회 시도만에 종결
         assertThat(job.lastErrorCode).isEqualTo("HASH_MISMATCH")
     }
 
-    private fun sampleEvent(
-        documentId: Long,
-        documentVersionId: Long,
-        eventId: UUID = UUID.randomUUID(),
-    ) = IndexingEvent(
-        eventId = eventId,
-        eventType = "INDEXING_REQUESTED",
-        schemaVersion = 1,
-        tenantId = documentId,
-        documentId = documentId,
-        documentVersionId = documentVersionId,
-        occurredAt = Instant.now(),
-        traceId = null,
-    )
-
-    private fun recordIdentity(offset: Long) =
-        KafkaRecordIdentity(topic = "indexing", partition = 0, offset = offset)
 }

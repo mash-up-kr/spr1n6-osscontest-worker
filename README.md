@@ -9,330 +9,166 @@
 > 2026 오픈소스 개발자 대회 · 티맥스티베로 기업 과제 <br>
 > **1차 서면평가 합격 (상위 3팀)**
 
-Tmax OpenSQL 기반 AI 문서 관리 시스템의 비동기 인덱싱 Worker입니다. Kafka로
-전달된 문서 이벤트를 받아 원문 다운로드, 파싱, 청킹, 임베딩, pgvector
-저장까지 수행합니다.
+Tmax OpenSQL 기반 AI 문서 관리 시스템의 비동기 인덱싱 Worker입니다.
+`indexing_job` 테이블에서 실행권을 획득해 원문 다운로드, 파싱, 청킹, 임베딩,
+pgvector 저장 또는 삭제 후처리를 수행합니다.
 
-장시간 수행되는 AI 작업에서 발생할 수 있는 **Worker 장애, 중복 이벤트,
-외부 API 장애, DB 장애**를 고려해 재처리와 멱등성을 중심으로 설계했습니다.
-
-## 프로젝트 소개
-
-전체 시스템은 업로드된 문서를 검색 가능한 벡터 데이터로 변환하고, 의미
-기반 검색과 MCP 검색에서 활용할 수 있도록 동기화합니다. 이 저장소는 업로드
-API나 검색 API가 아니라 **Kafka 이후의 문서 인덱싱과 삭제 후처리**를
-담당합니다.
-
-Worker가 처리하는 주요 범위는 다음과 같습니다.
-
--   `INDEXING_REQUESTED`와 `DOCUMENT_DELETED` Kafka 이벤트 소비
--   S3 호환 Object Storage에서 원문 다운로드 및 SHA-256 무결성 확인
--   PDF, DOCX, HWP, TXT, Markdown 파싱
--   설정 가능한 토큰·문단 기반 청킹
--   OpenAI 임베딩 생성과 1,536차원 결과 검증
--   `document_chunk` UPSERT, 문서 버전 완료 및 검색 버전 조건부 승격
--   `indexing_job` 기반 상태·재시도·Worker 인계 추적
--   문서 삭제 이벤트 처리와 삭제 누락 보정 스윕
-
-| 과제 관점 | 전체 시스템의 역할 | 이 저장소의 역할 |
-|---|---|---|
-| 문서 업로드와 버전 관리 | Server가 원문과 문서 버전을 생성 | 생성된 `document`·`document_version`을 조회 |
-| 변경 이벤트 동기화 | Outbox와 Relay가 Kafka에 이벤트 발행 | Kafka 이벤트를 소비해 인덱싱 또는 삭제 수행 |
-| 자동 임베딩 | 업로드 이후 비동기 파이프라인 구성 | 파싱·청킹·OpenAI 임베딩·벡터 저장 수행 |
-| 의미·키워드 검색 | Search/MCP가 검색 인터페이스 제공 | pgvector와 Nori 토큰 데이터를 준비 |
-| 처리 안정성 | 각 컴포넌트가 소유 구간의 실패를 관리 | 수동 ACK, 멱등 저장, Job 재획득, 재시도 담당 |
-
-시스템을 구성하는 소스 코드 저장소는 총 4개입니다. 업로드한 문서는 아래의 과정을 통해 최종 검색 가능한 상태가 됩니다.
-
-```mermaid
-flowchart LR
-    web[web] -->|업로드| server[server]
-    server -->|Outbox| relay[relay]
-    relay -->|Kafka| worker[worker]
-    worker -->|청크·임베딩 저장| server
-```
-
-| 저장소 | 역할 |
-|---|---|
-| [server](https://github.com/mash-up-kr/spr1n6-osscontest-server) | API 서버. 업로드·권한·검색을 담당하고 Outbox 이벤트를 남깁니다 |
-| [relay](https://github.com/mash-up-kr/spr1n6-osscontest-relay) | Outbox 행을 읽어 카프카로 발행합니다 |
-| [worker](https://github.com/mash-up-kr/spr1n6-osscontest-worker) | 문서를 청크로 나누고 임베딩해 저장합니다 |
-| [web](https://github.com/mash-up-kr/spr1n6-osscontest-web) | React SPA |
-
-이 저장소는 `worker`입니다.
-
-## 시스템 아키텍처
-
-아래에서 강조된 Worker가 이 저장소의 범위입니다. Web, Server, Outbox, Relay,
-Search/MCP의 세부 구현은 다른 컴포넌트의 책임입니다.
+## 시스템 경계
 
 ```mermaid
 flowchart LR
     Web[Web] --> Server[API Server]
-    Server --> Storage[(S3-compatible<br/>Object Storage)]
-    Server --> Outbox[(Transactional Outbox)]
-    Outbox --> Relay[Relay]
-    Relay --> Kafka[(Kafka)]
-    Kafka --> Worker[Document Indexing Worker]
+    Server --> Storage[(Object Storage)]
+    Server --> Queue[(OpenSQL indexing_job)]
+    Queue --> Worker[Document Indexing Worker]
     Storage --> Worker
-    Worker --> OpenSQL[(Tmax OpenSQL /<br/>PostgreSQL + pgvector)]
-    OpenSQL --> Search[Search / MCP]
-
-    style Worker fill:#6DB33F,color:#fff,stroke:#2f6b22,stroke-width:3px
+    Worker --> Results[(OpenSQL chunks / vectors)]
+    Results --> Search[Search / MCP]
 ```
 
-Kafka를 경계로 업로드 요청과 인덱싱을 분리하므로 파일 파싱과 외부 임베딩
-API 호출이 업로드 응답 시간을 직접 점유하지 않습니다. 대신 Kafka 중복
-전달과 Worker 중단을 전제로 DB 결과가 같은 상태로 수렴하도록 설계합니다.
+Server는 업로드·권한·검색과 공용 DB 스키마를 소유합니다. 문서 변경과
+`INDEX` 또는 `DELETE` Job 등록은 생산자 측의 동일 트랜잭션에서 처리해야 합니다.
+Worker는 이미 등록된 Job을 실행하며 원본 Object Storage 삭제는 담당하지 않습니다.
 
-## 핵심 설계
+**배포 의존성:** [DB 큐 계약 SQL](docs/sql/DB_JOB_QUEUE_CONTRACT.sql)은 스키마 소유자가 적용할
+변경안이며 Worker가 자동 실행하지 않습니다. Server의 Job 생산 경로와 과거 버전 재시도 제한도
+별도 저장소에서 구현·검증해야 합니다. 이 저장소의 수정으로 Server가 전환되지는 않습니다.
 
-### 인덱싱 처리 흐름
+관련 저장소: [Server](https://github.com/mash-up-kr/spr1n6-osscontest-server),
+[Web](https://github.com/mash-up-kr/spr1n6-osscontest-web).
 
-```mermaid
-sequenceDiagram
-    participant K as Kafka
-    participant W as Worker
-    participant S as Object Storage
-    participant E as OpenAI Embedding
-    participant D as OpenSQL
+## 처리와 복구
 
-    K->>W: INDEXING_REQUESTED
-    W->>D: indexing_job 생성·확인
-    W->>S: 원문 다운로드
-    W->>W: Parse & Chunk
-    W->>E: Embedding
-    E-->>W: vectors
-    W->>D: Chunk + Vector 저장
-    W->>D: Job COMPLETED
-    W->>K: Batch 처리 완료 후 Acknowledge
-```
-
-지원 MIME type은 다음과 같습니다.
-
--   PDF: `application/pdf`
--   DOCX:
-    `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
--   HWP: `application/x-hwp`, `application/haansofthwp`
--   Text/Markdown: `text/plain`, `text/markdown`
-
-청킹 전략은 Worker 인스턴스의 전역 설정으로 선택합니다.
-
--   `FIXED_TOKEN`: 전체 추출 텍스트를 토큰 상한으로 분할합니다.
--   `PARAGRAPH`: 문단 경계를 유지하고 긴 문단만 분할합니다.
--   `PARAGRAPH_OVERLAP`: 긴 문단을 overlap을 두고 분할합니다.
-
-Kafka Batch 처리, key별 병렬 실행, acknowledgment와 poll lifecycle의
-상세 설계는 [Processing Model](docs/PROCESSING_MODEL.md)에서 설명합니다.
-
-### Job 상태와 멱등성
+- 빈 실행 슬롯이 있을 때 Job을 하나씩 claim합니다. 기본 활성 Job 수는 Worker당 5개입니다.
+- 같은 문서의 선행 Job이 활성 상태이면 후행 Job을 claim하지 않습니다. 다른 문서는 병렬 처리합니다.
+- `job_id + worker_id + execution_epoch`와 lease로 실행권을 확인합니다. heartbeat는 별도 스레드에서 수행합니다.
+- DB 연결 장애는 실패한 DB 호출 위치에서 대기합니다. 트랜잭션을 끝내고 주기적으로 `SELECT 1`을 실행하며 임시 파일과 결과를 메모리에 유지합니다.
+- 장애 감지 이후 신규 claim과 다음 외부 호출을 보류합니다. 이미 진행 중인 외부 호출은 완료될 수 있습니다.
+- 복구 후 같은 실행권이면 중단한 위치에서 재개합니다. 만료 lease는 동일 소유권 조건으로 갱신을 시도하고, 회수 절차가 먼저 이기면 현재 실행을 종료합니다.
+- 청크 UPSERT·버전 완료·검색 포인터 승격·Job 완료를 한 트랜잭션에서 저장합니다. 커밋 응답 유실 시 같은 실행의 완료 상태를 확인해 중복 저장을 건너뜁니다.
+- 429는 애플리케이션이 `Retry-After`를 해석해 대기합니다. `RETRY_WAIT`·`next_retry_at`을 저장하고 heartbeat를 유지합니다. 재시도 대상이 종결될 때까지 신규 Job을 받지 않습니다.
+- 삭제된 문서의 청크는 `DELETE` Job 실행 시 삭제합니다.
 
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING
-    PENDING --> PROCESSING
-    PROCESSING --> RETRY_WAIT: retryable failure
-    RETRY_WAIT --> PROCESSING
-    PROCESSING --> COMPLETED
-    PROCESSING --> FAILED
+    PENDING --> PROCESSING: claim / epoch 증가
+    PROCESSING --> RETRY_WAIT: 일시 실패
+    RETRY_WAIT --> PROCESSING: 대기 만료 / 같은 실행
+    PROCESSING --> COMPLETED: 원자적 결과 저장
+    PROCESSING --> FAILED: 영구 실패 또는 한도 초과
+    PROCESSING --> PENDING: lease 회수 / epoch 증가
 ```
 
-Worker는 `indexing_job`에 처리 상태와 Kafka record identity를 영속화하여
-프로세스 메모리에 의존하지 않고 작업을 추적합니다. 동일 이벤트 재수신
-판정, Job 재획득 조건, 상태별 복구 방식의 상세 내용은 [Failure
-Handling](docs/FAILURE_HANDLING.md)에서 설명합니다.
+회수된 재시도 Job은 저장된 대기 시각을 유지합니다. 소유권을 잃거나 Worker가 종료되면
+새 claim으로 전체 처리를 다시 수행할 수 있습니다. 외부 API의 중복 실행 비용은 허용합니다.
 
-### 장애 대응
+## 문서 처리
 
-| 장애 시나리오 | 대응 |
-|---|---|
-| Worker가 batch ACK 전에 종료 | 미커밋 Kafka record 재전달 후 복구 가능한 기존 Job 재처리 |
-| 동일 이벤트 중복 발행 | `source_event_id`와 최초 Kafka record identity를 기준으로 멱등 처리 |
-| 동일 Kafka record 재전달 | 저장된 `(topic, partition, offset)`으로 redelivery를 판별하고 Job 재획득 |
-| OpenAI 429·5xx·네트워크 오류 등 | OpenAI client retry 이후 Worker 수준의 제한된 retry와 backoff |
-| Object Storage·파싱의 일시 오류 | 재시도 가능한 오류로 처리 |
-| DB 접근 실패 | Batch 완료를 보류하고 NACK 및 DB health gate를 통해 재처리 |
-| 영구 오류 또는 재시도 한도 도달 | `FAILED` 상태로 종결 |
-| 문서 삭제 이벤트 누락 | 삭제 대상 잔여 chunk를 주기적으로 탐색해 멱등 삭제 |
+지원 형식은 PDF, DOCX, HWP(`application/x-hwp`, `application/haansofthwp`),
+TXT, Markdown입니다. 원문의 SHA-256 해시를 확인하며 청킹 전략은 `FIXED_TOKEN`,
+`PARAGRAPH`, `PARAGRAPH_OVERLAP` 중 선택합니다.
+OpenAI `text-embedding-3-small`의 1,536차원 결과와 Nori 키워드 토큰을 저장합니다.
+청크는 `(document_version_id, chunk_no)` 기준으로 UPSERT합니다.
 
-상세한 장애 감지 조건, 상태 전이, retry 정책, redelivery/republish 판정과 현재 보장 범위는 [Failure Handling & Recovery](docs/FAILURE_HANDLING.md)에 정리했습니다.
+`execution_epoch`는 Job 실행권의 세대입니다. 문서 버전의 `version_no`는 별도로
+검색 포인터가 과거 버전으로 되돌아가는 것을 방지합니다. Worker는 문서 버전의
+`embedding_version_no`를 실행 fencing에 사용하지 않습니다.
 
-## OpenSQL 활용
+## 실행
 
-Worker는 Tmax OpenSQL을 인덱싱 결과와 작업 상태의 영속 저장소로
-사용합니다. `document_chunk`에 청크와 1,536차원 임베딩을 저장하고,
-`indexing_job`에 처리 상태와 Kafka record identity를 기록합니다.
-
-| 데이터 | Worker의 사용 방식 |
-|---|---|
-| `document` | tenant와 삭제 여부 확인, 더 높은 `embedding_version_no`만 검색 버전으로 승격 |
-| `document_version` | 원본 위치·MIME·hash·버전 정보를 읽고, 완료 시 chunk 수와 `indexed_at` 갱신 |
-| `document_chunk` | `(document_version_id, chunk_no)` 기준 UPSERT, Nori 토큰·JSONB metadata·`vector(1536)` 저장 |
-| `indexing_job` | 이벤트 멱등 키, 처리 상태, 시도 횟수, Worker, 오류, Kafka 위치 기록 |
-
-## 설계 문서
-
-| 문서 | 내용 |
-|---|---|
-| [Architecture](docs/ARCHITECTURE.md) | Worker의 책임과 경계, 시스템 컨텍스트, 주요 컴포넌트와 설계 결정 |
-| [Processing Model](docs/PROCESSING_MODEL.md) | Kafka Batch, Partition, 순서 보장, 병렬 처리, ACK/NACK과 poll lifecycle |
-| [Failure Handling](docs/FAILURE_HANDLING.md) | 장애 모델, 멱등성, 재처리 전략, 상태 전이와 보장 범위 |
-
-## 테스트
-
-기본 테스트는 외부 서비스 없이 H2와 test double을 사용해 listener
-ACK/NACK, key별 순서, 파서, 청킹 결정성, retry 분류, publication 호출을
-검증합니다.
-
-```bash
-./gradlew test
-```
-
-`integration` tag 테스트는 실제 PostgreSQL/pgvector 공용 스키마를 사용해
-Job 상태 전이, 고유 제약, 청크 삭제와 파이프라인 재시도를 검증합니다.
-안전을 위해 DB 이름에 `test` 또는 `integration`이 포함되어야 합니다.
-
-```bash
-set -a
-source .env
-set +a
-./gradlew integrationTest
-```
-
-실제 OpenAI 연동 테스트는 `OPENAI_API_KEY`가 설정된 경우에만 실행됩니다.
-
-## 시작하기
-
-### 요구 사항
-
--   JDK 21 또는 Docker
--   Kafka broker
--   Server/Core migration이 적용된 Tmax OpenSQL 또는 PostgreSQL +
-    pgvector DB
--   원문이 저장된 S3 호환 Object Storage
--   OpenAI API key
-
-### 환경 변수
-
-`.env.example`을 복사하고 빈 값을 실행 환경에 맞게 채웁니다.
+JDK 21, 계약이 적용된 OpenSQL/PostgreSQL + pgvector, S3 호환 Object Storage,
+OpenAI API key가 필요합니다. `.env.example`을 복사해 값을 채웁니다.
 
 ```bash
 cp .env.example .env
-```
-
-필수 런타임 설정은 다음과 같습니다.
-
-| 환경 변수 | 설명 |
-|---|---|
-| `DB_URL` | OpenSQL/PostgreSQL JDBC URL |
-| `DB_USERNAME`, `DB_PASSWORD` | DB 인증 정보 |
-| `KAFKA_BOOTSTRAP_SERVERS` | Kafka bootstrap servers |
-| `INDEXING_STORAGE_BUCKET` | 원문 Object Storage bucket |
-| `OPENAI_API_KEY` | OpenAI embedding API key |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | AWS SDK 기본 자격 증명 체인에서 환경변수를 사용할 때 필요 |
-
-주요 선택 설정은 다음과 같습니다.
-
-| 환경 변수 | 기본값 | 설명 |
-|---|---|---|
-| `INDEXING_WORKER_ID` | 실행 시 UUID 생성 | Job과 로그에 기록할 Worker 식별자 |
-| `INDEXING_KAFKA_TOPIC` | `doc.events.v1` | 소비 topic |
-| `INDEXING_SUPPORTED_SCHEMA_VERSIONS` | `1` | 허용 이벤트 schema version 목록 |
-| `INDEXING_BATCH_SIZE` | `10` | `max.poll.records` |
-| `INDEXING_CONSUMER_CONCURRENCY` | `5` | 배치 작업·파싱 executor 크기. Kafka listener concurrency가 아님 |
-| `INDEXING_MAX_ATTEMPTS` | `5` | Job 최대 시도 횟수 |
-| `INDEXING_RETRY_BASE_DELAY` | `PT30S` | 선형 backoff 기준 간격 |
-| `INDEXING_CHUNKING_STRATEGY` | `FIXED_TOKEN` | `FIXED_TOKEN`, `PARAGRAPH`, `PARAGRAPH_OVERLAP` |
-| `INDEXING_MAX_TOKENS_PER_CHUNK` | `512` | 청크당 토큰 상한 |
-| `INDEXING_OVERLAP_TOKENS` | `64` | overlap 전략의 겹침 토큰 수 |
-| `INDEXING_MAX_CHUNKS` | `5000` | 문서당 청크 상한 |
-| `INDEXING_MAX_TOTAL_TOKENS` | `2000000` | 문서당 전체 토큰 상한 |
-| `INDEXING_MAX_FILE_SIZE_BYTES` | `209715200` | 다운로드 전 확인할 원문 크기 상한 |
-| `INDEXING_PARSE_TIMEOUT` | `PT60S` | 파싱 제한 시간 |
-| `INDEXING_EMBEDDING_MAX_TOKENS_PER_REQUEST` | `300000` | 임베딩 요청 분할 기준 |
-| `INDEXING_STORAGE_ENDPOINT` | 빈 값 | MinIO 등 S3 호환 endpoint override |
-| `INDEXING_STORAGE_REGION` | `us-east-1` | Storage region |
-| `INDEXING_STORAGE_DOWNLOAD_TIMEOUT` | `PT30S` | Storage API call timeout |
-| `FAULT_INJECTION_ENABLED` | `false` | 장애 재현용 blocking 활성화 |
-| `FAULT_INJECTION_PHASE` | `EMBEDDING` | blocking phase |
-
-DB health gate와 삭제 sweep 간격 등 나머지 설정은
-[`application.yml`](src/main/resources/application.yml)에서 확인할 수
-있습니다.
-
-### 로컬 실행
-
-```bash
 set -a
 source .env
 set +a
-
 ./gradlew bootRun
 ```
 
-JAR로 실행하려면 다음 명령을 사용합니다.
+| 환경 변수 | 기본값 또는 용도 |
+|---|---|
+| `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` | 필수 DB 연결 정보 |
+| `INDEXING_STORAGE_BUCKET` | 필수 원문 bucket |
+| `OPENAI_API_KEY` | 필수 임베딩 API key |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | AWS 기본 자격 증명 체인에서 환경변수 사용 시 설정 |
+| `INDEXING_DB_QUEUE_ENABLED` | `true` |
+| `INDEXING_WORKER_ID` | 실행 시 UUID 생성; 활성 프로세스별로 고유하게 설정 |
+| `INDEXING_QUEUE_CONCURRENCY` | `5`; 파싱 executor 크기도 함께 설정 |
+| `INDEXING_QUEUE_POLL_INTERVAL` | `PT1S` |
+| `INDEXING_LEASE_DURATION` | `PT60S` |
+| `INDEXING_HEARTBEAT_INTERVAL` | `PT10S` |
+| `INDEXING_DB_CHECK_INTERVAL` | `PT5S` |
+| `INDEXING_DB_QUERY_TIMEOUT` | `PT3S`; DB 헬스 조회 제한 |
+| `INDEXING_DB_CONNECTION_TIMEOUT_MS` | `3000`; 커넥션 풀 획득 제한 |
+| `INDEXING_DB_CONNECT_TIMEOUT_SECONDS` | `3`; PostgreSQL 연결 제한 |
+| `INDEXING_DB_SOCKET_TIMEOUT_SECONDS` | `15`; PostgreSQL 소켓 읽기 제한 |
+| `INDEXING_MAX_ATTEMPTS`, `INDEXING_RETRY_BASE_DELAY` | `5`, `PT30S` |
+| `INDEXING_CHUNKING_STRATEGY` | `FIXED_TOKEN` |
+| `INDEXING_MAX_TOKENS_PER_CHUNK`, `INDEXING_OVERLAP_TOKENS` | `512`, `64` |
+| `INDEXING_MAX_CHUNKS`, `INDEXING_MAX_TOTAL_TOKENS` | `5000`, `2000000` |
+| `INDEXING_MAX_FILE_SIZE_BYTES`, `INDEXING_PARSE_TIMEOUT` | `209715200`, `PT60S` |
+| `INDEXING_EMBEDDING_MAX_TOKENS_PER_REQUEST` | `300000` |
+| `INDEXING_STORAGE_ENDPOINT`, `INDEXING_STORAGE_REGION` | 빈 값, `us-east-1` |
+| `INDEXING_STORAGE_DOWNLOAD_TIMEOUT` | `PT30S` |
+| `FAULT_INJECTION_ENABLED`, `FAULT_INJECTION_PHASE` | `false`, `EMBEDDING` |
+
+전체 구성은 [application.yml](src/main/resources/application.yml)에 있습니다.
+활성 수 제한과 재시도 요청 직렬화는 Worker 단위입니다. DB에 저장된 재시도 시각과
+신규 claim 제한은 다른 Worker도 확인합니다. 전체 Worker를 묶는 외부 요청 동시성 제한은 없습니다.
 
 ```bash
 ./gradlew bootJar
 java -jar build/libs/spr1n6-osscontest-worker-0.0.1-SNAPSHOT.jar
 ```
 
-### Docker 실행
-
 ```bash
 docker build -t osscontest-indexing-worker .
-
-docker run --rm \
-  --name aidocs-worker \
-  --env-file .env \
-  osscontest-indexing-worker
+docker run --rm --name aidocs-worker --env-file .env osscontest-indexing-worker
 ```
 
-DB, Kafka, Object Storage 주소는 컨테이너에서 접근 가능한 주소여야 합니다.
-종료는 다음과 같이 수행합니다.
+컨테이너에서 DB와 Object Storage에 접근할 수 있어야 합니다. 이미지는 non-root `worker`
+사용자로 실행되며 health check는 Java PID 1 생존 여부를 확인합니다.
+
+## 검증과 문서
 
 ```bash
-docker stop aidocs-worker
+./gradlew test
+./gradlew integrationTest
 ```
 
-Docker image는 non-root `worker` 사용자로 실행되며, health check는 HTTP
-endpoint가 아니라 Java PID 1의 생존 여부를 확인합니다.
+일반 테스트는 외부 서비스 없이 파서·청킹·큐 슬롯·DB 대기·실행권·API 재시도를 검증합니다.
+통합 테스트는 전용 PostgreSQL/pgvector와 공용 스키마 및 DB 큐 계약이 필요합니다.
+DB 이름에 `test` 또는 `integration`이 포함되어야 하며 `.env.example`의 `INTEGRATION_*`를 설정합니다.
+실제 임베딩 연동 테스트는 테스트 코드의 API key 조건을 충족할 때만 실행됩니다.
 
-## 기술 스택
-
-| 영역 | 기술 |
+| 문서 | 내용 |
 |---|---|
-| Language / Runtime | Kotlin 2.3.21, Java 21 |
-| Build | Gradle Wrapper 8.14 |
-| Application | Spring Boot 4.1.0, Spring Kafka, Spring Data JPA, Spring JDBC, Micrometer |
-| Embedding | Spring AI 2.0.0 BOM, OpenAI `text-embedding-3-small`, 1,536 dimensions |
-| Database | Tmax OpenSQL/PostgreSQL 호환 SQL, pgvector, JSONB, Hibernate Vector |
-| Storage | AWS SDK for Java 2.46.7 BOM, S3-compatible API |
-| Parsing | PDFBox 3.0.3, Apache POI 5.3.0, hwplib 1.1.9 |
-| Tokenization | jtokkit 1.1.0 (`CL100K_BASE`), Lucene Nori 9.11.1 |
-| Container | Eclipse Temurin 21, multi-stage Docker build |
-
-## 프로젝트 구조
+| [Architecture](docs/ARCHITECTURE.md) | 컴포넌트와 공용 DB 계약 |
+| [Processing Model](docs/PROCESSING_MODEL.md) | claim, 병렬 실행, heartbeat, 삭제 처리 |
+| [Failure Handling](docs/FAILURE_HANDLING.md) | DB 대기, lease 경쟁, 커밋 응답 유실, 429 |
 
 ```text
 src/main/kotlin/com/osscontest/worker/indexing
-├── consumer/      # Kafka batch listener, event validation, ACK/NACK, DB health gate
-├── retrieval/     # S3-compatible 원문 다운로드
+├── queue/         # DB claim, 실행권, DB 대기, heartbeat, API backoff
+├── retrieval/     # S3 호환 원문 다운로드
 ├── parsing/       # MIME별 parser와 timeout guard
-├── chunking/      # 청킹 전략, 토큰화, 청크 한도
-├── embedding/     # OpenAI embedding, 결과 검증, Nori 토큰 생성
-├── pipeline/      # Job 획득, 단계 조율, retry와 recovery 판정
-├── publication/   # DB entity/repository, chunk UPSERT, 완료 transaction
-├── deletion/      # 삭제 이벤트 후처리와 보정 sweep
+├── chunking/      # 청킹 전략과 토큰 한도
+├── embedding/     # 임베딩과 Nori 토큰 생성
+├── pipeline/      # claim한 Job의 단계 조율과 재시도
+├── publication/   # 청크 UPSERT와 원자적 완료 저장
+├── deletion/      # DELETE Job의 청크 삭제와 완료 저장
 └── fault/         # 환경변수 기반 장애 주입
 ```
 
-## Contributing
+기술 스택: Kotlin 2.3.21, Java 21, Gradle 8.14, Spring Boot 4.1.0,
+Spring Data JPA/JDBC, Micrometer, Spring AI 2.0.0, pgvector/JSONB,
+AWS SDK 2.46.7, PDFBox 3.0.3, Apache POI 5.3.0, hwplib 1.1.9,
+jtokkit 1.1.0, Lucene Nori 9.11.1.
 
-변경 전 패키지 경계와 공용 DB 계약을 확인하고, 최소한 `./gradlew test`를
-통과시킵니다. 실제 DB 계약이나 OpenAI 연동을 변경하는 경우 전용
-integration DB에서 `./gradlew integrationTest`도 실행합니다.
+## Contributing / License
 
-## License
-
-이 프로젝트는 [MIT License](LICENSE)로 배포됩니다.
+[코드 규칙](docs/CODE_CONVENTIONS.md)과 공용 DB 계약을 확인하고 `./gradlew test`를 실행합니다.
+실제 DB 동작 변경은 전용 통합 DB에서 검증합니다. [MIT License](LICENSE)로 배포됩니다.

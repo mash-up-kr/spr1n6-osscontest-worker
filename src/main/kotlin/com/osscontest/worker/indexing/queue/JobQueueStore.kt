@@ -149,20 +149,19 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
         return recovered
     }
 
-    /** Optional Kafka ingress uses durable Jobs; it never executes or directly deletes chunks. */
+    /** 문서 행을 잠그고 source_event_id가 중복되지 않는 Job을 등록한다. */
     @Transactional
-    fun enqueue(sourceEventId: UUID, documentId: Long, versionId: Long?, type: JobType, traceId: String?,
-                topic: String = "db-job-queue", partition: Int = 0, offset: Long = 0) {
+    fun enqueue(sourceEventId: UUID, documentId: Long, documentVersionId: Long?, type: JobType, traceId: String?) {
         check(jdbc.queryForObject("SELECT id FROM document WHERE id = :id FOR UPDATE",
             mapOf("id" to documentId), Long::class.java) != null)
         jdbc.update(
             """
             INSERT INTO indexing_job (source_event_id, document_id, document_version_id, job_type, status,
-                attempt_count, execution_epoch, updated_at, trace_id, kafka_topic, kafka_partition, kafka_offset)
-            VALUES (:eventId, :documentId, :versionId, :type, 'PENDING', 0, 0, $UTC_NOW,
-                :traceId, :topic, :partition, :offset) ON CONFLICT DO NOTHING
-            """.trimIndent(), mapOf("eventId" to sourceEventId, "documentId" to documentId, "versionId" to versionId,
-                "type" to type.name, "traceId" to traceId, "topic" to topic, "partition" to partition, "offset" to offset),
+                attempt_count, execution_epoch, updated_at, trace_id)
+            VALUES (:eventId, :documentId, :documentVersionId, :type, 'PENDING', 0, 0, $UTC_NOW,
+                :traceId) ON CONFLICT DO NOTHING
+            """.trimIndent(), mapOf("eventId" to sourceEventId, "documentId" to documentId, "documentVersionId" to documentVersionId,
+                "type" to type.name, "traceId" to traceId),
         )
     }
 

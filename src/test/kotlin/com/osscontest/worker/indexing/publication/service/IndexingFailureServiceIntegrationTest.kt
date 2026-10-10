@@ -84,9 +84,6 @@ class IndexingFailureServiceIntegrationTest(
                     startedAt = Instant.now(),
                     completedAt = if (status == IndexingJobStatus.COMPLETED) Instant.now() else null,
                     updatedAt = Instant.now(),
-                    kafkaTopic = "indexing",
-                    kafkaPartition = 0,
-                    kafkaOffset = 1L,
                     executionEpoch = 1, leaseExpiresAt = Instant.now().plusSeconds(60),
                 ),
             )

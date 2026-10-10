@@ -3,7 +3,6 @@ package com.osscontest.worker.indexing.pipeline.service
 import com.osscontest.worker.indexing.chunking.service.ChunkGuard
 import com.osscontest.worker.indexing.chunking.service.ChunkingService
 import com.osscontest.worker.indexing.chunking.service.ChunkingStrategy
-import com.osscontest.worker.indexing.consumer.IndexingEvent
 import com.osscontest.worker.indexing.fault.FaultInjectionContext
 import com.osscontest.worker.indexing.fault.IndexingFaultInjector
 import com.osscontest.worker.indexing.parsing.DocumentParserRegistry
@@ -42,7 +41,7 @@ internal class IndexingAttemptProcessor(
     fun process(
         jobId: Long,
         token: ExecutionToken,
-        event: IndexingEvent,
+        documentId: Long,
         documentVersion: DocumentVersionEntity,
         faultInjectionContext: FaultInjectionContext,
         onStageStarted: (String) -> Unit,
@@ -56,7 +55,7 @@ internal class IndexingAttemptProcessor(
         log.info(
             "indexing stage started: stage=DOWNLOADING jobId={} documentId={} documentVersionId={}",
             jobId,
-            event.documentId,
+            documentId,
             documentVersion.id,
         )
         updatePhase(token, "DOWNLOADING")
@@ -89,7 +88,7 @@ internal class IndexingAttemptProcessor(
                 jobId,
                 documentVersion.mimeType,
             )
-        updatePhase(token, "PARSING")
+            updatePhase(token, "PARSING")
             val parser = parserRegistry.findParser(documentVersion.mimeType)
             val blocks = parsingTimeoutGuard.parse(parser, tempFile, documentVersion.mimeType)
             log.info(
@@ -121,7 +120,7 @@ internal class IndexingAttemptProcessor(
             val context =
                 IndexingContext(
                     jobId = jobId,
-                    documentId = event.documentId,
+                    documentId = documentId,
                     documentVersionId = documentVersion.id,
                     versionNo = documentVersion.versionNo,
                     extractedMetadata = null,

@@ -3,7 +3,7 @@ package com.osscontest.worker.indexing.pipeline.service
 import com.osscontest.worker.indexing.chunking.service.ChunkLimitExceededException
 import com.osscontest.worker.indexing.chunking.service.EmptyExtractionException
 import com.osscontest.worker.indexing.chunking.service.TotalTokenLimitExceededException
-import com.osscontest.worker.indexing.consumer.InvalidEventException
+import com.osscontest.worker.indexing.queue.InvalidJobException
 import com.osscontest.worker.indexing.embedding.service.EmbeddingRequestRejectedException
 import com.osscontest.worker.indexing.embedding.service.InvalidEmbeddingException
 import com.osscontest.worker.indexing.parsing.CorruptedFileException
@@ -15,7 +15,7 @@ import com.osscontest.worker.indexing.retrieval.FileTooLargeException
 internal object IndexingErrorClassifier {
     fun classify(error: Exception): IndexingError =
         when (error) {
-            is InvalidEventException -> permanent(error.code)
+            is InvalidJobException -> permanent(error.code)
             is ContentIntegrityException -> permanent(error.code)
             is EmptyExtractionException -> permanent(error.code)
             is ChunkLimitExceededException -> permanent(error.code)

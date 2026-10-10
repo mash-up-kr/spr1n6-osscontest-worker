@@ -28,7 +28,6 @@ class IndexingFailureServiceTest {
             status = IndexingJobStatus.PROCESSING, attemptCount = attemptCount, nextRetryAt = null, workerId = testToken.workerId,
             lastErrorCode = null, lastErrorMessage = null, traceId = null, startedAt = null,
             completedAt = null, updatedAt = testNow,
-            kafkaTopic = "indexing", kafkaPartition = 0, kafkaOffset = 1L,
             executionEpoch = testToken.epoch, leaseExpiresAt = testNow.plusSeconds(60),
         )
 

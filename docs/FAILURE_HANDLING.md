@@ -1,438 +1,115 @@
+[한국어](FAILURE_HANDLING.md) / [English](FAILURE_HANDLING_EN.md)
+
 # Failure Handling & Recovery
 
-이 문서는 Worker 처리 과정에서 발생할 수 있는 장애와 장애 감지, 상태 기록, 재처리 및 복구 전략을 설명합니다.
+## DB 장애에서 대기·재개
 
-## 1. 문서 목적과 범위
-
-이 문서는 다음을 다룹니다.
-
-- Worker 종료와 consumer group 재할당 이후의 재처리
-- logical duplicate publish와 동일 Kafka record redelivery의 구분
-- `indexing_job` 상태별 재획득과 재시도 정책
-- OpenAI client와 Worker 두 계층의 retry
-- DB 실패 시 NACK 이후의 복구와 consumer pause
-- publication 중단, ACK gap, 동시 attempt 등 crash window
-- 삭제 경합과 poison event를 포함한 복합 장애
-- 현재 복구 설계가 보장하는 범위와 한계
-
-전체 시스템 구조와 DB transaction 설계는 [Worker Architecture](ARCHITECTURE.md), Kafka poll·batch·thread·ACK/NACK의 상세 실행 모델과 processing time budget은 [Processing Model](PROCESSING_MODEL.md)의 범위입니다. 여기서는 장애 감지와 다음 실행의 복구 판단에 직접 필요한 구조만 반복합니다.
-
-## 2. Failure Model
-
-| Failure | 영향 | 감지 | 현재 복구 |
-|---|---|---|---|
-| 처리 중 Worker process 종료 | Job이 `PENDING`, `PROCESSING`, `RETRY_WAIT`에 남고 batch offset이 commit되지 않을 수 있습니다. | Kafka consumer group이 member 상실 또는 poll 지연을 감지 | consumer group 재할당 후 동일 record redelivery, recoverable Job 재획득 |
-| 동일 Kafka record redelivery | 같은 external 작업과 DB write가 다시 실행될 수 있습니다. | 저장된 `(topic, partition, offset)`과 현재 record identity 비교 | `PENDING`/`PROCESSING` 재획득, due 전 `RETRY_WAIT` 대기 후 재획득, terminal Job skip |
-| 동일 logical event 재발행 | 같은 `source_event_id`가 새 offset으로 들어올 수 있습니다. | `source_event_id` 조회 후 Kafka record identity 불일치 | `INDEXING_EVENT_REPUBLISHED`를 남기고 새 record를 처리하지 않음 |
-| 일시적인 download/parse/embedding 실패 | 현재 batch가 장시간 ACK되지 않고 partition lag이 증가할 수 있습니다. | exception whitelist에 없는 오류를 retryable로 분류 | `RETRY_WAIT` 영속화, 선형 backoff 후 같은 listener invocation에서 재시도 |
-| OpenAI 429/5xx/일부 통신 실패 | 임베딩 호출 실패 또는 지연 | OpenAI Java client의 HTTP/exception 분류 후, 소진 시 Worker로 exception 전파 | provider client 내부 retry 후 Worker Job retry |
-| 영구 입력/처리 오류 | 같은 입력을 반복해도 성공하지 않으며 batch를 오래 막을 수 있습니다. | `IndexingErrorClassifier`의 명시적 exception whitelist | 한 번의 Worker attempt 후 `FAILED`, 이후 record ACK |
-| DB 접근 실패 | Job 상태를 기록하지 못한 채 record를 소각하거나 성공 결과를 확정하지 못할 수 있습니다. | listener까지 전파된 `DataAccessException`, 주기적 `SELECT 1` | batch index 0부터 NACK, DB health gate가 container pause/resume |
-| publication transaction 중 실패 | 일부 chunk, version, Job 상태가 서로 다른 결과로 보일 수 있습니다. | transaction 내부 exception 및 저장 건수 검증 | 한 transaction rollback, 재처리 시 chunk UPSERT와 trailing delete |
-| DB 완료 후 Kafka offset commit 전 종료 | DB는 `COMPLETED`인데 같은 record가 다시 전달될 수 있습니다. | redelivery 시 source event 및 record identity와 terminal status 조회 | `COMPLETED` Job은 pipeline을 재실행하지 않고 batch ACK 경로로 진행 |
-| 역직렬화 실패/지원하지 않는 이벤트 | poison record가 partition 진행을 막을 수 있습니다. | JSON 역직렬화 및 event validation exception | 오류 로그 후 해당 record를 소비하고 batch ACK |
-
-## 3. 공통 복구 원칙
-
-### 3.1 복구가 전제하는 Kafka delivery semantics
-
-Worker는 batch listener로 Kafka record를 수신하고 key별 task의 완료를 기다린 뒤 acknowledgment를 수행합니다. DB failure가 listener까지 전파되면 batch NACK 경로로 연결될 수 있으며, ACK 전에 process가 종료되거나 offset commit이 완료되지 않으면 같은 record가 다시 전달될 수 있습니다.
-
-이 문서에서 중요한 전제는 **Kafka delivery 완료와 DB 처리 완료가 하나의 원자적 사건이 아니라는 점**입니다. consumer group, partition, batch scheduling, executor, `AckMode.MANUAL`, ACK/NACK와 offset boundary의 상세 동작은 [Processing Model](PROCESSING_MODEL.md)에서 설명합니다.
-
-### 3.2 Batch ACK가 만드는 상태 혼합
-
-한 batch의 여러 document group은 서로 다른 시점에 DB 상태를 commit합니다. 예를 들어 Job A가 publication까지 끝나 `COMPLETED`가 되고 Job B가 `PROCESSING` 또는 `RETRY_WAIT`인 동안 Worker가 종료될 수 있습니다. 이때 DB에는 `COMPLETED`와 미완료 상태가 함께 존재하며 batch ACK는 호출되지 않습니다.
-
-같은 batch 범위가 다시 전달되면 다음과 같이 수렴합니다.
-
-- `COMPLETED` 또는 `FAILED`: `start()`가 획득하지 못하므로 pipeline을 다시 실행하지 않습니다.
-- `PENDING` 또는 `PROCESSING`: 새 Worker가 `PROCESSING`으로 재획득합니다.
-- `RETRY_WAIT`: due 전이면 DB 시각 기준 남은 시간을 기다린 뒤 재획득합니다.
-
-따라서 성공한 Job도 Kafka record 자체는 다시 보일 수 있지만, terminal status 분기가 DB 작업의 반복을 줄입니다. batch acknowledgment의 blast radius는 남습니다.
-
-### 3.3 복구 판단에 사용하는 `indexing_job`
-
-`indexing_job`은 Kafka offset을 대신하는 저장소가 아니라, redelivery 시 실행 여부를 판단하기 위한 영속 상태입니다. 복구에 직접 사용하는 핵심 필드는 다음과 같습니다.
-
-| 복구 판단 | 필드 | 용도 |
-|---|---|---|
-| 동일 logical event 여부 | `source_event_id` | 같은 producer event인지 판별 |
-| 동일 Kafka record 여부 | `kafka_topic`, `kafka_partition`, `kafka_offset` | redelivery와 새 position의 republish 구분 |
-| 재처리 가능 여부 | `status` | recoverable/terminal 상태 판별 |
-| retry 시점과 예산 | `attempt_count`, `next_retry_at` | 남은 retry와 due 시각 판단 |
-| Worker 인계 관측 | `worker_id` | 마지막 획득 Worker와 현재 Worker 비교 |
-
-Kafka identity는 Job을 처음 insert할 때 저장되며 이후 redelivery나 republish로 갱신하지 않습니다. `worker_id`는 `start()`가 성공할 때 현재 Worker로 갱신하지만 fencing token이나 lease가 아닙니다.
-
-전체 `indexing_job` 데이터 모델과 다른 entity의 관계는 [Worker Architecture](ARCHITECTURE.md)에서 설명합니다.
-
-### 3.4 두 종류의 identity
-
-- `source_event_id`: producer 관점의 logical event identity
-- `(kafka_topic, kafka_partition, kafka_offset)`: Kafka log 안의 물리 record identity
-
-현재 production code는 두 identity를 실제로 비교합니다. 같은 `source_event_id`가 존재할 때 Kafka identity도 같으면 redelivery, 다르면 duplicate publish로 분기합니다. 단순히 컬럼만 저장하는 설계가 아닙니다.
-
-### 3.5 DB transaction과 Kafka offset 사이의 복구 전제
-
-전체 pipeline, DB 상태와 Kafka offset을 함께 감싸는 하나의 transaction은 없습니다. Job 생성·획득·phase·failure 기록은 처리 중간에 영속화될 수 있고, 성공 publication은 별도 DB transaction으로 확정되며 Kafka acknowledgment는 그 밖에서 수행됩니다.
-
-따라서 이 문서는 다음 crash window를 명시적으로 다룹니다.
-
-- Job 상태는 commit됐지만 외부 처리가 끝나기 전 종료
-- 외부 처리는 수행됐지만 publication commit 전 종료
-- publication은 commit됐지만 Kafka offset commit 전 종료
-- 여러 key group 중 일부만 DB commit된 상태에서 batch 종료
-
-각 DB transaction의 정확한 경계는 [Worker Architecture](ARCHITECTURE.md)에서 설명합니다.
-
-## 4. 장애 유형별 복구 전략
-
-### 4.1 Worker 처리 중 종료
-
-#### 4.1.1 장애 상황
-
-가장 중요한 경로는 다음과 같습니다.
-
-```text
-Kafka record 수신
-→ Job PENDING 생성
-→ PROCESSING commit
-→ phase=EMBEDDING commit
-→ embedding 또는 publication 중 Worker 종료
-→ batch acknowledge 미호출
-```
-
-문제는 외부 API 호출이 중복될 수 있고, DB에는 미완료 Job이 남으며, 같은 batch에서 먼저 끝난 Job까지 Kafka에서 다시 보일 수 있다는 점입니다.
-
-#### 4.1.2 Kafka의 장애 감지와 재할당
-
-Worker가 직접 다른 Worker의 생존을 감지하거나 partition을 재할당하지 않습니다. process 종료나 consumer가 poll lifecycle을 유지하지 못하는 상황은 Kafka consumer group이 감지하고, group membership 변화에 따라 partition을 다른 consumer에 재할당할 수 있습니다.
-
-`SIGKILL`처럼 process가 사라지는 경우와 process는 살아 있지만 긴 처리로 poll interval을 초과하는 경우는 Kafka 관점에서 서로 다른 liveness 경로입니다. heartbeat/session timeout, `max.poll.interval.ms`, 실제 consumer group과 listener concurrency의 상세 설정은 [Processing Model](PROCESSING_MODEL.md)에서 설명합니다.
-
-#### 4.1.3 복구 전략
-
-```mermaid
-sequenceDiagram
-    participant K as Kafka
-    participant A as Worker A
-    participant D as OpenSQL / PostgreSQL
-    participant B as Worker B
-
-    K->>A: record E (topic, partition, offset)
-    A->>D: insert PENDING
-    A->>D: start → PROCESSING, worker_id=A
-    A->>D: phase=EMBEDDING
-    Note over A: Worker 장애로 처리 중 종료
-    A--xK: batch acknowledge 없음
-    K->>K: member 제거 및 partition 재할당
-    K->>B: 같은 record E 재전달
-    B->>D: source_event_id 조회
-    D-->>B: PROCESSING, worker_id=A, 같은 Kafka identity
-    B->>D: start → PROCESSING, worker_id=B, attempt_count+1
-    B->>B: pipeline 처음부터 재실행
-    B->>D: chunks/version/Job COMPLETED 한 transaction
-    B->>K: batch acknowledge
-```
-
-partition reassignment는 Kafka consumer group의 기능입니다. 같은 record인지 판정하고 미완료 Job을 재획득하는 것은 Worker production code의 책임입니다.
-
-#### 4.1.4 Crash windows
-
-| Crash 지점 | DB에 남을 수 있는 상태 | redelivery 시 경로 | 중복 가능성/보호 장치 |
-|---|---|---|---|
-| record 수신 후 Job insert 전 | Job 없음 | 새 `PENDING` insert 후 정상 처리 | 이전 external side effect 없음 |
-| `PENDING` insert 후 `start()` 전 | `PENDING`, Kafka identity 저장 | 같은 identity redelivery → `PENDING` 재획득 | `source_event_id` conflict가 새 Job 생성을 막음 |
-| `PROCESSING` commit 후 download/parse/chunk 중 | `PROCESSING`, 마지막 `phase`, attempt 증가 | `PROCESSING` 재획득 후 전체 attempt 재실행 | 다운로드/파싱은 반복될 수 있음 |
-| embedding 중 | `PROCESSING`, `phase=EMBEDDING` | 전체 attempt 재실행 | 이미 성공한 embedding request도 다시 호출될 수 있어 비용/지연 중복 가능 |
-| publication transaction commit 전 | 외부에서 보이는 publication write는 rollback되어야 하며 Job은 이전 `PROCESSING` | 전체 attempt 재실행 | 단일 transaction과 chunk UPSERT가 수렴을 보조 |
-| publication commit 후 완료 로그/ACK 전 | chunks/version/Job `COMPLETED` | 같은 identity 감지 후 terminal Job skip | embedding과 DB publication은 재실행하지 않음 |
-| `acknowledge()` 호출 후 broker commit 완료 전 | DB `COMPLETED`, commit 결과는 code에서 동기 확인하지 않음 | commit되지 않았다면 redelivery 가능, terminal Job skip | DB/Kafka gap을 terminal status로 흡수 |
-
-`PROCESSING` 재획득은 `status IN ('PENDING', 'PROCESSING')`인 Job을 다시 `PROCESSING`으로 갱신합니다. 이때 `worker_id`를 현재 Worker로 바꾸고 `attempt_count`를 증가시킵니다. 반복 crash도 attempt budget을 소비하며, 상한에 도달한 `PENDING`/`PROCESSING` Job은 `MAX_ATTEMPTS_EXCEEDED`로 `FAILED`가 됩니다.
-
-#### 4.1.5 보장 범위와 한계
-
-현재 설계가 제공하는 범위는 다음과 같습니다.
-
-- 처리 중 ACK되지 않은 record는 consumer group 재할당 후 다시 전달될 수 있습니다.
-- 동일 record가 다시 오면 영속 Job의 미완료 상태를 기준으로 재획득할 수 있습니다.
-- DB 성공 후 ACK 전 crash는 `COMPLETED` terminal skip으로 DB publication 반복을 피합니다.
-
-다음은 보장하지 않습니다.
-
-- exactly-once 실행 또는 external API 호출 1회 보장
-- DB transaction과 Kafka offset commit의 원자성
-- Worker A가 완전히 멈추기 전에 Worker B가 시작되는 구간의 단일 실행권
-- crash가 반복되어도 무한히 재시도하는 동작
-- Kafka broker 장애, retention 만료, 잘못된 offset 운영 변경까지 포함한 무유실 보장
-
-### 4.2 중복 이벤트 발행과 Kafka 재전달
-
-#### 4.2.1 장애 상황
-
-동일 `source_event_id`는 두 상황에서 나타날 수 있습니다.
-
-1. producer/relay가 같은 logical event를 새 Kafka record로 다시 publish합니다.
-2. 기존 Kafka record의 offset이 commit되지 않아 Kafka가 다시 전달합니다.
-
-첫 번째를 무조건 다시 처리하면 duplicate work가 발생합니다. 반대로 같은 event ID를 무조건 버리면 Worker crash 뒤 미완료 Job도 복구할 수 없습니다. 이 Worker는 Job에 최초 Kafka position을 저장하고 현재 record와 비교합니다.
-
-#### 4.2.2 판별 및 복구 전략
+`DatabaseOperations`는 연결·리소스 실패, query timeout, 복구 가능한 JDBC 오류,
+SQLSTATE 연결 오류와 일부 서버 종료·접속 한도 오류를 장애로 분류합니다.
+제약 위반처럼 DB가 응답한 영구 오류를 무조건 DB 복구 대기로 처리하지 않습니다.
 
 ```mermaid
 flowchart TD
-    R[INDEXING_REQUESTED 수신] --> I[INSERT Job ON CONFLICT DO NOTHING]
-    I -->|inserted=1| NEW[새 PENDING Job 처리]
-    I -->|inserted=0| F[findBySourceEventId]
-    F -->|없음| AV[다른 source event의 active-version conflict<br/>현재 event 처리 안 함]
-    F -->|있음| M{저장된 topic/partition/offset과 같은가?}
-    M -->|아니오| PUB[INDEXING_EVENT_REPUBLISHED<br/>action=IGNORED]
-    M -->|예| RED[INDEXING_EVENT_REDELIVERED]
-    RED --> S{기존 status}
-    S -->|PENDING 또는 PROCESSING| ACQ[PROCESSING 재획득]
-    S -->|RETRY_WAIT, due 전| WAIT[DB 시각 기준 남은 시간 대기]
-    WAIT --> ACQ
-    S -->|RETRY_WAIT, due| ACQ
-    S -->|COMPLETED 또는 FAILED| SKIP[pipeline skip]
+    C[DB 호출] --> F{연결 장애?}
+    F -->|아니오| RETURN[반환 또는 일반 오류 처리]
+    F -->|예| EXIT[트랜잭션 종료 / 자원 반환]
+    EXIT --> WAIT[공유 장애 상태 / 주기적 SELECT 1]
+    WAIT -->|실패| WAIT
+    WAIT -->|성공| OWN[Job 토큰·상태·lease 재확인]
+    OWN -->|실행권 상실| STOP[현재 실행 종료]
+    OWN -->|같은 실행 완료| DONE[저장 반복 없이 종료]
+    OWN -->|유효한 실행| RETRY[같은 DB 호출 / 보관한 입력 재사용]
 ```
 
-판정 코드는 `IndexingPipelineRunner.acquireJobId()`에 있습니다.
+헬스 조회는 DB 연결 회복만 의미합니다. 실행권 확인은 별도로 수행합니다.
+장애 세대를 기록하여 오래된 성공 헬스 조회가 새로 감지된 장애 상태를 지우지 못하게 합니다.
+대기에는 활성 트랜잭션·락·커넥션을 보유하지 않습니다. 같은 메서드 인자와 계산 결과를 보관하며
+실패한 DB 작업을 새 트랜잭션으로 호출합니다. 종료된 트랜잭션 객체를 보관·재사용하지 않습니다.
 
-- 같은 `source_event_id`, 다른 topic/partition/offset: `INDEXING_EVENT_REPUBLISHED`, 처리하지 않음
-- 같은 `source_event_id`, 같은 topic/partition/offset: `INDEXING_EVENT_REDELIVERED`
-- redelivery이며 status가 `PENDING`, `PROCESSING`, `RETRY_WAIT`: `INDEXING_JOB_RECOVERY`
-- previous `worker_id`가 현재와 다르면 `recoveryType=WORKER_HANDOFF`
+claim·heartbeat·phase·실패 기록·결과 저장·삭제 모두 DB 경계에서 이 대기를 사용합니다.
+감지 이후 신규 claim과 다음 외부 API 호출을 보류합니다. 이미 진행 중인 요청은 완료될 수 있습니다.
+프로세스가 죽으면 보관한 메모리는 사라지며 회수 후 새 실행이 전체 파이프라인을 다시 계산합니다.
 
-#### 4.2.3 상태별 처리
+## 실행권과 조건부 lease 갱신
 
-| 기존 status | 같은 record redelivery | 다른 position의 같은 event republish |
-|---|---|---|
-| `PENDING` | 재획득 | 무시 |
-| `PROCESSING` | 재획득 | 무시 |
-| `RETRY_WAIT` | due까지 기다린 후 재획득 | 무시 |
-| `COMPLETED` | pipeline skip 후 listener 성공 경로 | 무시 |
-| `FAILED` | pipeline skip 후 listener 성공 경로 | 무시 |
+실행 토큰은 `job_id + worker_id + execution_epoch`입니다.
+Job 상태가 `PROCESSING` 또는 `RETRY_WAIT`이고 lease가 존재해야 소유한 실행으로 인정합니다.
+실제 처리를 재개할 때는 lease가 DB 시각보다 미래여야 합니다.
 
-`FAILED` Job에 동일 event ID를 다시 publish해도 retry trigger로 사용되지 않습니다. 다시 처리하려면 source event identity가 다른 새로운 요청이 필요합니다.
+만료됐어도 같은 토큰이면 `renew()`를 시도합니다. 갱신 조건은 Job ID, Worker ID, epoch,
+소유 상태, lease 존재입니다. 만료 시각이 미래라는 조건은 갱신에 넣지 않습니다.
+갱신 이후 상태와 lease를 다시 확인합니다. 회수 UPDATE는 만료 조건을 확인해 소유자·lease를 비우고
+epoch를 증가시킵니다. 같은 행 잠금 아래에서 먼저 반영된 UPDATE의 결과로 나머지 조건이 재평가됩니다.
 
-#### 4.2.4 DB 제약 조건
+- 갱신이 먼저 성공하면 회수 UPDATE의 만료 조건이 거짓이 됩니다.
+- 회수가 먼저 성공하면 갱신의 소유자·epoch 조건이 거짓이 됩니다.
 
-`insertIfAbsent()`는 외부 schema의 다음 제약을 전제로 `ON CONFLICT DO NOTHING`을 사용합니다.
+회수 스케줄을 늦추거나 복구 유예를 추가하지 않습니다. heartbeat도 같은 조건부 갱신을 사용합니다.
+결과 저장 중 lease가 만료되어 완료 UPDATE가 0건이면 전체 저장 트랜잭션을 롤백합니다.
+트랜잭션 밖에서 갱신과 재확인을 수행한 뒤 보관된 결과로 저장을 재호출합니다.
 
-- `source_event_id` unique constraint
-- 같은 `document_version_id`에 대한 active Job unique constraint
+## 커밋 응답 유실과 보호된 저장
 
-이 복구 전략은 외부 schema가 위 제약을 만족한다는 계약에 의존합니다.
+연결이 끊긴 저장 호출이 예외를 던져도 이미 DB에서 커밋했을 수 있습니다.
+청크 UPSERT, 불필요한 후행 청크 삭제, 개수 검증, 버전 완료, 검색 포인터 승격,
+Job `COMPLETED`를 하나의 `@Transactional` 메서드에서 처리합니다.
+이 원자성 때문에 같은 실행의 `COMPLETED`가 결과 저장 완료의 증거가 됩니다.
 
-#### 4.2.5 보장 범위와 한계
+보호된 저장은 별도 시스템 이름이 아니라 저장 함수의 실행권 검증과 멱등 처리입니다.
+먼저 Job 행을 잠그고 토큰을 확인합니다. 같은 실행이 이미 `COMPLETED`이면 추가 쓰기 없이 반환합니다.
+완료되지 않았다면 실행권·lease를 확인하고 같은 결과를 UPSERT하여 완료합니다.
+다른 실행이 가져간 토큰이면 거절합니다. 청크만 커밋하고 Job 완료를 별도 커밋하는 흐름은 사용하지 않습니다.
+`publication`은 이 결과 저장 트랜잭션을 뜻합니다.
 
-- production code에는 duplicate publish와 Kafka redelivery를 구분하는 실제 분기가 있습니다.
-- 판정은 `(topic, partition, offset)` 세 필드를 모두 사용합니다.
-- 같은 record의 미완료 Job은 재처리되고 terminal Job은 다시 실행되지 않습니다.
+claim은 UPDATE 전에 예정 토큰을 기록하고 복구 후 해당 claim이 반영됐는지 조회합니다.
+실패 기록도 이미 `RETRY_WAIT`·`FAILED`·`COMPLETED`로 반영된 같은 실행이면
+다시 시도 횟수를 소비하거나 deadline을 미루지 않습니다.
 
-Kafka identity 비교는 최초 Job row가 정확히 보존된다는 전제에 의존합니다.
+## 429와 일반 재시도
 
-### 4.3 Embedding API 및 일시 장애
+429는 애플리케이션에서 처리하며 SDK 자동 재시도는 비활성화합니다.
+로컬 대기 표식을 먼저 세우고 `RATE_LIMITED`, `RETRY_WAIT`, `next_retry_at`을 저장합니다.
+`Retry-After`는 초 또는 HTTP 날짜를 지원하며 부재·오류 시 기본 backoff를 사용합니다.
+같은 실행은 heartbeat를 유지하며 실패한 임베딩 배치만 재호출합니다.
 
-#### 4.3.1 장애 상황과 분류
+다른 Worker는 DB deadline을 확인합니다. Worker 종료 후 회수는 deadline을 유지하므로
+새 claim도 대기 시각을 존중합니다. 성공 배치의 메모리 결과는 새 실행으로 전달되지 않습니다.
+재개한 `PROCESSING` Job에도 deadline 표식을 유지해 재시도 집합이 종결되기 전 신규 claim을 막습니다.
+재시도 요청 직렬화는 Worker 내부에서만 적용하며 외부 API circuit breaker는 없습니다.
 
-`EmbeddingService`가 별도로 영구 실패로 변환하는 것은 OpenAI Java SDK의 `BadRequestException`, 즉 HTTP 400입니다. 이는 `EmbeddingRequestRejectedException`이 되어 한 Worker attempt 후 `FAILED`로 종결됩니다.
+일반 일시 실패는 기본 `base-delay * attempt_count`만큼 대기하고 전체 시도를 반복합니다.
+파일 해시 불일치, 미지원 MIME, 손상 파일, 크기·청크·토큰 한도 초과,
+잘못된 임베딩 결과와 거절된 요청 등은 영구 오류로 분류합니다.
+기본 시도 한도는 5회입니다. DB 대기·헬스 조회는 처리 시도 횟수를 소비하지 않습니다.
 
-`IndexingErrorClassifier`의 permanent whitelist는 다음 exception입니다.
+## 삭제와 버전 보호
 
-- event validation 오류
-- content hash mismatch
-- empty extraction
-- chunk 수/전체 token 제한 초과
-- 지원하지 않는 MIME type
-- file size 초과
-- 손상 파일
-- embedding HTTP 400 변환 오류
-- embedding 결과 개수/차원/유한값 검증 오류
+삭제는 DELETE Job에서 청크 삭제와 Job 완료를 원자적으로 처리합니다.
+INDEX 결과 저장은 문서 잠금 후 삭제 상태를 확인하며 삭제된 문서에 청크를 다시 만들지 않습니다.
+`execution_epoch` fencing과 검색 버전 `version_no` 역행 방지는 서로 다른 조건입니다.
+Server의 과거 버전 재시도 제한은 외부 의존성이며 Worker도 부적합한 INDEX를 회수 루프에서 종결합니다.
 
-그 외 exception은 기본적으로 retryable입니다. 따라서 parse timeout, S3/OpenAI 통신 오류, OpenAI 429/5xx가 provider client에서 최종 전파된 경우, 그리고 별도로 분류하지 않은 application 오류도 Worker retry 대상입니다. 이는 일시 오류를 넓게 흡수하지만 실제로는 영구적인 미분류 오류도 상한까지 반복할 수 있다는 trade-off입니다.
+## 검증
 
-#### 4.3.2 재시도 전략
-
-현재 resolved dependency는 Spring AI 2.0.0과 OpenAI Java core 4.39.1입니다. 별도 override가 없으므로 Spring AI의 OpenAI common properties 기본값을 사용합니다.
-
-| 계층 | 대상 | 횟수/대기 | 상태 영속성 |
-|---|---|---|---|
-| OpenAI Java client 내부 | repeatable request의 408, 409, 429, 5xx, `X-Should-Retry: true`, I/O 및 SDK retryable exception | `spring.ai.openai.max-retries=3`: 최초 호출 외 최대 3회 retry. `Retry-After-Ms`/`Retry-After` 우선, 없으면 0.5초 기반 지수 backoff(최대 8초)와 jitter | `indexing_job`에는 내부 retry 횟수가 기록되지 않음 |
-| Worker Job | provider client에서 최종 전파된 오류를 포함한 classifier의 retryable exception | `INDEXING_MAX_ATTEMPTS` 기본 5. 실패 후 `base-delay × attempt_count` 선형 backoff, 기본 30초 | `attempt_count`, `RETRY_WAIT`, `next_retry_at`, error fields 저장 |
-
-Spring AI는 OpenAI client에 기본 request timeout 60초와 최대 retry 3을 전달합니다. Worker `application.yml`에는 `spring.ai.openai.timeout`과 `spring.ai.openai.max-retries` override가 없습니다.
-
-Worker attempt 한 번에 embedding input을 여러 API batch로 나누어 순차 호출할 수 있습니다. 따라서 `attempt_count=1`이 OpenAI HTTP 호출 1회를 의미하지 않습니다. 앞선 embedding batch가 성공한 뒤 뒤쪽 batch가 실패하면 DB publication은 아직 시작되지 않았지만, Worker retry에서 앞선 batch도 다시 호출됩니다.
-
-#### 4.3.3 재시도 흐름
-
-```mermaid
-sequenceDiagram
-    participant W as Worker attempt
-    participant O as OpenAI client/API
-    participant D as OpenSQL / PostgreSQL
-
-    W->>O: embedding request
-    alt client가 retryable로 판정
-        O-->>W: 429/5xx/통신 실패
-        W->>O: SDK 내부 backoff 후 retry (최대 3회)
-    end
-    alt SDK retry 소진 후 exception 전파
-        W->>D: recordFailure(REQUIRES_NEW)
-        D-->>W: RETRY_WAIT + next_retry_at
-        W->>W: DB 시각 기준 남은 시간 Thread.sleep
-        W->>D: start(RETRY_WAIT → PROCESSING, attempt_count+1)
-        W->>O: pipeline 전체 재실행 후 embedding
-    else HTTP 400 또는 permanent validation 오류
-        W->>D: FAILED
-    else 성공
-        W->>D: publication transaction → COMPLETED
-    end
-```
-
-Worker retry는 별도 Kafka retry topic, Job poller, scheduler를 사용하지 않습니다. 같은 `IndexingPipelineRunner.run()` invocation과 같은 batch executor thread에서 `Thread.sleep()`으로 기다립니다. Job이 `COMPLETED` 또는 `FAILED`에 도달할 때까지 listener의 batch ACK도 대기합니다.
-
-#### 4.3.4 재시도 중 Worker 종료
-
-`recordFailure()`는 `REQUIRES_NEW` transaction으로 `RETRY_WAIT`과 `next_retry_at`을 먼저 commit한 뒤 sleep합니다. 이 대기 중 Worker가 종료되면 record는 ACK되지 않은 상태입니다. redelivery를 받은 Worker는 다음과 같이 처리합니다.
-
-1. 같은 Kafka identity와 `RETRY_WAIT`을 확인합니다.
-2. `next_retry_at`이 아직 미래면 `LOCALTIMESTAMP` 기준 남은 시간만 기다립니다.
-3. due가 되면 `start()`로 `PROCESSING` 재획득하고 기존 `attempt_count`에서 계속 증가시킵니다.
-
-반대로 `start()`가 attempt를 증가시킨 직후, failure 상태를 기록하기 전에 종료되면 Job은 `PROCESSING`에 남습니다. 다음 redelivery의 재획득도 attempt를 하나 더 소비하며, 이전 오류의 backoff는 저장되지 않습니다.
-
-#### 4.3.5 재시도 소진
-
-- permanent exception: 현재 attempt에서 바로 `FAILED`
-- retryable exception이며 `attempt_count < maxAttempts`: `RETRY_WAIT`
-- retryable exception이며 상한 도달: `FAILED`
-- crash redelivery에서 이미 `attempt_count >= maxAttempts`인 `PENDING`/`PROCESSING`: `MAX_ATTEMPTS_EXCEEDED`로 `FAILED`
-
-`FAILED`가 되면 listener는 이를 정상적으로 종결된 Job으로 보고 결국 batch를 ACK합니다. DLQ나 `FAILED` Job 자동 재기동 scheduler는 없습니다.
-
-Worker retry와 provider retry가 누적되면 listener completion과 consumer poll budget에 영향을 줍니다. `max.poll.interval.ms` 대비 최악 처리 시간 계산과 executor slot 점유 영향은 [Processing Model](PROCESSING_MODEL.md)에서 설명합니다.
-
-### 4.4 Database 장애
-
-#### 4.4.1 장애 상황
-
-일반 pipeline 오류는 DB에 `RETRY_WAIT` 또는 `FAILED`를 기록한 뒤 ACK 여부를 결정할 수 있습니다. DB 자체가 실패하면 그 상태 기록도 할 수 없으므로 같은 방식만으로는 처리 사실을 남길 수 없습니다.
-
-#### 4.4.2 장애 처리
-
-모든 DB 오류가 즉시 NACK으로 직행하는 것은 아닙니다.
-
-| 발생 위치/회복 상태 | 실제 경로 |
+| 시나리오 | 기대 결과 |
 |---|---|
-| Job insert, source event 조회, `start()` 등 runner의 attempt catch 밖에서 `DataAccessException` 발생 | listener worker thread까지 전파 → batch NACK |
-| document 조회/publication 등 attempt 내부 DB 실패 후 DB가 failure 기록 시점에는 회복 | classifier 기본 정책상 retryable → `RETRY_WAIT` 기록 후 inline retry |
-| attempt 내부 DB 실패 후 `currentDbTimestamp()` 또는 `recordFailure()`도 실패 | 새 `DataAccessException`이 listener까지 전파 → batch NACK |
-| deletion handler의 DB 실패 | listener까지 전파 → batch NACK |
+| 다운로드 후 phase DB 실패 | 파일을 유지하고 phase 호출부터 재개 |
+| heartbeat DB 실패 | 별도 스레드 대기, 신규 claim·다음 외부 호출 보류 |
+| 오래된 헬스 조회 성공과 새 장애 경쟁 | 새 장애 상태 유지 |
+| lease 갱신과 회수 경쟁의 양쪽 순서 | 같은 토큰만 재개, 회수된 토큰 쓰기 거절 |
+| 청크 UPSERT 후 검증 실패 | 청크와 완료 상태 모두 롤백 |
+| 저장 커밋 후 응답 유실 | 같은 실행 완료 확인, 재저장·외부 호출 반복 방지 |
+| claim 커밋 응답 유실 | 예정 토큰으로 기존 claim 확인 |
+| 여러 임베딩 배치 중 429 | 성공 배치 유지, 실패 배치만 재시도 |
+| 재시도 중 Worker 종료 | 회수 시 deadline 유지, 새 실행은 전체 처리 가능 |
+| DELETE 완료 재호출·오래된 INDEX 저장 | 멱등 완료 및 실행권 거절 |
 
-Listener까지 `DataAccessException`이 전파되면 Worker는 해당 batch를 ACK하지 않고 NACK 경로로 연결합니다. 이때 이미 DB에서 성공한 다른 Job도 같은 batch 범위에서 다시 전달될 수 있으므로 terminal status와 UPSERT가 재실행 결과를 흡수합니다.
+일반 테스트와 실제 PostgreSQL 통합 테스트를 구분합니다. SQL 경쟁·롤백 검증은
+전용 DB에 공용 스키마와 [큐 계약](sql/DB_JOB_QUEUE_CONTRACT.sql)을 적용한 뒤 실행해야 합니다.
+이 문서는 운영 DB 적용이나 통합 테스트 실행 완료를 의미하지 않습니다.
 
-NACK index, delay, Future barrier와 예상하지 못한 비-DB exception이 listener/container에 미치는 영향은 [Processing Model](PROCESSING_MODEL.md)에서 설명합니다. 이 문서에서는 이후 redelivery가 발생했을 때의 상태 수렴만 복구 보장으로 다룹니다.
+메트릭: `indexing_db_wait_total`, `indexing_inline_retry_total`,
+`indexing_job_failed_total{errorCode}`, `indexing_job_duration_seconds{phase=total}`,
+`parse_timeout_total`.
 
-#### 4.4.3 DB health gate
-
-`DbHealthGate`는 기본 5초마다 `SELECT 1`을 실행합니다.
-
-- DB unhealthy, container running, pause 미요청: listener container `pause()` 요청
-- DB healthy, pause 요청 상태: `resume()`
-
-Spring Kafka의 paused container는 새 record 전달을 중단하면서 consumer poll/heartbeat를 유지해 불필요한 rebalance를 피하는 방향으로 동작합니다. 이미 실행 중인 batch를 중단하거나 rollback시키는 기능은 아닙니다. NACK과 health gate는 별도 메커니즘이며, scheduler가 DB 장애를 먼저 또는 나중에 감지할 수 있습니다.
-
-#### 4.4.4 보장 범위와 한계
-
-- listener까지 도달한 `DataAccessException`은 ACK하지 않고 batch NACK합니다.
-- DB outage 동안 health gate가 추가 record delivery를 pause하고 복구 후 resume할 수 있습니다.
-- batch NACK 때문에 성공 record도 재전달될 수 있으나 Job status가 반복 처리를 줄입니다.
-
-### 4.5 Partial Write와 재처리
-
-#### 4.5.1 Publication 전 처리
-
-download, parsing, chunking, embedding 결과는 publication 전까지 파일 또는 메모리에 있습니다. embedding을 여러 request로 나누더라도 각 request 성공 직후 chunk row를 insert하지 않습니다. 따라서 embedding 중 crash는 DB의 부분 chunk set보다 external 호출 중복 문제를 만듭니다.
-
-#### 4.5.2 Publication 원자성
-
-성공 publication은 chunk 결과, version 완료 정보, searchable version 조건부 승격과 Job `COMPLETED`를 하나의 DB transaction으로 확정합니다. 따라서 commit 전에 SQL 또는 검증이 실패하면 해당 publication 범위는 함께 rollback되는 구조입니다.
-
-재처리 시 chunk는 `(document_version_id, chunk_no)` 기준 UPSERT되고 trailing chunk를 제거해 같은 document version의 결과를 현재 attempt의 chunk set으로 수렴시킵니다.
-
-publication transaction의 정확한 write 순서와 데이터 모델은 [Worker Architecture](ARCHITECTURE.md)에서 설명합니다.
-
-#### 4.5.3 Schema dependency
-
-UPSERT는 DB의 `(document_version_id, chunk_no)` unique constraint를 전제로 합니다. Worker의 재처리 수렴은 이 schema 계약과 publication transaction에 의존합니다.
-
-#### 4.5.4 DB 성공 후 Kafka offset commit 전 장애
-
-publication transaction이 성공하면 Job은 `COMPLETED`입니다. 이후 Worker가 `INDEXING_JOB_COMPLETED` 로그 또는 batch ACK 전에 죽어도 동일 Kafka record가 재전달될 수 있습니다. 새 Worker는 같은 event/source identity를 조회하지만 `start()`가 terminal status를 획득하지 못하므로 validation/download/embedding/publication을 수행하지 않습니다. listener가 다른 record까지 처리한 후 다시 ACK합니다.
-
-이 경로는 DB/Kafka atomic transaction을 만들지 않습니다. 대신 redelivery를 허용하고 DB terminal status로 중복 publication을 피하는 at-least-once 대응입니다.
-
-#### 4.5.5 동시 처리 한계
-
-`start()`는 `PROCESSING`도 획득할 수 있고 lease/fencing token을 확인하지 않습니다. rebalance 중 이전 Worker가 아직 실행되는 등의 상황에서는 두 attempt가 겹칠 수 있습니다.
-
-- chunk는 UPSERT로 수렴합니다.
-- failure 기록은 현재 status가 `PROCESSING`일 때만 적용되어 늦은 실패가 `COMPLETED`를 덮지 못합니다.
-- completion update에는 이전 status/worker guard가 없습니다. 늦은 성공은 `FAILED`를 다시 `COMPLETED`로 바꿀 수 있습니다.
-- external embedding 호출은 중복될 수 있습니다.
-
-특히 document deletion이 active Job을 `FAILED(DOCUMENT_DELETED)`로 바꿔도 이미 실행 중인 attempt를 취소하지 않습니다. 늦은 publication이 `COMPLETED`를 쓸 수 있으며, searchable version promotion의 deleted guard와 주기적 deletion sweep이 chunk 노출/잔존을 다시 수렴시키는 보조 장치입니다. 단일 실행권 보장은 아닙니다.
-
-## 5. Job State Machine
-
-| 상태 | 장애 복구 관점의 의미 |
-|---|---|
-| `PENDING` | Job identity는 영속화됐지만 Worker attempt를 아직 획득하지 않았습니다. 같은 record로 재획득 가능합니다. |
-| `PROCESSING` | 마지막 `worker_id`가 획득했고 attempt budget을 하나 소비했습니다. crash redelivery에서 다시 획득할 수 있습니다. |
-| `RETRY_WAIT` | retryable failure와 다음 retry 시각이 commit됐습니다. 같은 listener가 기다리거나 redelivery Worker가 남은 시간을 기다립니다. |
-| `COMPLETED` | publication transaction이 완료됐습니다. 동일 source event/record의 pipeline 재실행 대상이 아닙니다. |
-| `FAILED` | permanent failure, retry 상한, crash 재획득 상한, 또는 deletion으로 종결됐습니다. 동일 source event/record의 자동 재실행 대상이 아닙니다. |
-
-`COMPLETED`와 `FAILED`는 `start()` 관점에서는 terminal입니다. 하지만 completion SQL 자체는 status guard가 없으므로 이미 실행 중인 성공 attempt가 `FAILED`를 `COMPLETED`로 바꾸는 전이는 실제로 가능합니다.
-
-## 6. 장애 간 상호작용
-
-### 6.1 Batch 일부 성공 + 다른 Job block + Worker crash
-
-DB에는 `COMPLETED`와 `PROCESSING`이 공존합니다. ACK는 batch 전체 Future가 끝나지 않아 발생하지 않습니다. redelivery에서 completed Job은 skip되고 processing Job만 재획득됩니다. 이것이 batch ACK와 Job 단위 durable state를 함께 쓰는 핵심 이유입니다.
-
-### 6.2 Retry wait + Worker crash
-
-`RETRY_WAIT`이 먼저 commit되고 record는 uncommitted입니다. 새 Worker가 같은 record를 받으면 남은 backoff를 DB 시각으로 계산해 기다립니다. retry 횟수는 보존되지만 crash가 `start()` 이후 발생했다면 추가 attempt가 소비됩니다.
-
-### 6.3 DB outage + batch 내 이미 성공한 Job
-
-한 group의 escaped `DataAccessException` 때문에 index 0 NACK이 호출됩니다. 다른 group이 이미 성공했더라도 다시 전달될 수 있습니다. terminal skip은 재처리 비용을 줄이지만 Kafka lag과 duplicate delivery 자체를 제거하지 않습니다.
-
-### 6.4 Provider 장기 장애 + poll interval
-
-SDK 내부 retry, Worker attempt, 선형 sleep이 중첩되는 동안 listener callback이 반환되지 않습니다. heartbeat와 별개로 15분 poll interval을 초과하면 rebalance가 발생할 수 있고, 새 Worker가 동일 `PROCESSING`/`RETRY_WAIT` Job을 다시 획득해 동시에 또는 연속으로 provider를 호출할 수 있습니다.
-
-### 6.5 성공 commit + ACK gap
-
-DB success와 Kafka offset commit 사이의 window는 존재합니다. 이 경우 Kafka는 record를 다시 전달할 수 있지만, Worker는 `COMPLETED` status와 동일 record identity를 보고 skip합니다. 이 안전성은 source event unique 제약과 Job row의 영속성에 의존합니다.
-
-## 7. Failure Guarantees & Boundaries
-
-- Kafka 처리는 **at-least-once**이며 exactly-once 실행을 보장하지 않습니다.
-- ACK 또는 offset commit 전에 장애가 발생하면 이미 완료된 record도 다시 전달될 수 있으며, terminal Job 상태와 멱등 write로 결과를 수렴시킵니다.
-- DB에 상태를 기록할 수 없는 장애는 Job 상태 전이만으로 복구할 수 없으므로 Kafka NACK과 redelivery 경로에 의존합니다.
-- 외부 서비스의 지속적인 장애나 영구 오류는 무한 재시도하지 않고 retry 상한 또는 permanent failure 분류에 따라 `FAILED`로 종결됩니다.
-
-## 8. 관련 문서
-
-- [README](../README.md)
-- [Worker Architecture](ARCHITECTURE.md): Worker의 책임과 경계, 데이터 모델, transaction boundary와 architecture decision
-- [Processing Model](PROCESSING_MODEL.md): Kafka consumer, batch, partition, executor, ACK/NACK와 consumer liveness
-- [Code Conventions](CODE_CONVENTIONS.md): 코드 작성과 검토 규칙
+[아키텍처](ARCHITECTURE.md) · [처리 모델](PROCESSING_MODEL.md)

@@ -49,12 +49,6 @@ class IndexingJobEntity(
     var completedAt: Instant?,
     @Column(name = "updated_at", nullable = false)
     var updatedAt: Instant,
-    @Column(name = "kafka_topic", nullable = false)
-    var kafkaTopic: String,
-    @Column(name = "kafka_partition", nullable = false)
-    var kafkaPartition: Int,
-    @Column(name = "kafka_offset", nullable = false)
-    var kafkaOffset: Long,
     @Enumerated(EnumType.STRING)
     @Column(name = "job_type", nullable = false)
     var jobType: IndexingJobType = IndexingJobType.INDEX,
