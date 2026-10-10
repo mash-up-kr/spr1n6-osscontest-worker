@@ -1,6 +1,7 @@
 package com.osscontest.worker.indexing.publication.entity
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
+import com.osscontest.worker.indexing.pipeline.domain.IndexingJobType
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.EnumType
@@ -53,4 +54,16 @@ class IndexingJobEntity(
     var kafkaPartition: Int,
     @Column(name = "kafka_offset", nullable = false)
     var kafkaOffset: Long,
+    @Enumerated(EnumType.STRING)
+    @Column(name = "job_type", nullable = false)
+    var jobType: IndexingJobType = IndexingJobType.INDEX,
+    // 등록 순서는 DB 시퀀스가 INSERT 시점에 부여하므로 애플리케이션에서 쓰지 않는다.
+    @Column(name = "enqueue_seq", insertable = false, updatable = false)
+    var enqueueSeq: Long? = null,
+    @Column(name = "execution_epoch")
+    var executionEpoch: Long? = null,
+    @Column(name = "lease_until")
+    var leaseUntil: LocalDateTime? = null,
+    @Column(name = "outcome")
+    var outcome: String? = null,
 )
