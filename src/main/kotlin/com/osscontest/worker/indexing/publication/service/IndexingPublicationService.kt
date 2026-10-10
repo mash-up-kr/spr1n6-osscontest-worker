@@ -1,7 +1,9 @@
 package com.osscontest.worker.indexing.publication.service
 
+import com.osscontest.worker.indexing.deletion.service.DocumentDeletionService
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
+import com.osscontest.worker.indexing.pipeline.domain.JobOutcome
 import com.osscontest.worker.indexing.queue.JobOwnershipGuard
 import com.osscontest.worker.indexing.queue.LeaseExpiredException
 import com.osscontest.worker.indexing.publication.domain.DocumentChunk
@@ -21,6 +23,7 @@ class IndexingPublicationService(
     private val documentRepository: DocumentRepository,
     private val indexingJobRepository: IndexingJobRepository,
     private val ownership: JobOwnershipGuard,
+    private val deletion: DocumentDeletionService,
 ) {
     /**
      * 외부 임베딩 호출은 이 트랜잭션 밖에서 끝난다. 이 메서드는 성공 결과를
@@ -38,7 +41,11 @@ class IndexingPublicationService(
         check(job.documentId == context.documentId && job.documentVersionId == context.documentVersionId)
         val document = documentRepository.findByIdForUpdate(context.documentId)
             ?: error("Document ${context.documentId} does not exist")
-        check(document.deletedAt == null) { "Cannot save results for a deleted document" }
+        if (document.deletedAt != null) {
+            // 삭제된 문서의 결과는 저장하지 않고 Job을 SKIPPED로 종결한다. 문서 행은 이미 잠겨 있다.
+            check(deletion.skipIndexForDeletedDocument(context.executionToken)) { "Deleted document must be skipped" }
+            return IndexingJobStatus.COMPLETED
+        }
         check(documentChunks.isNotEmpty()) { "At least one document chunk is required" }
         check(documentChunks.all { it.documentId == context.documentId }) {
             "Every chunk must belong to document ${context.documentId}"
@@ -70,7 +77,7 @@ class IndexingPublicationService(
         check(documentRepository.promoteSearchableVersion(context.documentId, context.documentVersionId) == 1) {
             "Document version cannot be promoted"
         }
-        if (indexingJobRepository.complete(context.jobId, context.executionToken.workerId, context.executionToken.epoch) != 1) {
+        if (indexingJobRepository.complete(context.jobId, context.executionToken.workerId, context.executionToken.epoch, JobOutcome.INDEXED) != 1) {
             throw LeaseExpiredException()
         }
         return IndexingJobStatus.COMPLETED

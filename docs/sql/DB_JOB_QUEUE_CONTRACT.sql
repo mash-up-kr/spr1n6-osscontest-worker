@@ -2,10 +2,12 @@
 -- Stop legacy unfenced Workers before deploying this contract and the DB queue Worker.
 BEGIN;
 
+-- outcome: 완료 사유(INDEXED / DELETED / SKIPPED_DOCUMENT_DELETED 등). 값이 늘 수 있어 CHECK 제약을 두지 않는다.
 ALTER TABLE indexing_job
     ADD COLUMN execution_epoch BIGINT NOT NULL DEFAULT 0,
     ADD COLUMN lease_until TIMESTAMPTZ,
     ADD COLUMN job_type VARCHAR(20) NOT NULL DEFAULT 'INDEX',
+    ADD COLUMN outcome VARCHAR(40),
     ALTER COLUMN document_version_id DROP NOT NULL,
     DROP COLUMN kafka_topic,
     DROP COLUMN kafka_partition,
@@ -50,6 +52,9 @@ CREATE FUNCTION recover_expired_indexing_jobs() RETURNS BIGINT LANGUAGE SQL AS $
 $$;
 
 COMMIT;
+
+-- 이 파일을 outcome 추가 전에 이미 적용한 DB에는 아래를 별도로 한 번 실행한다.
+-- ALTER TABLE indexing_job ADD COLUMN outcome VARCHAR(40);
 
 -- Producer contract (Server/Relay scope): enqueue INDEX/DELETE Jobs durably in the
 -- document mutation transaction, ordered by indexing_job.id for each document.

@@ -85,9 +85,12 @@ claim은 UPDATE 전에 예정 토큰을 기록하고 복구 후 해당 claim이 
 ## 삭제와 버전 보호
 
 삭제는 DELETE Job에서 청크 삭제와 Job 완료를 원자적으로 처리합니다.
-INDEX 결과 저장은 문서 잠금 후 삭제 상태를 확인하며 삭제된 문서에 청크를 다시 만들지 않습니다.
+삭제된 문서의 INDEX Job은 오류가 아니라 정상 종결로 처리합니다. 실행 전 확인, 결과 저장 시점,
+회수 루프 세 경로 모두 `COMPLETED` + `outcome = SKIPPED_DOCUMENT_DELETED`로 끝나며 청크를 다시 만들지 않고 재시도하지 않습니다.
+완료 사유는 `outcome`에 기록합니다(`INDEXED`, `DELETED`, `SKIPPED_DOCUMENT_DELETED`).
 `execution_epoch` fencing과 검색 버전 `version_no` 역행 방지는 서로 다른 조건입니다.
-Server의 과거 버전 재시도 제한은 외부 의존성이며 Worker도 부적합한 INDEX를 회수 루프에서 종결합니다.
+Server의 과거 버전 재시도 제한은 외부 의존성이며, Worker는 문서-버전 불일치와 과거 버전 INDEX를
+회수 루프에서 `FAILED` / `DOCUMENT_INELIGIBLE`로 종결합니다.
 
 ## 검증
 

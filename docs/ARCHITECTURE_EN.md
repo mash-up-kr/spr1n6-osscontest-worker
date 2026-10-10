@@ -36,7 +36,7 @@ flowchart TD
 | `IndexingPipelineRunner` | Validate claimed Job data, dispatch INDEX/DELETE, retry general failures |
 | `IndexingAttemptProcessor` | Download, verify hash, parse/chunk, record fenced phases |
 | `IndexingPublicationService` | Guard ownership and save complete results atomically |
-| `DocumentDeletionService` | Check deleted document, delete chunks and complete DELETE Job atomically |
+| `DocumentDeletionService` | Check deleted document, delete chunks and complete DELETE Job atomically; complete INDEX Jobs of deleted documents as `SKIPPED_DOCUMENT_DELETED` |
 
 ## Database contract
 

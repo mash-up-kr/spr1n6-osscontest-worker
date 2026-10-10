@@ -81,10 +81,13 @@ are permanent errors. The default budget is five attempts. DB waits and probes d
 
 ## Deletion and version safety
 
-A DELETE Job atomically removes chunks and completes. INDEX publication locks the document and checks
-deletion state, preventing new chunks for deleted documents. Execution-epoch fencing and document
-`version_no` pointer regression protection serve different purposes. Server restrictions on historical
-retries remain an external dependency; the Worker also terminates ineligible INDEX Jobs during recovery.
+A DELETE Job atomically removes chunks and completes. An INDEX Job for a deleted document is a normal
+termination, not an error: the pre-execution check, result publication, and the recovery loop all end it as
+`COMPLETED` with `outcome = SKIPPED_DOCUMENT_DELETED`, without creating chunks or retrying. The completion
+reason is recorded in `outcome` (`INDEXED`, `DELETED`, `SKIPPED_DOCUMENT_DELETED`). Execution-epoch fencing
+and document `version_no` pointer regression protection serve different purposes. Server restrictions on
+historical retries remain an external dependency; the Worker terminates document/version mismatches and
+stale-version INDEX Jobs during recovery as `FAILED` / `DOCUMENT_INELIGIBLE`.
 
 ## Validation
 

@@ -65,7 +65,14 @@ class IndexingPipelineRunner(
                                 InvalidJobException("DOCUMENT_NOT_FOUND", "Document not found")
                             }
                         }
-                        if (document.deletedAt != null) throw InvalidJobException("DOCUMENT_DELETED", "Document deleted")
+                        // 위 조회는 잠금이 없어서 삭제로 보여도 확정이 아니다. 잠금 후 재확인에서 false가 오면 정상 처리를 이어간다.
+                        if (document.deletedAt != null &&
+                            execution.database(job.token, allowCompleted = true) { deletion.skipIndexForDeletedDocument(job.token) }
+                        ) {
+                            log.info("INDEXING_JOB_SKIPPED jobId={} reason=DOCUMENT_DELETED workerId={} epoch={}",
+                                job.token.jobId, job.token.workerId, job.token.epoch)
+                            return
+                        }
                         val documentVersionId = job.documentVersionId
                             ?: throw InvalidJobException("MISSING_DOCUMENT_VERSION_ID", "Missing version")
                         val version = execution.database(job.token) {

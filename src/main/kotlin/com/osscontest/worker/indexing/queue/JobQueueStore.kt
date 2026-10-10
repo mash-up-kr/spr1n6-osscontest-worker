@@ -1,6 +1,7 @@
 package com.osscontest.worker.indexing.queue
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
+import com.osscontest.worker.indexing.pipeline.domain.JobOutcome
 import org.springframework.jdbc.core.RowMapper
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
@@ -119,6 +120,28 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
     fun recover(maxAttempts: Int): Long {
         val recovered = checkNotNull(jdbc.queryForObject("SELECT recover_expired_indexing_jobs()",
             emptyMap<String, Any>(), Long::class.java))
+        // 삭제된 문서는 시도 횟수와 무관하게 정상 종결해야 하므로 시도 횟수 초과 처리보다 먼저 실행한다.
+        completeDeletedDocumentJobs()
+        failExhaustedJobs(maxAttempts)
+        failIneligibleJobs()
+        return recovered
+    }
+
+    /** 삭제된 문서의 미종결 INDEX Job을 오류가 아닌 정상 종결(SKIPPED)로 정리해 후속 DELETE Job이 막히지 않게 한다. */
+    private fun completeDeletedDocumentJobs() {
+        // worker_id를 비우고 epoch를 올려 실행 중인 Worker의 실행권을 무효화한다. outcome 값은 상수라 문자열 보간이 안전하다.
+        jdbc.update(
+            """
+            UPDATE indexing_job j SET status = 'COMPLETED', outcome = '${JobOutcome.SKIPPED_DOCUMENT_DELETED}',
+                completed_at = $UTC_NOW, updated_at = $UTC_NOW, next_retry_at = NULL,
+                worker_id = NULL, lease_until = NULL, execution_epoch = execution_epoch + 1
+            WHERE j.job_type = 'INDEX' AND j.status IN ('PENDING','PROCESSING','RETRY_WAIT')
+              AND EXISTS (SELECT 1 FROM document d WHERE d.id = j.document_id AND d.deleted_at IS NOT NULL)
+            """.trimIndent(), emptyMap<String, Any>(),
+        )
+    }
+
+    private fun failExhaustedJobs(maxAttempts: Int) {
         jdbc.update(
             """
             UPDATE indexing_job j SET status = 'FAILED', completed_at = $UTC_NOW, updated_at = $UTC_NOW,
@@ -127,7 +150,10 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
             WHERE worker_id IS NULL AND status IN ('PENDING', 'RETRY_WAIT') AND attempt_count >= :maxAttempts
             """.trimIndent(), mapOf("maxAttempts" to maxAttempts),
         )
-        // Reject deleted documents and late historical retries before they can block successors.
+    }
+
+    /** 문서-버전 불일치와 과거 버전 재시도는 비정상 입력이므로 FAILED로 남겨 추적한다. 삭제된 문서는 여기서 다루지 않는다. */
+    private fun failIneligibleJobs() {
         jdbc.update(
             """
             UPDATE indexing_job j SET status = 'FAILED', completed_at = $UTC_NOW, updated_at = $UTC_NOW,
@@ -137,7 +163,7 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
               AND EXISTS (
                 SELECT 1 FROM document d JOIN document_version candidate ON candidate.id = j.document_version_id
                 WHERE d.id = j.document_id AND (
-                    d.deleted_at IS NOT NULL OR candidate.document_id <> d.id OR
+                    candidate.document_id <> d.id OR
                     EXISTS (SELECT 1 FROM document_version searchable
                             WHERE searchable.id = d.searchable_version_id AND searchable.version_no > candidate.version_no) OR
                     EXISTS (SELECT 1 FROM indexing_job prior JOIN document_version v ON v.id = prior.document_version_id
@@ -146,7 +172,6 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
               )
             """.trimIndent(), emptyMap<String, Any>(),
         )
-        return recovered
     }
 
     /** 문서 행을 잠그고 source_event_id가 중복되지 않는 Job을 등록한다. */
