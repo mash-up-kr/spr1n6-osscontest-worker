@@ -330,6 +330,25 @@ class IndexingJobQueueRepositoryIntegrationTest(
     }
 
     @Test
+    fun `한 Worker는 서로 다른 문서의 Job을 여러 개 동시에 claim할 수 있다`() {
+        seedDocument(1)
+        seedVersion(1, 1, 1)
+        seedDocument(2)
+        seedVersion(2, 2, 1)
+        seedDocument(3)
+        seedVersion(3, 3, 1)
+        val jobIds = listOf(seedJob(1, 1), seedJob(2, 2), seedJob(3, 3))
+
+        // 앞선 claim의 처리가 끝나지 않은 상태에서 같은 Worker가 이어서 claim한다.
+        val claimed = jobIds.map { requireNotNull(queueRepository.claim("worker-a", 120)) }
+
+        assertThat(claimed.map { it.context.jobId }).containsExactlyInAnyOrderElementsOf(jobIds)
+        assertThat(claimed.map { it.context.workerId }).containsOnly("worker-a")
+        assertThat(jobIds.map { jobRow(it)["status"] }).containsOnly("PROCESSING")
+        assertThat(queueRepository.claim("worker-a", 120)).isNull()
+    }
+
+    @Test
     fun `claim은 앞선 Job이 RETRY_WAIT이면 같은 문서의 후속 Job을 잡지 않는다`() {
         seedDocument(1)
         seedVersion(1, 1, 1)
