@@ -37,6 +37,6 @@ class FakeIndexingProcessor(
         if (callCount <= failuresBeforeSuccess) {
             throw RuntimeException("simulated processing failure (call $callCount)")
         }
-        indexingJobRepository?.complete(context.jobId)
+        indexingJobRepository?.complete(context.jobId, context.executionToken.workerId, context.executionToken.epoch)
     }
 }

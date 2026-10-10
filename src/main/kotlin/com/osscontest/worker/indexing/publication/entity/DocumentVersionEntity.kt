@@ -23,8 +23,6 @@ class DocumentVersionEntity(
     var mimeType: String,
     @Column(name = "content_hash", nullable = false)
     var contentHash: String,
-    @Column(name = "embedding_version_no", nullable = false)
-    var embeddingVersionNo: Long,
     @Column(name = "file_size", nullable = false)
     var fileSize: Long = 0,
     @Column(name = "chunk_count")

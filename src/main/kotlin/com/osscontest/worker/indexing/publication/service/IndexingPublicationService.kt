@@ -2,6 +2,8 @@ package com.osscontest.worker.indexing.publication.service
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
+import com.osscontest.worker.indexing.queue.JobOwnershipGuard
+import com.osscontest.worker.indexing.queue.LeaseExpiredException
 import com.osscontest.worker.indexing.publication.domain.DocumentChunk
 import com.osscontest.worker.indexing.publication.repository.DocumentChunkRepository
 import com.osscontest.worker.indexing.publication.repository.DocumentChunkWriter
@@ -18,6 +20,7 @@ class IndexingPublicationService(
     private val documentVersionRepository: DocumentVersionRepository,
     private val documentRepository: DocumentRepository,
     private val indexingJobRepository: IndexingJobRepository,
+    private val ownership: JobOwnershipGuard,
 ) {
     /**
      * 외부 임베딩 호출은 이 트랜잭션 밖에서 끝난다. 이 메서드는 성공 결과를
@@ -28,6 +31,14 @@ class IndexingPublicationService(
         context: IndexingContext,
         documentChunks: List<DocumentChunk>,
     ): IndexingJobStatus {
+        check(context.executionToken.jobId == context.jobId)
+        val job = ownership.lock(context.executionToken)
+        if (job.status == IndexingJobStatus.COMPLETED) return IndexingJobStatus.COMPLETED
+        ownership.requireProcessing(job, context.executionToken)
+        check(job.documentId == context.documentId && job.documentVersionId == context.documentVersionId)
+        val document = documentRepository.findByIdForUpdate(context.documentId)
+            ?: error("Document ${context.documentId} does not exist")
+        check(document.deletedAt == null) { "Cannot save results for a deleted document" }
         check(documentChunks.isNotEmpty()) { "At least one document chunk is required" }
         check(documentChunks.all { it.documentId == context.documentId }) {
             "Every chunk must belong to document ${context.documentId}"
@@ -56,12 +67,11 @@ class IndexingPublicationService(
             "Document version ${context.documentVersionId} could not be completed"
         }
 
-        // 0은 이전 버전이거나 문서가 삭제된 경우다. 청크 저장 자체는 성공했으므로
-        // STALE 상태를 만들지 않고 Job을 COMPLETED로 종결한다.
-        documentRepository.promoteSearchableVersion(context.documentId, context.documentVersionId)
-
-        check(indexingJobRepository.complete(context.jobId) == 1) {
-            "Indexing job ${context.jobId} could not be completed"
+        check(documentRepository.promoteSearchableVersion(context.documentId, context.documentVersionId) == 1) {
+            "Document version cannot be promoted"
+        }
+        if (indexingJobRepository.complete(context.jobId, context.executionToken.workerId, context.executionToken.epoch) != 1) {
+            throw LeaseExpiredException()
         }
         return IndexingJobStatus.COMPLETED
     }

@@ -8,6 +8,9 @@ import com.osscontest.worker.indexing.publication.service.IndexingPublicationSer
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.assertj.core.api.Assertions.assertThat
+import com.osscontest.worker.indexing.queue.ExternalApiOperations
+import com.osscontest.worker.support.directExecution
+import com.osscontest.worker.support.testToken
 import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
@@ -21,6 +24,9 @@ import java.time.ZoneOffset
 class EmbeddingIndexingProcessorTest {
     private val embeddingUseCase: EmbeddingUseCase = mock()
     private val publicationService: IndexingPublicationService = mock()
+    private val externalApi: ExternalApiOperations = mock<ExternalApiOperations>().apply {
+        whenever(execute<Any?>(any(), any())).thenAnswer { it.getArgument<() -> Any?>(1)() }
+    }
     private val processor =
         EmbeddingIndexingProcessor(
             embeddingUseCase = embeddingUseCase,
@@ -28,6 +34,8 @@ class EmbeddingIndexingProcessorTest {
             noriTokenizer = NoriTokenizer(),
             clock = Clock.fixed(Instant.parse("2026-08-19T00:00:00Z"), ZoneOffset.UTC),
             maxTokensPerRequest = 250,
+            externalApi = externalApi,
+            execution = directExecution(),
         )
 
     @Test
@@ -77,6 +85,7 @@ class EmbeddingIndexingProcessorTest {
             documentVersionId = 3L,
             versionNo = 1L,
             extractedMetadata = null,
+            executionToken = testToken,
         )
 
     private fun chunk(no: Int) = chunkWithTokens(no, tokens = 1)

@@ -4,6 +4,8 @@ import com.osscontest.worker.indexing.chunking.domain.Chunk
 import com.osscontest.worker.indexing.embedding.usecase.EmbeddingUseCase
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
 import com.osscontest.worker.indexing.pipeline.service.IndexingProcessor
+import com.osscontest.worker.indexing.queue.ExternalApiOperations
+import com.osscontest.worker.indexing.queue.ExecutionOperations
 import com.osscontest.worker.indexing.publication.domain.DocumentChunk
 import com.osscontest.worker.indexing.publication.service.IndexingPublicationService
 import org.slf4j.LoggerFactory
@@ -21,6 +23,8 @@ class EmbeddingIndexingProcessor(
     // OpenAI 임베딩 API는 요청 1건당 최대 300,000 토큰까지만 허용한다.
     @Value("\${indexing.embedding.max-tokens-per-request:300000}")
     private val maxTokensPerRequest: Int = 300_000,
+    private val externalApi: ExternalApiOperations,
+    private val execution: ExecutionOperations,
 ) : IndexingProcessor {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -40,7 +44,7 @@ class EmbeddingIndexingProcessor(
                 chunks.size,
             )
             validateChunks(chunks)
-            val embeddings = embedInBatches(chunks)
+            val embeddings = embedInBatches(context, chunks)
             validateEmbeddings(chunks, embeddings)
             log.info(
                 "indexing processor stage completed: stage=EMBEDDING jobId={} embeddingCount={} " +
@@ -71,7 +75,9 @@ class EmbeddingIndexingProcessor(
                 context.documentVersionId,
                 documentChunks.size,
             )
-            val status = indexingPublicationService.publish(context, documentChunks)
+            val status = execution.database(context.executionToken, allowCompleted = true) {
+                indexingPublicationService.publish(context, documentChunks)
+            }
             log.info(
                 "indexing processor stage completed: stage=PUBLISHING jobId={} status={} chunkCount={} durationMs={}",
                 context.jobId,
@@ -98,7 +104,7 @@ class EmbeddingIndexingProcessor(
     // 청크 순서를 보존하면서, 누적 토큰이 상한을 넘기 직전까지 한 배치로 묶어 순차적으로 embed한다.
     // 청크 하나가 그 자체로 상한을 넘더라도(비정상 설정 등) 자신만 담은 배치로 보내
     // 무한정 쌓이거나 유실되지 않게 한다.
-    private fun embedInBatches(chunks: List<Chunk>): List<FloatArray> {
+    private fun embedInBatches(context: IndexingContext, chunks: List<Chunk>): List<FloatArray> {
         val batches = mutableListOf<List<Chunk>>()
         var currentBatch = mutableListOf<Chunk>()
         var currentTokens = 0
@@ -114,7 +120,9 @@ class EmbeddingIndexingProcessor(
         if (currentBatch.isNotEmpty()) {
             batches.add(currentBatch)
         }
-        return batches.flatMap { batch -> embeddingUseCase.embed(batch.map(Chunk::content)) }
+        return batches.flatMap { batch ->
+            externalApi.execute(context.executionToken) { embeddingUseCase.embed(batch.map(Chunk::content)) }
+        }
     }
 
     private fun validateChunks(chunks: List<Chunk>) {

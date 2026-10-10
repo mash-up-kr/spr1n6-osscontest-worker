@@ -1,6 +1,8 @@
 package com.osscontest.worker.indexing.consumer
 
-import com.osscontest.worker.indexing.deletion.service.DocumentDeletionService
+import com.osscontest.worker.indexing.queue.DatabaseOperations
+import com.osscontest.worker.indexing.queue.JobQueueStore
+import com.osscontest.worker.indexing.queue.JobType
 import com.osscontest.worker.indexing.publication.repository.DocumentRepository
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -21,7 +23,8 @@ import org.springframework.stereotype.Component
 class DocumentDeletionHandler
     @Autowired
     constructor(
-        private val documentDeletionService: DocumentDeletionService,
+        private val store: JobQueueStore,
+        private val database: DatabaseOperations,
         private val documentRepository: DocumentRepository,
         @Value("\${indexing.consumer.supported-schema-versions:1}")
         supportedSchemaVersions: List<String> = listOf("1"),
@@ -31,10 +34,11 @@ class DocumentDeletionHandler
 
     // 단위 테스트에서 Spring 문자열 바인딩 없이 지원 버전을 전달한다.
     constructor(
-        documentDeletionService: DocumentDeletionService,
+        store: JobQueueStore,
+        database: DatabaseOperations,
         documentRepository: DocumentRepository,
         supportedSchemaVersions: Set<Int>,
-    ) : this(documentDeletionService, documentRepository, supportedSchemaVersions.map(Int::toString))
+    ) : this(store, database, documentRepository, supportedSchemaVersions.map(Int::toString))
 
     fun handle(event: IndexingEvent) {
         val startedAt = System.nanoTime()
@@ -46,7 +50,7 @@ class DocumentDeletionHandler
         }
 
         val document =
-            documentRepository.findById(event.documentId).orElseThrow {
+            database.execute { documentRepository.findById(event.documentId) }.orElseThrow {
                 InvalidEventException("DOCUMENT_NOT_FOUND", "document ${event.documentId} does not exist")
             }
         if (document.tenantId != event.tenantId) {
@@ -61,7 +65,7 @@ class DocumentDeletionHandler
             event.eventId,
             event.documentId,
         )
-        documentDeletionService.handleDocumentDeleted(event.documentId)
+        database.execute { store.enqueue(event.eventId, event.documentId, null, JobType.DELETE, event.traceId) }
         log.info(
             "document deletion completed: eventId={} documentId={} durationMs={}",
             event.eventId,

@@ -51,7 +51,6 @@ class IndexingEventValidatorTest {
                         sourceObjectKey = "docs/42/v1.pdf",
                         mimeType = "application/pdf",
                         contentHash = "sha256:abc",
-                        embeddingVersionNo = 3L,
                     ),
                 ),
             )

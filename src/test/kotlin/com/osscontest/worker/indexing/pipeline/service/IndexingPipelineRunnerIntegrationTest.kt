@@ -1,5 +1,6 @@
 package com.osscontest.worker.indexing.pipeline.service
 
+import com.osscontest.worker.indexing.queue.JobQueueStore
 import com.osscontest.worker.indexing.consumer.IndexingEvent
 import com.osscontest.worker.indexing.consumer.KafkaRecordIdentity
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
@@ -32,6 +33,8 @@ import java.util.UUID
 @SpringBootTest(
     properties = [
         "spring.kafka.listener.auto-startup=false",
+        "indexing.queue.enabled=false",
+        "indexing.database.check-interval=PT0.01S",
         "indexing.retry.base-delay=PT0.01S",
     ],
 )
@@ -42,6 +45,7 @@ class IndexingPipelineRunnerIntegrationTest(
     private val indexingJobRepository: IndexingJobRepository,
     private val fakeIndexingProcessor: FakeIndexingProcessor,
     private val jdbcTemplate: JdbcTemplate,
+    private val queue: JobQueueStore,
 ) {
     // 실제 임베딩 공급자 대신 실패 횟수와 Job 완료를 제어할 수 있는 테스트 대역을 사용한다.
     @TestConfiguration
@@ -104,6 +108,7 @@ class IndexingPipelineRunnerIntegrationTest(
         fakeIndexingProcessor.failuresBeforeSuccess = 2
 
         pipelineRunner.run(event, recordIdentity(offset = 900001L))
+        pipelineRunner.run(checkNotNull(queue.claim(false, 5) {}))
 
         val job = indexingJobRepository.findBySourceEventId(event.eventId)
         assertThat(job).isNotNull
@@ -136,6 +141,7 @@ class IndexingPipelineRunnerIntegrationTest(
         fakeIndexingProcessor.failuresBeforeSuccess = Int.MAX_VALUE // 계속 실패
 
         pipelineRunner.run(event, recordIdentity(offset = 900002L))
+        pipelineRunner.run(checkNotNull(queue.claim(false, 5) {}))
 
         val job = indexingJobRepository.findBySourceEventId(event.eventId)
         assertThat(job).isNotNull
@@ -167,6 +173,7 @@ class IndexingPipelineRunnerIntegrationTest(
         val event = sampleEvent(documentId = 900003L, documentVersionId = 900003L)
 
         pipelineRunner.run(event, recordIdentity(offset = 900003L))
+        pipelineRunner.run(checkNotNull(queue.claim(false, 5) {}))
 
         val job = indexingJobRepository.findBySourceEventId(event.eventId)
         assertThat(job).isNotNull

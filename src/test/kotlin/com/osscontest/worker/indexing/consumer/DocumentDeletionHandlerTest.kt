@@ -1,6 +1,8 @@
 package com.osscontest.worker.indexing.consumer
 
-import com.osscontest.worker.indexing.deletion.service.DocumentDeletionService
+import com.osscontest.worker.indexing.queue.JobQueueStore
+import com.osscontest.worker.indexing.queue.JobType
+import com.osscontest.worker.support.directDatabase
 import com.osscontest.worker.indexing.publication.entity.DocumentEntity
 import com.osscontest.worker.indexing.publication.repository.DocumentRepository
 import org.assertj.core.api.Assertions.assertThat
@@ -15,18 +17,19 @@ import java.util.Optional
 import java.util.UUID
 
 class DocumentDeletionHandlerTest {
-    private val documentDeletionService: DocumentDeletionService = mock()
+    private val store: JobQueueStore = mock()
     private val documentRepository: DocumentRepository = mock()
-    private val handler = DocumentDeletionHandler(documentDeletionService, documentRepository, setOf(1))
+    private val handler = DocumentDeletionHandler(store, directDatabase(), documentRepository, setOf(1))
 
     @Test
     fun `스키마 버전과 테넌트가 모두 맞으면 삭제 서비스에 위임한다`() {
         whenever(documentRepository.findById(42L))
             .thenReturn(Optional.of(DocumentEntity(id = 42L, tenantId = 7L, searchableVersionId = null, deletedAt = null)))
 
-        handler.handle(deletedEvent())
+        val event = deletedEvent()
+        handler.handle(event)
 
-        verify(documentDeletionService).handleDocumentDeleted(42L)
+        verify(store).enqueue(event.eventId, 42L, null, JobType.DELETE, event.traceId)
     }
 
     @Test
@@ -35,7 +38,7 @@ class DocumentDeletionHandlerTest {
             catchInvalidEvent { handler.handle(deletedEvent(schemaVersion = 99)) }
 
         assertThat(thrown.code).isEqualTo("UNSUPPORTED_SCHEMA_VERSION")
-        verify(documentDeletionService, never()).handleDocumentDeleted(any())
+        verify(store, never()).enqueue(any(), any(), org.mockito.kotlin.anyOrNull(), any(), org.mockito.kotlin.anyOrNull(), any(), any(), any())
         // 스키마 검증이 먼저다 — 문서 조회까지 가지 않는다.
         verify(documentRepository, never()).findById(any())
     }
@@ -48,7 +51,7 @@ class DocumentDeletionHandlerTest {
         val thrown = catchInvalidEvent { handler.handle(deletedEvent()) }
 
         assertThat(thrown.code).isEqualTo("TENANT_MISMATCH")
-        verify(documentDeletionService, never()).handleDocumentDeleted(any())
+        verify(store, never()).enqueue(any(), any(), org.mockito.kotlin.anyOrNull(), any(), org.mockito.kotlin.anyOrNull(), any(), any(), any())
     }
 
     @Test
@@ -58,7 +61,7 @@ class DocumentDeletionHandlerTest {
         val thrown = catchInvalidEvent { handler.handle(deletedEvent()) }
 
         assertThat(thrown.code).isEqualTo("DOCUMENT_NOT_FOUND")
-        verify(documentDeletionService, never()).handleDocumentDeleted(any())
+        verify(store, never()).enqueue(any(), any(), org.mockito.kotlin.anyOrNull(), any(), org.mockito.kotlin.anyOrNull(), any(), any(), any())
     }
 
     private fun catchInvalidEvent(block: () -> Unit): InvalidEventException {

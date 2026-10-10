@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.dao.DataAccessException
 import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.kafka.support.Acknowledgment
@@ -19,12 +20,13 @@ import java.util.concurrent.ExecutorService
 // INDEXING_REQUESTED와 DOCUMENT_DELETED가 같은 토픽·같은 파티션(documentId 키)으로 온다.
 // 별도 토픽으로 쪼개면 업로드와 삭제의 순서 보장이 깨진다.
 @Component
+@ConditionalOnProperty(prefix = "indexing.kafka-ingress", name = ["enabled"], havingValue = "true")
 class IndexingKafkaListener(
     private val pipelineRunner: IndexingPipelineRunner,
     private val deletionHandler: DocumentDeletionHandler,
     private val objectMapper: ObjectMapper,
     @Qualifier("indexingBatchExecutor") private val executor: ExecutorService,
-    @Value("\${indexing.db-health-gate.pause-nack-delay:PT5S}")
+    @Value("\${indexing.kafka-ingress.nack-delay:PT5S}")
     private val nackDelay: Duration = Duration.ofSeconds(5),
 ) {
     private val log = LoggerFactory.getLogger(javaClass)

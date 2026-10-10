@@ -1,0 +1,19 @@
+package com.osscontest.worker.support
+
+import com.osscontest.worker.indexing.queue.JobOwnershipGuard
+import com.osscontest.worker.indexing.queue.JobQueueStore
+import com.osscontest.worker.indexing.queue.QueueProperties
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import org.springframework.boot.test.context.TestConfiguration
+import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Import
+
+@TestConfiguration
+@Import(JobOwnershipGuard::class, JobQueueStore::class)
+class QueueIntegrationConfiguration {
+    @Bean
+    fun queueProperties() = QueueProperties(workerId = "integration-worker")
+    @Bean
+    fun meterRegistry(): MeterRegistry = SimpleMeterRegistry()
+}

@@ -9,6 +9,9 @@ import com.osscontest.worker.indexing.fault.IndexingFaultInjector
 import com.osscontest.worker.indexing.parsing.DocumentParserRegistry
 import com.osscontest.worker.indexing.parsing.ParsingTimeoutGuard
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
+import com.osscontest.worker.indexing.queue.ExecutionToken
+import com.osscontest.worker.indexing.queue.ExecutionOperations
+import com.osscontest.worker.indexing.queue.LeaseExpiredException
 import com.osscontest.worker.indexing.publication.entity.DocumentVersionEntity
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
 import com.osscontest.worker.indexing.retrieval.ContentIntegrityException
@@ -32,11 +35,13 @@ internal class IndexingAttemptProcessor(
     private val faultInjector: IndexingFaultInjector,
     private val maxFileSizeBytes: Long,
     private val chunkingStrategy: ChunkingStrategy,
+    private val execution: ExecutionOperations,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
     fun process(
         jobId: Long,
+        token: ExecutionToken,
         event: IndexingEvent,
         documentVersion: DocumentVersionEntity,
         faultInjectionContext: FaultInjectionContext,
@@ -46,8 +51,6 @@ internal class IndexingAttemptProcessor(
             throw FileTooLargeException(documentVersion.fileSize, maxFileSizeBytes)
         }
 
-        // 이전 버전으로 되돌릴 때도 해당 버전의 청크와 임베딩이 필요하므로 항상 처리한다.
-        // 최신 버전만 검색 대상으로 승격하는 조건은 IndexingProcessor의 DB 갱신이 보장한다.
         onStageStarted("DOWNLOADING")
         val downloadStartedAt = System.nanoTime()
         log.info(
@@ -56,7 +59,8 @@ internal class IndexingAttemptProcessor(
             event.documentId,
             documentVersion.id,
         )
-        indexingJobRepository.updatePhase(jobId, "DOWNLOADING")
+        updatePhase(token, "DOWNLOADING")
+        execution.checkpoint(token)
         val tempFile = downloadClient.download(documentVersion.sourceObjectKey)
         log.info(
             "indexing stage completed: stage=DOWNLOADING jobId={} downloadedBytes={} durationMs={}",
@@ -85,7 +89,7 @@ internal class IndexingAttemptProcessor(
                 jobId,
                 documentVersion.mimeType,
             )
-            indexingJobRepository.updatePhase(jobId, "PARSING")
+        updatePhase(token, "PARSING")
             val parser = parserRegistry.findParser(documentVersion.mimeType)
             val blocks = parsingTimeoutGuard.parse(parser, tempFile, documentVersion.mimeType)
             log.info(
@@ -103,7 +107,7 @@ internal class IndexingAttemptProcessor(
                 chunkingStrategy,
                 blocks.size,
             )
-            indexingJobRepository.updatePhase(jobId, "CHUNKING")
+            updatePhase(token, "CHUNKING")
             val chunks = chunkingService.chunk(blocks, chunkingStrategy)
             chunkGuard.assertValid(chunks)
             log.info(
@@ -121,6 +125,7 @@ internal class IndexingAttemptProcessor(
                     documentVersionId = documentVersion.id,
                     versionNo = documentVersion.versionNo,
                     extractedMetadata = null,
+                    executionToken = token,
                 )
 
             onStageStarted("EMBEDDING")
@@ -129,7 +134,7 @@ internal class IndexingAttemptProcessor(
                 jobId,
                 chunks.size,
             )
-            indexingJobRepository.updatePhase(jobId, "EMBEDDING")
+            updatePhase(token, "EMBEDDING")
             faultInjector.blockIfNeeded(
                 documentVersionId = documentVersion.id,
                 phase = "EMBEDDING",
@@ -138,6 +143,15 @@ internal class IndexingAttemptProcessor(
             indexingProcessor.process(context, chunks)
         } finally {
             Files.deleteIfExists(tempFile)
+        }
+    }
+
+    private fun updatePhase(token: ExecutionToken, phase: String) {
+        execution.database(token) {
+            if (indexingJobRepository.updatePhase(token.jobId, phase, token.workerId, token.epoch) != 1) {
+                execution.checkpoint(token)
+                throw LeaseExpiredException()
+            }
         }
     }
 
