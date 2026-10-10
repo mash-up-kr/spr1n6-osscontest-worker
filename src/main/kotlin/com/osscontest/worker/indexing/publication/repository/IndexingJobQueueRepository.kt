@@ -14,7 +14,7 @@ import java.time.LocalDateTime
 /**
  * DB Job 큐의 획득과 실행권 보호 SQL을 모은다.
  *
- * 스키마(document, indexing_job)는 Core 서버가 소유한다. 컬럼 정의는 `docs/db/001_db_queue_schema.sql`을 따른다.
+ * 스키마(document, indexing_job)는 Core 서버가 소유하며, `execution_epoch` 등 신규 컬럼이 적용돼 있어야 동작한다.
  * `RETURNING`으로 갱신된 행을 돌려받아야 해서 Spring Data 대신 JDBC 템플릿을 쓴다.
  * 각 메서드는 SQL 한 문장이라 호출자의 트랜잭션 여부와 관계없이 원자적이다.
  */
@@ -85,12 +85,10 @@ class IndexingJobQueueRepository(
     /**
      * 실행권이 유효한 Job의 실패를 기록하고 lease를 해제한다.
      *
-     * [status]는 `RETRY_WAIT`(이때 [nextRetryAt] 필수) 또는 `FAILED`(이때 [nextRetryAt]은 null)만
-     * 허용한다. 재시도 여부와 시각은 호출자가 정하고, 여기서는 기록만 한다.
-     * [nextRetryAt]은 DB 시계 기준 `LocalDateTime`이어야 한다(예: `IndexingJobRepository.currentDbTimestamp()` 기준으로
-     * 계산한다). JVM 시계를 넘기면 JVM과 DB 세션 시간대가 다를 때 재시도 시각이 어긋난다.
-     * `complete`와 달리 lease 만료는 보지 않고 상태, 소유자, epoch만 확인한다.
-     * 오류 코드와 메시지는 길이 상한에서 잘리며, `completed_at`은 `FAILED`일 때만 기록한다.
+     * [status]는 `RETRY_WAIT`(이때 [nextRetryAt] 필수) 또는 `FAILED`(이때 null)만 허용한다.
+     * 재시도 여부와 시각은 호출자가 정하고, 여기서는 기록만 한다.
+     * [nextRetryAt]은 DB 시계 기준이어야 한다. JVM 시계를 넘기면 시간대가 다를 때 재시도 시각이 어긋난다.
+     * `complete`와 달리 lease 만료는 보지 않는다. 오류 코드와 메시지는 길이 상한에서 잘린다.
      * 0을 돌려주면 실행권을 잃은 것이다.
      */
     fun fail(
@@ -169,7 +167,6 @@ class IndexingJobQueueRepository(
             .addValue("epoch", ctx.epoch)
 
     private companion object {
-        // 실행권 검사: 처리 중이고, 이 Worker가 이 epoch로 잡은 Job이어야 한다.
         const val OWNED_GUARD = """
             id = :jobId
               AND status = 'PROCESSING'
@@ -180,7 +177,7 @@ class IndexingJobQueueRepository(
         // `indexing_job.last_error_code` 컬럼 길이(VARCHAR(100))와 맞춘 값이다.
         const val MAX_ERROR_CODE_LENGTH = 100
 
-        // `last_error_message`는 TEXT라 컬럼 제한은 없고, 과도하게 긴 예외 메시지가 행을 키우지 않도록 상한을 둔다.
+        // `last_error_message`는 TEXT라 컬럼 제한이 없다. 과도하게 긴 예외 메시지가 행을 키우지 않도록 상한을 둔다.
         const val MAX_ERROR_MESSAGE_LENGTH = 1_000
 
         // 후보의 Job 행과 문서 행을 한 번에 SKIP LOCKED로 잠가 기다림 없이 다음 후보로 넘어간다.

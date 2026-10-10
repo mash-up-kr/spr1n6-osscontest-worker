@@ -357,7 +357,6 @@ class IndexingJobQueueRepositoryIntegrationTest(
             "temporary",
         )
 
-        // 재시도 시각이 아직 지나지 않았다.
         assertThat(queueRepository.claim("worker-b", 120)).isNull()
 
         jdbcTemplate.update(
