@@ -17,6 +17,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class DbJobWorkerTest {
+    private fun breakerWith(admission: ClaimAdmission): CircuitBreaker =
+        mock { on { admission() } doReturn admission }
+
     @Test
     fun `활성 슬롯이 차면 추가 claim하지 않는다`() {
         val store: JobQueueStore = mock()
@@ -29,7 +32,7 @@ class DbJobWorkerTest {
         }
         doAnswer { started.countDown(); hold.await(3, TimeUnit.SECONDS); null }.whenever(runner).run(any<ClaimedJob>())
         val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = 2, pollInterval = Duration.ofDays(1)),
-            directDatabase(), store, runner, 5, Duration.ofSeconds(30))
+            directDatabase(), store, breakerWith(ClaimAdmission.NORMAL), runner, 5, Duration.ofSeconds(30))
         try {
             worker.start()
             check(started.await(3, TimeUnit.SECONDS))
@@ -57,7 +60,7 @@ class DbJobWorkerTest {
         val db = DatabaseOperations(JdbcTemplate(DriverManagerDataSource("jdbc:h2:mem:claim-loss", "sa", "")),
             RetryWaiter {}, DatabaseWaitProperties(Duration.ofMillis(1), Duration.ofSeconds(1)), SimpleMeterRegistry())
         val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = 1, pollInterval = Duration.ofDays(1)),
-            db, store, runner, 5, Duration.ofSeconds(30))
+            db, store, breakerWith(ClaimAdmission.NORMAL), runner, 5, Duration.ofSeconds(30))
         try {
             worker.start()
             check(started.await(3, TimeUnit.SECONDS))
@@ -69,6 +72,46 @@ class DbJobWorkerTest {
             hold.countDown()
         }
     }
+
+    @Test
+    fun `breaker가 열려 있으면 claim하지 않는다`() {
+        val store: JobQueueStore = mock()
+        val runner: IndexingPipelineRunner = mock()
+        val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = 2, pollInterval = Duration.ofDays(1)),
+            directDatabase(), store, breakerWith(ClaimAdmission.BLOCKED), runner, 5, Duration.ofSeconds(30))
+        try {
+            worker.start()
+            worker.poll()
+            verify(store, never()).claim(any(), any())
+            verify(store, atLeastOnce()).recover(any(), any())
+        } finally {
+            worker.stop()
+        }
+    }
+
+    @Test
+    fun `시험 호출 자격만 있으면 poll마다 한 건만 claim한다`() {
+        val store: JobQueueStore = mock()
+        val runner: IndexingPipelineRunner = mock()
+        val started = CountDownLatch(1)
+        val hold = CountDownLatch(1)
+        val count = AtomicInteger()
+        whenever(store.claim(any(), any())).thenAnswer {
+            ClaimedJob(testToken.copy(jobId = count.incrementAndGet().toLong()), JobType.INDEX, UUID.randomUUID(), 2, 3, null)
+        }
+        doAnswer { started.countDown(); hold.await(3, TimeUnit.SECONDS); null }.whenever(runner).run(any<ClaimedJob>())
+        val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = 3, pollInterval = Duration.ofDays(1)),
+            directDatabase(), store, breakerWith(ClaimAdmission.LIMITED), runner, 5, Duration.ofSeconds(30))
+        try {
+            worker.start()
+            check(started.await(3, TimeUnit.SECONDS))
+            assertThat(count.get()).describedAs("슬롯이 남아 있어도 한 건만 claim한다").isEqualTo(1)
+        } finally {
+            worker.stop()
+            hold.countDown()
+        }
+    }
+
     @Test
     fun `실패 실행 종료 후 슬롯을 반환해 다음 문서를 처리한다`() {
         val store: JobQueueStore = mock()
@@ -82,7 +125,7 @@ class DbJobWorkerTest {
         doAnswer { firstDone.countDown(); null }.whenever(runner).run(first)
         doAnswer { nextStarted.countDown(); hold.await(3, TimeUnit.SECONDS); null }.whenever(runner).run(next)
         val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = 1,
-            pollInterval = Duration.ofDays(1)), directDatabase(), store, runner, 5, Duration.ofSeconds(30))
+            pollInterval = Duration.ofDays(1)), directDatabase(), store, breakerWith(ClaimAdmission.NORMAL), runner, 5, Duration.ofSeconds(30))
         try {
             worker.start()
             check(firstDone.await(3, TimeUnit.SECONDS))
@@ -117,7 +160,7 @@ class DbJobWorkerTest {
             null
         }.whenever(runner).run(job)
         val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = 1,
-            pollInterval = Duration.ofDays(1)), directDatabase(), store, runner, 5, Duration.ofSeconds(30))
+            pollInterval = Duration.ofDays(1)), directDatabase(), store, breakerWith(ClaimAdmission.NORMAL), runner, 5, Duration.ofSeconds(30))
         try {
             worker.start()
             check(released.await(3, TimeUnit.SECONDS))
@@ -127,5 +170,4 @@ class DbJobWorkerTest {
             assertThat(interrupted.get()).isFalse()
         } finally { finish.countDown(); worker.stop() }
     }
-
 }

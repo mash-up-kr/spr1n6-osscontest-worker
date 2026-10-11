@@ -22,6 +22,7 @@ class DbJobWorker(
     private val properties: QueueProperties,
     private val database: DatabaseOperations,
     private val store: JobQueueStore,
+    private val breaker: CircuitBreaker,
     private val runner: IndexingPipelineRunner,
     @Value("\${indexing.retry.max-attempts:5}") private val maxAttempts: Int,
     @Value("\${indexing.retry.base-delay:PT30S}") private val baseDelay: Duration,
@@ -61,6 +62,16 @@ class DbJobWorker(
     internal fun poll() {
         database.execute { store.recover(maxAttempts, baseDelay) }
         while (running.get() && slots.tryAcquire()) {
+            val admission = try {
+                database.execute { breaker.admission() }
+            } catch (error: Exception) {
+                slots.release()
+                throw error
+            }
+            if (admission == ClaimAdmission.BLOCKED) {
+                slots.release()
+                break
+            }
             val prepared = AtomicReference<ExecutionToken?>()
             val job = try {
                 database.execute {
@@ -96,6 +107,8 @@ class DbJobWorker(
                 slots.release()
                 throw error
             }
+            // 시험 호출을 할 Job이 필요한 것이므로 한 건만 claim하고 다음 poll을 기다린다.
+            if (admission == ClaimAdmission.LIMITED) break
         }
     }
 
