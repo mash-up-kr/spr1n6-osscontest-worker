@@ -83,5 +83,6 @@ Quota exhaustion (429 insufficient_quota) counts as a breaker failure instead of
 A DELETE execution guards ownership, locks the document, and checks that it is deleted.
 Chunk deletion and Job completion share one transaction. Completion under the same token skips
 repeated deletion. There is no separate deletion sweep; producers must durably create DELETE Jobs.
+An INDEX Job for a deleted document ends as `COMPLETED` with `outcome = SKIPPED_DOCUMENT_DELETED`.
 
 [Architecture](ARCHITECTURE_EN.md) · [Failure handling](FAILURE_HANDLING_EN.md)

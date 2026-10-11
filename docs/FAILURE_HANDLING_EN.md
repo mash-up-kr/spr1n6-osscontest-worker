@@ -97,10 +97,18 @@ errors are not treated as permanent together. The default budget is five attempt
 
 ## Deletion and version safety
 
-A DELETE Job atomically removes chunks and completes. INDEX publication locks the document and checks
-deletion state, preventing new chunks for deleted documents. Execution-epoch fencing and document
-`version_no` pointer regression protection serve different purposes. Server restrictions on historical
-retries remain an external dependency; the Worker also terminates ineligible INDEX Jobs during recovery.
+A DELETE Job atomically removes chunks and completes. An INDEX Job for a deleted document is a normal
+termination, not an error: the pre-execution check, result publication, and the recovery loop all end it as
+`COMPLETED` with `outcome = SKIPPED_DOCUMENT_DELETED`, without creating chunks or retrying. The completion
+reason is recorded in `outcome` (`INDEXED`, `DELETED`, `SKIPPED_DOCUMENT_DELETED`).
+
+An INDEX Job left as `FAILED` or `RETRY_WAIT` permanently blocks the DELETE Job for the same document.
+Terminating it as SKIPPED regardless of attempt count lets the DELETE Job proceed. The recovery loop
+(`recover`) runs deleted-document cleanup before attempt-exhaustion and ineligible-job cleanup for this reason.
+
+Execution-epoch fencing and document `version_no` pointer regression protection serve different purposes.
+Server restrictions on historical retries remain an external dependency; the Worker terminates document/version
+mismatches and stale-version INDEX Jobs during recovery as `FAILED` / `DOCUMENT_INELIGIBLE`.
 
 ## Validation
 
@@ -118,6 +126,8 @@ retries remain an external dependency; the Worker also terminates ineligible IND
 | Predecessor retry deadline is in the future | Block successors for the same document; allow other documents |
 | Worker dies during retry | Preserve deadline on recovery; new execution may recompute |
 | DELETE replay or stale INDEX publication | Idempotent completion and ownership rejection |
+| Deleted document detected during indexing (pre-run or at publication) | COMPLETED + SKIPPED_DOCUMENT_DELETED, no chunks written |
+| Expired INDEX Job recovered for a deleted document | COMPLETED + SKIPPED regardless of attempt count, never FAILED |
 | INDEX and DELETE waiting while the breaker is OPEN | Claim DELETE only; INDEX waits |
 | Quota exhaustion (429 insufficient_quota) | Counted as a breaker failure, not a rate-limit retry; once open, wait without consuming attempts |
 

@@ -38,7 +38,7 @@ flowchart TD
 | `IndexingAttemptProcessor` | 파일 다운로드, 해시 검증, 파싱·청킹, fenced phase 기록 |
 | `IndexingFailureService` / `RetryPolicy` | 오류·시도 한도·지터 결정, 실패 상태와 소유권 해제 원자적 반영 |
 | `IndexingPublicationService` | 실행권 검증과 결과 전체의 원자적 저장 |
-| `DocumentDeletionService` | 삭제된 문서 확인, 청크 삭제와 DELETE Job 완료의 원자적 저장 |
+| `DocumentDeletionService` | 삭제된 문서 확인, 청크 삭제와 DELETE Job 완료의 원자적 저장, 삭제된 문서의 INDEX Job을 `SKIPPED_DOCUMENT_DELETED`로 종결 |
 
 ## 데이터 계약
 

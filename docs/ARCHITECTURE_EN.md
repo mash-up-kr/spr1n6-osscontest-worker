@@ -37,7 +37,7 @@ flowchart TD
 | `IndexingAttemptProcessor` | Download, verify hash, parse/chunk, record fenced phases |
 | `IndexingFailureService` / `RetryPolicy` | Classify failure, apply limits/jitter, atomically persist status and release ownership |
 | `IndexingPublicationService` | Guard ownership and save complete results atomically |
-| `DocumentDeletionService` | Check deleted document, delete chunks and complete DELETE Job atomically |
+| `DocumentDeletionService` | Check deleted document, delete chunks and complete DELETE Job atomically; complete INDEX Jobs of deleted documents as `SKIPPED_DOCUMENT_DELETED` |
 
 ## Database contract
 

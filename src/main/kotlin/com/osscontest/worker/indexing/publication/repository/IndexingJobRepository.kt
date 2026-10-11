@@ -18,15 +18,17 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
     @Query("select job from IndexingJobEntity job where job.id = :jobId")
     fun findByIdForUpdate(@Param("jobId") jobId: Long): IndexingJobEntity?
 
+    /** 실행권과 lease가 유효할 때만 완료하고 갱신 행 수를 돌려준다. [outcome]에는 `JobOutcome` 상수를 넘긴다. */
     @Modifying
     @Transactional
     @Query(value = """
-        UPDATE indexing_job SET status = 'COMPLETED', completed_at = clock_timestamp(),
+        UPDATE indexing_job SET status = 'COMPLETED', outcome = :outcome, completed_at = clock_timestamp(),
             next_retry_at = NULL, lease_until = NULL, updated_at = clock_timestamp()
         WHERE id = :jobId AND worker_id = :workerId AND execution_epoch = :epoch
           AND status = 'PROCESSING' AND lease_until > clock_timestamp()
     """, nativeQuery = true)
-    fun complete(@Param("jobId") jobId: Long, @Param("workerId") workerId: String, @Param("epoch") epoch: Long): Int
+    fun complete(@Param("jobId") jobId: Long, @Param("workerId") workerId: String, @Param("epoch") epoch: Long,
+                 @Param("outcome") outcome: String): Int
 
     @Modifying
     @Transactional

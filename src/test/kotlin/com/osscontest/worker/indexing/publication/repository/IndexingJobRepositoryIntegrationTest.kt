@@ -71,9 +71,9 @@ class IndexingJobRepositoryIntegrationTest(
         queue.enqueue(UUID.randomUUID(), 1, 1, JobType.INDEX, null)
         val job = checkNotNull(queue.claim(5) {})
         assertThat(queue.claim(5) {}).isNull()
-        assertThat(indexingJobRepository.complete(job.token.jobId, "other", job.token.epoch)).isZero()
-        assertThat(indexingJobRepository.complete(job.token.jobId, job.token.workerId, job.token.epoch - 1)).isZero()
-        assertThat(indexingJobRepository.complete(job.token.jobId, job.token.workerId, job.token.epoch)).isEqualTo(1)
+        assertThat(indexingJobRepository.complete(job.token.jobId, "other", job.token.epoch, "INDEXED")).isZero()
+        assertThat(indexingJobRepository.complete(job.token.jobId, job.token.workerId, job.token.epoch - 1, "INDEXED")).isZero()
+        assertThat(indexingJobRepository.complete(job.token.jobId, job.token.workerId, job.token.epoch, "INDEXED")).isEqualTo(1)
         entityManager.clear()
         val saved = indexingJobRepository.findById(job.token.jobId).orElseThrow()
         assertThat(saved.status).isEqualTo(IndexingJobStatus.COMPLETED)
@@ -103,7 +103,7 @@ class IndexingJobRepositoryIntegrationTest(
         assertThat(next.token.epoch).isGreaterThan(job.token.epoch)
         assertThat(queue.renew(job.token)).isZero()
         assertThat(indexingJobRepository.updatePhase(job.token.jobId, "PARSING", job.token.workerId, job.token.epoch)).isZero()
-        assertThat(indexingJobRepository.complete(job.token.jobId, job.token.workerId, job.token.epoch)).isZero()
+        assertThat(indexingJobRepository.complete(job.token.jobId, job.token.workerId, job.token.epoch, "INDEXED")).isZero()
     }
 
     @Test

@@ -3,6 +3,7 @@
 BEGIN;
 
 ALTER TABLE document ADD COLUMN execution_epoch BIGINT NOT NULL DEFAULT 0;
+-- outcome: 완료 사유(INDEXED / DELETED / SKIPPED_DOCUMENT_DELETED 등). 값이 늘 수 있어 CHECK 제약을 두지 않는다.
 ALTER TABLE indexing_job
     ADD COLUMN execution_epoch BIGINT NOT NULL DEFAULT 0,
     ADD COLUMN lease_until TIMESTAMPTZ,
@@ -91,6 +92,9 @@ CREATE TABLE external_circuit_breaker (
 INSERT INTO external_circuit_breaker (name) VALUES ('embedding-api');
 
 COMMIT;
+
+-- 이 파일을 outcome 추가 전에 이미 적용한 DB에는 아래를 별도로 한 번 실행한다.
+-- ALTER TABLE indexing_job ADD COLUMN outcome VARCHAR(40);
 
 -- Producer contract (Core scope): upload the object successfully before registering INDEX.
 -- Enqueue INDEX/DELETE durably in the document mutation transaction under the document row lock.

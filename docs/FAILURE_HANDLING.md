@@ -100,9 +100,17 @@ Core의 업로드 성공 후 INDEX Job 등록 계약을 확인한 배포에서�
 ## 삭제와 버전 보호
 
 삭제는 DELETE Job에서 청크 삭제와 Job 완료를 원자적으로 처리합니다.
-INDEX 결과 저장은 문서 잠금 후 삭제 상태를 확인하며 삭제된 문서에 청크를 다시 만들지 않습니다.
+삭제된 문서의 INDEX Job은 오류가 아니라 정상 종결로 처리합니다. 실행 전 확인, 결과 저장 시점,
+회수 루프 세 경로 모두 `COMPLETED` + `outcome = SKIPPED_DOCUMENT_DELETED`로 끝나며 청크를 다시 만들지 않고 재시도하지 않습니다.
+완료 사유는 `outcome`에 기록합니다(`INDEXED`, `DELETED`, `SKIPPED_DOCUMENT_DELETED`).
+
+INDEX Job이 `FAILED`나 `RETRY_WAIT`으로 남으면 같은 문서의 DELETE Job을 영구히 막는다. 시도 횟수와 무관하게
+SKIPPED로 종결해야 DELETE Job이 진행된다. 회수 루프(`recover`)는 이 이유로 삭제 정리를
+시도 횟수 초과·부적합 Job 정리보다 먼저 실행한다.
+
 `execution_epoch` fencing과 검색 버전 `version_no` 역행 방지는 서로 다른 조건입니다.
-Server의 과거 버전 재시도 제한은 외부 의존성이며 Worker도 부적합한 INDEX를 회수 루프에서 종결합니다.
+Server의 과거 버전 재시도 제한은 외부 의존성이며, Worker는 문서-버전 불일치와 과거 버전 INDEX를
+회수 루프에서 `FAILED` / `DOCUMENT_INELIGIBLE`로 종결합니다.
 
 ## 검증
 
@@ -120,6 +128,8 @@ Server의 과거 버전 재시도 제한은 외부 의존성이며 Worker도 부
 | 선행 Job의 재시도 시각이 미래 | 같은 문서 후속 Job 차단, 다른 문서 실행 가능 |
 | 재시도 중 Worker 종료 | 회수 시 deadline 유지, 새 실행은 전체 처리 가능 |
 | DELETE 완료 재호출·오래된 INDEX 저장 | 멱등 완료 및 실행권 거절 |
+| 임베딩 중 문서 삭제 감지 (실행 전·저장 시점) | COMPLETED + SKIPPED_DOCUMENT_DELETED, 청크 저장 없음 |
+| lease 만료 회수 시 삭제된 문서 INDEX Job | 시도 횟수 무관하게 FAILED 아닌 COMPLETED + SKIPPED |
 | breaker OPEN 중 INDEX·DELETE 대기 | DELETE만 claim, INDEX는 대기 |
 | 결제 한도 초과(429 `insufficient_quota`) | rate limit 재시도가 아닌 breaker 실패로 계산, 열리면 시도 횟수 소비 없이 대기 |
 

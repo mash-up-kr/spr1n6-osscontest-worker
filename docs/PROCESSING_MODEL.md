@@ -85,5 +85,6 @@ Job·`source_event_id`·`enqueue_seq`는 유지합니다. 실행 종료 후 슬�
 `DELETE` Job은 실행권 확인 후 문서 행을 잠그고 문서가 삭제된 상태인지 확인합니다.
 청크 삭제와 Job 완료를 한 트랜잭션에서 저장합니다. 같은 실행이 이미 완료됐으면 삭제를 반복하지 않습니다.
 별도 삭제 sweep은 없으며 생산자가 DELETE Job을 영속적으로 등록해야 합니다.
+삭제된 문서의 INDEX Job은 `COMPLETED` + `outcome = SKIPPED_DOCUMENT_DELETED`로 종결합니다.
 
 [아키텍처](ARCHITECTURE.md) · [장애 대응](FAILURE_HANDLING.md)

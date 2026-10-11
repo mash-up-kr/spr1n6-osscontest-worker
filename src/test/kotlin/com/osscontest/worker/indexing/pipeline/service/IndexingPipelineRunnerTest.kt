@@ -2,6 +2,7 @@ package com.osscontest.worker.indexing.pipeline.service
 
 import com.osscontest.worker.indexing.chunking.domain.Chunk
 import com.osscontest.worker.indexing.chunking.service.*
+import com.osscontest.worker.indexing.deletion.service.DocumentDeletionService
 import com.osscontest.worker.indexing.parsing.*
 import com.osscontest.worker.indexing.publication.entity.*
 import com.osscontest.worker.indexing.publication.repository.*
@@ -28,11 +29,12 @@ class IndexingPipelineRunnerTest {
     private val chunker: ChunkingService = mock()
     private val processor = FakeIndexingProcessor()
     private val failures: IndexingFailureService = mock()
+    private val deletion: DocumentDeletionService = mock()
     private val execution = directExecution()
     private val store: JobQueueStore = mock()
     private val runner get() = createRunner(execution)
     private fun createRunner(operation: ExecutionOperations) = IndexingPipelineRunner(jobs, documents, versions, download, parsers, parse,
-        chunker, mock(), processor, failures, mock(), operation, mock(), 5, java.time.Duration.ofMillis(1), 10000,
+        chunker, mock(), processor, failures, mock(), operation, deletion, 5, java.time.Duration.ofMillis(1), 10000,
         ChunkingStrategy.FIXED_TOKEN, SimpleMeterRegistry())
     private val job = ClaimedJob(testToken, JobType.INDEX, UUID.randomUUID(), 2, 3, null)
 
@@ -65,6 +67,32 @@ class IndexingPipelineRunnerTest {
         verify(parse).parse(any(), path.capture(), any())
         assertThat(Files.exists(path.firstValue)).isFalse()
         verifyNoInteractions(failures)
+    }
+
+    @Test
+    fun `삭제된 문서의 INDEX Job은 외부 호출 없이 SKIPPED로 종결한다`() {
+        setup()
+        whenever(documents.findById(2)).thenReturn(Optional.of(DocumentEntity(2, 1, null, java.time.LocalDateTime.now())))
+        whenever(deletion.skipIndexForDeletedDocument(testToken)).thenReturn(true)
+
+        runner.run(job)
+
+        verify(deletion).skipIndexForDeletedDocument(testToken)
+        verifyNoInteractions(download)
+        assertThat(processor.calls).isEmpty()
+        verifyNoInteractions(failures)
+    }
+
+    @Test
+    fun `잠금 후 재확인에서 삭제가 아니면 정상 처리를 계속한다`() {
+        setup()
+        whenever(documents.findById(2)).thenReturn(Optional.of(DocumentEntity(2, 1, null, java.time.LocalDateTime.now())))
+        whenever(deletion.skipIndexForDeletedDocument(testToken)).thenReturn(false)
+
+        runner.run(job)
+
+        verify(deletion).skipIndexForDeletedDocument(testToken)
+        assertThat(processor.calls).hasSize(1)
     }
 
     @Test
