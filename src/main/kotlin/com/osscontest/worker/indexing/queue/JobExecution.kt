@@ -27,10 +27,21 @@ data class JobSnapshot(
     val retryAt: Instant?,
     val now: Instant,
     val documentEpoch: Long?,
+    val outcome: String? = null,
+    val type: JobType? = null,
+    val documentId: Long? = null,
+    val documentVersionId: Long? = null,
+    val errorCode: String? = null,
+    val errorMessage: String? = null,
 ) {
     fun matches(token: ExecutionToken) = workerId == token.workerId && epoch == token.epoch
     fun ownsProcessing(token: ExecutionToken) = matches(token) && documentEpoch == token.epoch &&
         status == IndexingJobStatus.PROCESSING && leaseUntil != null
+    fun completed(token: ExecutionToken) = epoch == token.epoch && status == IndexingJobStatus.COMPLETED &&
+        workerId == null && leaseUntil == null && type != null &&
+        JobOutcome.entries.any { it.name == outcome && it.completes(type) }
+    fun identifies(job: ClaimedJob) = type == job.type && documentId == job.documentId &&
+        documentVersionId == job.documentVersionId
 }
 
 class ExecutionLostException(val token: ExecutionToken) : RuntimeException("Execution no longer owned: $token")
@@ -38,6 +49,3 @@ class ExecutionCompletedException(val token: ExecutionToken) : RuntimeException(
 class LeaseExpiredException : RuntimeException("Execution lease expired")
 
 internal val ownedStatuses = setOf(IndexingJobStatus.PROCESSING)
-
-fun JobSnapshot.isReleasedFailure(token: ExecutionToken) = epoch == token.epoch && workerId == null &&
-    leaseUntil == null && status in setOf(IndexingJobStatus.RETRY_WAIT, IndexingJobStatus.FAILED)

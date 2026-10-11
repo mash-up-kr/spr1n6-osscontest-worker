@@ -39,6 +39,43 @@ class EmbeddingIndexingProcessorTest {
         )
 
     @Test
+    fun `publish 응답 유실은 완료 증거 확인 후 임베딩과 저장을 반복하지 않는다`() {
+        publishWithDatabaseFault(committed = true)
+    }
+
+    @Test
+    fun `publish 롤백 DB 장애는 보관한 결과 쓰기만 다시 호출한다`() {
+        publishWithDatabaseFault(committed = false)
+    }
+
+    private fun publishWithDatabaseFault(committed: Boolean) {
+        val store: com.osscontest.worker.indexing.queue.JobQueueStore = mock()
+        var receipt = com.osscontest.worker.indexing.queue.JobSnapshot(testToken.workerId, 1,
+            com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.PROCESSING,
+            com.osscontest.worker.support.testNow.plusSeconds(60), null, com.osscontest.worker.support.testNow, 1,
+            type = com.osscontest.worker.indexing.queue.JobType.INDEX, documentId = 2, documentVersionId = 3)
+        whenever(store.snapshot(testToken)).thenAnswer { receipt }
+        val retained = mutableListOf<List<DocumentChunk>>()
+        whenever(publicationService.publish(any(), any())).thenAnswer {
+            retained.add(it.getArgument(1))
+            if (retained.size == 1) {
+                if (committed) receipt = receipt.copy(workerId = null, leaseUntil = null, documentEpoch = 2,
+                    status = com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.COMPLETED, outcome = "INDEXED")
+                throw org.springframework.dao.DataAccessResourceFailureException("save response lost")
+            }
+            com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.COMPLETED
+        }
+        whenever(embeddingUseCase.embed(any())).thenReturn(listOf(embedding(0.1f)))
+        val actual = EmbeddingIndexingProcessor(embeddingUseCase, publicationService, NoriTokenizer(),
+            Clock.fixed(Instant.parse("2026-08-19T00:00:00Z"), ZoneOffset.UTC), 250, externalApi,
+            com.osscontest.worker.indexing.queue.ExecutionOperations(com.osscontest.worker.support.retryingDatabase(), store))
+        actual.process(context(), listOf(chunk(0)))
+        verify(embeddingUseCase, times(1)).embed(any())
+        assertThat(retained).hasSize(if (committed) 1 else 2)
+        if (!committed) assertThat(retained[1]).isSameAs(retained[0])
+    }
+
+    @Test
     fun `임베딩 결과를 publication에 위임한다`() {
         val chunks = listOf(chunk(no = 0), chunk(no = 1))
         whenever(embeddingUseCase.embed(chunks.map(Chunk::content)))

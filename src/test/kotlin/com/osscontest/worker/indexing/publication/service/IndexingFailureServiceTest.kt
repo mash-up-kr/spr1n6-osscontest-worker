@@ -18,7 +18,8 @@ class IndexingFailureServiceTest {
     private val locks: JobExecutionLocks = mock()
     private val meters = SimpleMeterRegistry()
     private val policy = RetryPolicy(RetryJitter { 1.0 })
-    private val service = IndexingFailureService(jobs, meters, JobOwnershipGuard(locks), policy)
+    private val results = ExecutionResults()
+    private val service = IndexingFailureService(jobs, meters, JobOwnershipGuard(locks), policy, results)
 
     private fun fail(permanent: Boolean = false) = service.recordFailure(testToken, "TIMEOUT", "message",
         permanent, 5, Duration.ofSeconds(30))
@@ -27,6 +28,43 @@ class IndexingFailureServiceTest {
         whenever(locks.lock(1)).thenReturn(lockedJob(processingJob(attempt = attempts)))
         whenever(jobs.currentDbTimestamp()).thenReturn(testNow)
         whenever(jobs.fail(any(), any(), any(), any(), anyOrNull(), any(), any())).thenReturn(1)
+    }
+
+    @Test
+    fun `Worker 실패 outcome도 보관한 deadline 오류와 다르면 실행 상실로 처리한다`() {
+        results.prepare(testToken) { FailureRecord(com.osscontest.worker.indexing.pipeline.service.FailureDecision(
+            IndexingJobStatus.RETRY_WAIT, testNow.plusSeconds(30)), "TIMEOUT", "message") }
+        val released = processingJob(status = IndexingJobStatus.RETRY_WAIT).apply {
+            workerId = null; leaseUntil = null; nextRetryAt = testNow.plusSeconds(60)
+            outcome = "RETRY_SCHEDULED"; lastErrorCode = "TIMEOUT"; lastErrorMessage = "message"
+        }
+        whenever(locks.lock(1)).thenReturn(lockedJob(released))
+        assertThatThrownBy { fail() }.isInstanceOf(ExecutionLostException::class.java)
+        verify(jobs, never()).fail(any(), any(), any(), any(), anyOrNull(), any(), any())
+    }
+
+    @Test
+    fun `같은 epoch 외부 회수는 자기 실패로 확인하지 않는다`() {
+        setup()
+        whenever(jobs.fail(any(), any(), any(), any(), anyOrNull(), any(), any())).thenReturn(0)
+        assertThatThrownBy { fail() }.isInstanceOf(LeaseExpiredException::class.java)
+        val released = processingJob(status = IndexingJobStatus.RETRY_WAIT).apply {
+            workerId = null; leaseUntil = null; nextRetryAt = testNow.plusSeconds(30)
+        }
+        whenever(locks.lock(1)).thenReturn(lockedJob(released))
+        assertThatThrownBy { fail() }.isInstanceOf(ExecutionLostException::class.java)
+        verify(jobs, times(1)).fail(any(), any(), any(), any(), anyOrNull(), any(), any())
+    }
+
+    @Test
+    fun `실패 롤백 후 재시도는 최초 deadline과 오류를 유지한다`() {
+        setup()
+        whenever(jobs.fail(any(), any(), any(), any(), anyOrNull(), any(), any())).thenReturn(0, 1)
+        assertThatThrownBy { fail() }.isInstanceOf(LeaseExpiredException::class.java)
+        whenever(jobs.currentDbTimestamp()).thenReturn(testNow.plusSeconds(100))
+        service.recordFailure(testToken, "OTHER", "changed", false, 5, Duration.ofSeconds(90), "120")
+        verify(jobs, times(2)).fail(1, "worker", 1, "RETRY_WAIT", testNow.plusSeconds(30), "TIMEOUT", "message")
+        verify(jobs, times(1)).currentDbTimestamp()
     }
 
     @Test
@@ -58,7 +96,10 @@ class IndexingFailureServiceTest {
     fun `실패 커밋 뒤 소유자가 해제돼도 같은 epoch 재호출은 deadline을 다시 쓰지 않는다`() {
         val released = processingJob(status = IndexingJobStatus.RETRY_WAIT).apply {
             workerId = null; leaseUntil = null; nextRetryAt = testNow.plusSeconds(30)
+            outcome = "RETRY_SCHEDULED"; lastErrorCode = "TIMEOUT"; lastErrorMessage = "message"
         }
+        results.prepare(testToken) { FailureRecord(com.osscontest.worker.indexing.pipeline.service.FailureDecision(
+            IndexingJobStatus.RETRY_WAIT, testNow.plusSeconds(30)), "TIMEOUT", "message") }
         whenever(locks.lock(1)).thenReturn(lockedJob(released, documentEpoch = 2))
         assertThat(fail()).isEqualTo(IndexingJobStatus.RETRY_WAIT)
         verify(jobs, never()).fail(any(), any(), any(), any(), anyOrNull(), any(), any())

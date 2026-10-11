@@ -10,7 +10,7 @@ fun seedReleasedExecution(jdbc: JdbcTemplate, token: ExecutionToken, status: Ind
     require(status == IndexingJobStatus.RETRY_WAIT || status == IndexingJobStatus.FAILED)
     require((status == IndexingJobStatus.RETRY_WAIT) == (retryAt != null))
     check(jdbc.update("""
-        UPDATE indexing_job SET status = ?, worker_id = NULL, lease_until = NULL,
+        UPDATE indexing_job SET status = ?, worker_id = NULL, lease_until = NULL, outcome = NULL,
             next_retry_at = CAST(? AS timestamptz), last_error_code = 'LEASE_EXPIRED_FIXTURE',
             completed_at = CASE WHEN ? = 'FAILED' THEN clock_timestamp() ELSE NULL END,
             updated_at = clock_timestamp()

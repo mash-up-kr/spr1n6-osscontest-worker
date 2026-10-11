@@ -22,6 +22,9 @@ class JobQueueStore(
     fun claim(maxAttempts: Int, prepared: (ExecutionToken) -> Unit): ClaimedJob? =
         claimForWorker(properties.workerId, properties.leaseDuration.toMillis(), maxAttempts, prepared)
 
+    fun claim(maxAttempts: Int, ownerId: String, prepared: (ExecutionToken) -> Unit): ClaimedJob? =
+        claimForWorker(ownerId, properties.leaseDuration.toMillis(), maxAttempts, prepared)
+
     fun claimForWorker(workerId: String, leaseMillis: Long, maxAttempts: Int,
                        prepared: (ExecutionToken) -> Unit = {}): ClaimedJob? {
         require(workerId.isNotBlank() && leaseMillis > 0 && maxAttempts > 0)
@@ -51,14 +54,18 @@ class JobQueueStore(
     fun snapshot(token: ExecutionToken): JobSnapshot? = jdbc.query(
         """
         SELECT j.worker_id, j.execution_epoch, j.status, j.lease_until, d.execution_epoch AS document_epoch,
-               j.next_retry_at AS retry_at, clock_timestamp() AS db_now
+               j.next_retry_at AS retry_at, clock_timestamp() AS db_now, j.outcome, j.job_type,
+               j.document_id, j.document_version_id, j.last_error_code, j.last_error_message
         FROM indexing_job j LEFT JOIN document d ON d.id = j.document_id WHERE j.id = :id
         """.trimIndent(), token.params(),
     ) { rs, _ ->
         JobSnapshot(rs.getString("worker_id"), rs.getLong("execution_epoch"),
             IndexingJobStatus.valueOf(rs.getString("status")), rs.getTimestamp("lease_until")?.toInstant(),
             rs.getTimestamp("retry_at")?.toInstant(), rs.getTimestamp("db_now").toInstant(),
-            (rs.getObject("document_epoch") as Number?)?.toLong())
+            (rs.getObject("document_epoch") as Number?)?.toLong(), rs.getString("outcome"),
+            JobType.valueOf(rs.getString("job_type")), rs.getLong("document_id"),
+            (rs.getObject("document_version_id") as Number?)?.toLong(),
+            rs.getString("last_error_code"), rs.getString("last_error_message"))
     }.firstOrNull()
 
     @Transactional(isolation = Isolation.READ_COMMITTED)

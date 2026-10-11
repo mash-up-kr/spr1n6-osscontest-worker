@@ -22,10 +22,11 @@ interface DocumentRepository : JpaRepository<DocumentEntity, Long> {
         FROM document_version candidate
         WHERE d.id = :documentId AND d.deleted_at IS NULL
           AND candidate.id = :documentVersionId AND candidate.document_id = d.id
-          AND NOT EXISTS (
+          AND (d.searchable_version_id IS NULL OR EXISTS (
               SELECT 1 FROM document_version searchable
-              WHERE searchable.id = d.searchable_version_id AND searchable.version_no > candidate.version_no
-          )
+              WHERE searchable.id = d.searchable_version_id AND searchable.document_id = d.id
+                AND searchable.version_no < candidate.version_no
+          ))
     """, nativeQuery = true)
     fun promoteSearchableVersion(@Param("documentId") documentId: Long,
                                 @Param("documentVersionId") documentVersionId: Long): Int

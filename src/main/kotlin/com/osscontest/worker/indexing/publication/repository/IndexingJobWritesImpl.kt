@@ -2,15 +2,17 @@ package com.osscontest.worker.indexing.publication.repository
 
 import com.osscontest.worker.indexing.queue.ExecutionToken
 import com.osscontest.worker.indexing.queue.JobExecutionLocks
+import com.osscontest.worker.indexing.queue.JobOutcome
 import com.osscontest.worker.indexing.queue.JobOwnershipGuard
+import com.osscontest.worker.indexing.queue.JobType
+import java.sql.Types
+import java.time.Instant
+import java.time.ZoneOffset
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Isolation
 import org.springframework.transaction.annotation.Transactional
-import java.sql.Types
-import java.time.Instant
-import java.time.ZoneOffset
 
 @Repository
 class IndexingJobWritesImpl(
@@ -19,8 +21,20 @@ class IndexingJobWritesImpl(
     private val ownership: JobOwnershipGuard,
 ) : IndexingJobWrites {
     @Transactional(isolation = Isolation.READ_COMMITTED)
-    override fun complete(jobId: Long, workerId: String, epoch: Long): Int = write(ExecutionToken(jobId, workerId, epoch),
-        "status = 'COMPLETED', completed_at = clock_timestamp(), next_retry_at = NULL, lease_until = NULL")
+    override fun complete(jobId: Long, workerId: String, epoch: Long): Int {
+        val execution = locks.lock(jobId) ?: return 0
+        return complete(jobId, workerId, epoch,
+            if (execution.job.jobType == JobType.DELETE) JobOutcome.DELETED else JobOutcome.INDEXED)
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    override fun complete(jobId: Long, workerId: String, epoch: Long, outcome: JobOutcome): Int {
+        val execution = locks.lock(jobId) ?: return 0
+        require(outcome.completes(execution.job.jobType))
+        return write(ExecutionToken(jobId, workerId, epoch),
+            "status = 'COMPLETED', outcome = :outcome, completed_at = clock_timestamp(), " +
+                "next_retry_at = NULL, worker_id = NULL, lease_until = NULL", MapSqlParameterSource("outcome", outcome.name))
+    }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
     override fun updatePhase(jobId: Long, phase: String, workerId: String, epoch: Long): Int =
@@ -35,7 +49,8 @@ class IndexingJobWritesImpl(
             status = :status, last_error_code = :errorCode, last_error_message = :errorMessage,
             next_retry_at = :retryAt,
             completed_at = CASE WHEN :status = 'FAILED' THEN clock_timestamp() ELSE NULL END,
-            worker_id = NULL, lease_until = NULL
+            worker_id = NULL, lease_until = NULL,
+            outcome = CASE WHEN :status = 'RETRY_WAIT' THEN 'RETRY_SCHEDULED' ELSE 'FAILED_PROCESSING' END
         """.trimIndent(), MapSqlParameterSource().addValue("status", status)
             .addValue("retryAt", retryAt?.atOffset(ZoneOffset.UTC), Types.TIMESTAMP_WITH_TIMEZONE)
             .addValue("errorCode", errorCode).addValue("errorMessage", errorMessage))

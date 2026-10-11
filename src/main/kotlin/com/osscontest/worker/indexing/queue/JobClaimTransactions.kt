@@ -45,7 +45,7 @@ class JobClaimTransactions(private val jdbc: NamedParameterJdbcTemplate, private
             )
             UPDATE indexing_job j SET status = 'PROCESSING', worker_id = :workerId, execution_epoch = :epoch,
                 lease_until = clock_timestamp() + :leaseMillis * INTERVAL '1 millisecond',
-                attempt_count = attempt_count + 1, next_retry_at = NULL,
+                attempt_count = attempt_count + 1, next_retry_at = NULL, outcome = NULL,
                 started_at = COALESCE(started_at, clock_timestamp()), updated_at = clock_timestamp()
             FROM bumped b WHERE j.id = :id AND j.document_id = b.id AND $ELIGIBLE
         """.trimIndent(), params + token.params() + mapOf("documentId" to documentId,

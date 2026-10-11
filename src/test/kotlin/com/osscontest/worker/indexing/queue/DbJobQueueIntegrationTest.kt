@@ -30,6 +30,7 @@ class DbJobQueueIntegrationTest(
     private val publication: IndexingPublicationService,
     private val deletion: DocumentDeletionService,
     private val failures: IndexingFailureService,
+    private val execution: ExecutionOperations,
 ) {
     @BeforeEach
     fun fixture() {
@@ -125,8 +126,8 @@ class DbJobQueueIntegrationTest(
         jdbc.update("UPDATE document SET deleted_at = clock_timestamp() WHERE id = 800001")
         queue.enqueue(UUID.randomUUID(), 800001, null, JobType.DELETE, null)
         val job = checkNotNull(queue.claim(5) {})
-        deletion.delete(job)
-        deletion.delete(job)
+        execution.completion(job.token, ExecutionIdentity(job), completed = {}) { deletion.delete(job); Unit }
+        execution.completion(job.token, ExecutionIdentity(job), completed = {}) { error("Completed DELETE must not replay") }
         publication.publish(context(old), listOf(chunk(0))) // old completion is acknowledged without writes
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM document_chunk WHERE document_id = 800001", Long::class.java)).isZero()
         assertThat(queue.snapshot(job.token)!!.status).isEqualTo(IndexingJobStatus.COMPLETED)

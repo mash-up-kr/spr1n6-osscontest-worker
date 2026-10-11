@@ -27,7 +27,22 @@ fun directDatabase(): DatabaseOperations = mock<DatabaseOperations>().apply {
     whenever(execute<Any?>(any(), any())).thenAnswer { it.getArgument<() -> Any?>(1)() }
 }
 
+/** Retry orchestration without opening even an embedded DB; not a commit simulation. */
+fun retryingDatabase(): DatabaseOperations = mock<DatabaseOperations>().apply {
+    whenever(execute<Any?>(any(), any())).thenAnswer {
+        val action = it.getArgument<() -> Any?>(1)
+        var result: Any? = null
+        var done = false
+        while (!done) {
+            try { result = action(); done = true }
+            catch (error: Exception) { if (!DatabaseOperations.isUnavailable(error)) throw error }
+        }
+        result
+    }
+}
+
 fun directExecution(): ExecutionOperations = mock<ExecutionOperations>().apply {
+    whenever(completion<Any?>(any(), any(), any(), any())).thenAnswer { it.getArgument<() -> Any?>(3)() }
     whenever(failure<Any?>(any(), any())).thenAnswer { it.getArgument<() -> Any?>(1)() }
     whenever(database<Any?>(any(), any(), any())).thenAnswer { it.getArgument<() -> Any?>(2)() }
 }

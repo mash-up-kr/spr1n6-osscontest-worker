@@ -156,6 +156,19 @@ class JobFencingIntegrationTest(
         } finally { pool.shutdownNow() }
     }
 
+    @Test fun `A claim 롤백 뒤 B가 같은 epoch를 얻어도 A 준비 토큰으로 B를 resolve하지 않는다`() {
+        enqueue()
+        var prepared: ExecutionToken? = null
+        TransactionTemplate(transactions).execute { tx ->
+            queue.claimForWorker("instance-1", 60_000, 5) { prepared = it }
+            tx.setRollbackOnly()
+        }
+        val next = checkNotNull(queue.claimForWorker("instance-2", 60_000, 5))
+        assertThat(next.token.epoch).isEqualTo(checkNotNull(prepared).epoch)
+        assertThat(queue.resolveClaim(checkNotNull(prepared))).isNull()
+        assertThat(queue.resolveClaim(next.token)).isEqualTo(next)
+    }
+
     @Test fun `동적 Worker는 프로시저 없는 DB에서 N건만 claim하고 처리 반환 후 남은 Job을 획득한다`() {
         val ids = listOf(enqueue(), enqueue(2), enqueue(3))
         val started = CountDownLatch(2)
@@ -176,7 +189,7 @@ class JobFencingIntegrationTest(
         }.whenever(runner).run(any<ClaimedJob>())
         val database = DatabaseOperations(jdbc, ThreadSleepRetryWaiter(), DatabaseWaitProperties(), SimpleMeterRegistry())
         val worker = DbJobWorker(QueueProperties(workerId = "c1-worker", concurrency = 2,
-            pollInterval = Duration.ofDays(1)), database, queue, runner, ThreadSleepQueueLoopWaiter(), 5)
+            pollInterval = Duration.ofDays(1)), database, queue, runner, ThreadSleepQueueLoopWaiter(), 5, ExecutionResults())
         worker.start()
         try {
             check(started.await(5, TimeUnit.SECONDS))

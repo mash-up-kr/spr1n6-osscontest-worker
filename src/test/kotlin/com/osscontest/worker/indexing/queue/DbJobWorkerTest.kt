@@ -32,10 +32,75 @@ class DbJobWorkerTest {
     ) : AutoCloseable {
         val store: JobQueueStore = mock()
         val runner: IndexingPipelineRunner = mock()
+        val results = ExecutionResults()
         val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = concurrency,
             pollInterval = pollInterval, heartbeatInterval = heartbeatInterval, workerIdleTimeout = workerIdleTimeout),
-            database, store, runner, waiter, 5)
+            database, store, runner, waiter, 5, results)
         override fun close() { worker.stop() }
+    }
+
+    @Test
+    fun `병렬 루프의 claim 소유 ID는 같은 boot 인스턴스와 중복 없는 숫자를 사용한다`() {
+        Harness(concurrency = 3).use { h ->
+            val completed = CountDownLatch(20)
+            val owners = java.util.concurrent.ConcurrentLinkedQueue<String>()
+            val count = AtomicInteger()
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
+                val owner = it.getArgument<String>(1)
+                owners.add(owner)
+                val number = count.incrementAndGet()
+                if (number > 20) null else job(number.toLong()).copy(token = ExecutionToken(number.toLong(), owner, 1))
+            }
+            doAnswer { completed.countDown(); null }.whenever(h.runner).run(any<ClaimedJob>())
+            h.worker.start()
+            try {
+                await(completed)
+                val ids = owners.toList()
+                assertThat(ids.map { it.substringBeforeLast('-') }.toSet()).hasSize(1)
+                assertThat(ids.map { it.substringAfterLast('-').toLong() }.toSet()).hasSize(ids.size)
+                assertThat(ids.all { it.startsWith("worker.") }).isTrue()
+            } finally { h.worker.stop() }
+        }
+    }
+
+    @Test
+    fun `stop start는 동일 인스턴스 claim 번호를 초기화하지 않는다`() {
+        Harness().use { h ->
+            val owners = java.util.concurrent.ConcurrentLinkedQueue<String>()
+            val first = CountDownLatch(1)
+            val second = CountDownLatch(1)
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
+                owners.add(it.getArgument(1))
+                if (owners.size == 1) first.countDown() else second.countDown()
+                null
+            }
+            h.worker.start(); await(first); h.worker.stop()
+            h.worker.start(); wake(h.worker); await(second)
+            val ids = owners.toList()
+            assertThat(ids.map { it.substringBeforeLast('-') }.toSet()).hasSize(1)
+            assertThat(ids.map { it.substringAfterLast('-').toLong() }).isSorted().doesNotHaveDuplicates()
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = [false, true])
+    fun `외부 해제는 실패 계획 유무와 무관하게 같은 epoch 실행을 중단한다`(planned: Boolean) {
+        Harness().use { h ->
+            val started = CountDownLatch(1)
+            val interrupted = CountDownLatch(1)
+            whenever(h.store.claim(any(), any(), any())).thenReturn(job(), null)
+            whenever(h.store.snapshot(testToken)).thenReturn(JobSnapshot(null, 1, IndexingJobStatus.RETRY_WAIT,
+                null, testNow.plusSeconds(30), testNow, 1))
+            if (planned) h.results.prepare(testToken) { FailureRecord(
+                com.osscontest.worker.indexing.pipeline.service.FailureDecision(IndexingJobStatus.RETRY_WAIT,
+                    testNow.plusSeconds(30)), "TEMP", "message") }
+            doAnswer {
+                started.countDown()
+                try { CountDownLatch(1).await() } catch (_: InterruptedException) { interrupted.countDown() }
+                null
+            }.whenever(h.runner).run(job())
+            h.worker.start(); await(started); h.worker.heartbeat(); await(interrupted)
+        }
     }
 
     @Test
@@ -44,7 +109,7 @@ class DbJobWorkerTest {
             val started = CountDownLatch(3)
             val finish = CountDownLatch(1)
             val count = AtomicInteger()
-            whenever(h.store.claim(any(), any())).thenAnswer {
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
                 assertThat(Thread.currentThread().name).startsWith("job-worker-")
                 job(count.incrementAndGet().toLong())
             }
@@ -55,7 +120,7 @@ class DbJobWorkerTest {
                 await(started)
                 assertThat(h.worker.probe()).isFalse()
                 assertThat(count.get()).isEqualTo(3)
-                verify(h.store, times(3)).claim(eq(5), any())
+                verify(h.store, times(3)).claim(eq(5), any(), any())
             } finally { h.worker.stop(); finish.countDown() }
         }
     }
@@ -68,7 +133,7 @@ class DbJobWorkerTest {
             val finish = CountDownLatch(1)
             val firstThread = AtomicReference<Thread>()
             val count = AtomicInteger()
-            whenever(h.store.claim(any(), any())).thenAnswer {
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
                 when (count.incrementAndGet()) {
                     1 -> { firstThread.set(Thread.currentThread()); empty.countDown(); null }
                     2 -> job()
@@ -82,7 +147,7 @@ class DbJobWorkerTest {
             h.worker.start()
             try {
                 await(empty)
-                verify(h.store, times(1)).claim(any(), any())
+                verify(h.store, times(1)).claim(any(), any(), any())
                 val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
                 while (firstThread.get().state != Thread.State.TIMED_WAITING) {
                     check(System.nanoTime() < until) { "Thread did not return to the idle pool" }
@@ -102,7 +167,7 @@ class DbJobWorkerTest {
             val finish = CountDownLatch(1)
             val firstThread = AtomicReference<Thread>()
             val count = AtomicInteger()
-            whenever(h.store.claim(any(), any())).thenAnswer {
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
                 if (count.incrementAndGet() == 1) {
                     firstThread.set(Thread.currentThread()); empty.countDown(); null
                 } else job()
@@ -128,7 +193,7 @@ class DbJobWorkerTest {
             val started = CountDownLatch(1)
             val finish = CountDownLatch(1)
             val pending = AtomicReference<ClaimedJob?>()
-            whenever(h.store.claim(any(), any())).thenAnswer {
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
                 pending.getAndSet(null).also { if (it == null) empty.countDown() }
             }
             doAnswer { started.countDown(); finish.await(); null }.whenever(h.runner).run(any<ClaimedJob>())
@@ -149,7 +214,7 @@ class DbJobWorkerTest {
             val started = CountDownLatch(1)
             val finish = CountDownLatch(1)
             val firstThread = AtomicReference<Thread>()
-            whenever(h.store.claim(any(), any())).thenReturn(first, next, null)
+            whenever(h.store.claim(any(), any(), any())).thenReturn(first, next, null)
             doAnswer {
                 firstThread.set(Thread.currentThread())
                 assertThat(MDC.get("traceId")).isEqualTo(first.traceId)
@@ -168,7 +233,7 @@ class DbJobWorkerTest {
                 started.countDown(); finish.await(); null
             }.whenever(h.runner).run(next)
             h.worker.start()
-            try { await(started); verify(h.store, times(2)).claim(any(), any()) }
+            try { await(started); verify(h.store, times(2)).claim(any(), any(), any()) }
             finally { h.worker.stop(); finish.countDown() }
         }
     }
@@ -180,7 +245,7 @@ class DbJobWorkerTest {
             val committed = CountDownLatch(1)
             val started = CountDownLatch(1)
             val finish = CountDownLatch(1)
-            whenever(h.store.claim(any(), any())).thenAnswer { claiming.countDown(); committed.await(); job() }
+            whenever(h.store.claim(any(), any(), any())).thenAnswer { claiming.countDown(); committed.await(); job() }
             doAnswer { started.countDown(); finish.await(); null }.whenever(h.runner).run(any<ClaimedJob>())
             h.worker.start()
             try {
@@ -203,8 +268,8 @@ class DbJobWorkerTest {
             val started = CountDownLatch(1)
             val finish = CountDownLatch(1)
             val claimed = job()
-            whenever(h.store.claim(any(), any())).thenAnswer {
-                it.getArgument<(ExecutionToken) -> Unit>(1)(claimed.token)
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
+                it.getArgument<(ExecutionToken) -> Unit>(2)(claimed.token)
                 throw DataAccessResourceFailureException("commit response lost")
             }
             whenever(h.store.resolveClaim(claimed.token)).thenThrow(DataAccessResourceFailureException("still offline"))
@@ -213,7 +278,7 @@ class DbJobWorkerTest {
             h.worker.start()
             try {
                 await(waiting)
-                verify(h.store, times(1)).claim(any(), any())
+                verify(h.store, times(1)).claim(any(), any(), any())
                 verifyNoInteractions(h.runner)
                 assertThat(h.worker.probe()).isFalse()
                 recover.countDown(); await(started)
@@ -230,9 +295,9 @@ class DbJobWorkerTest {
             val started = CountDownLatch(1)
             val finish = CountDownLatch(1)
             val count = AtomicInteger()
-            whenever(h.store.claim(any(), any())).thenAnswer {
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
                 if (count.incrementAndGet() == 1) {
-                    it.getArgument<(ExecutionToken) -> Unit>(1)(testToken)
+                    it.getArgument<(ExecutionToken) -> Unit>(2)(testToken)
                     throw DataAccessResourceFailureException("response lost")
                 }
                 job(2)
@@ -244,7 +309,7 @@ class DbJobWorkerTest {
                 await(resolved); verifyNoInteractions(h.runner)
                 wake(h.worker); await(started)
                 verify(h.store, times(1)).resolveClaim(testToken)
-                verify(h.store, times(2)).claim(any(), any())
+                verify(h.store, times(2)).claim(any(), any(), any())
                 verify(h.runner).run(job(2))
             } finally { h.worker.stop(); finish.countDown() }
         }
@@ -259,11 +324,11 @@ class DbJobWorkerTest {
         }).use { h ->
             val started = CountDownLatch(1)
             val finish = CountDownLatch(1)
-            whenever(h.store.claim(any(), any())).thenThrow(IllegalStateException("bad query")).thenReturn(job())
+            whenever(h.store.claim(any(), any(), any())).thenThrow(IllegalStateException("bad query")).thenReturn(job())
             doAnswer { started.countDown(); finish.await(); null }.whenever(h.runner).run(any<ClaimedJob>())
             h.worker.start()
             try {
-                await(waiting); verify(h.store, times(1)).claim(any(), any())
+                await(waiting); verify(h.store, times(1)).claim(any(), any(), any())
                 assertThat(h.worker.probe()).isFalse()
                 resume.countDown(); await(started)
             } finally { h.worker.stop(); resume.countDown(); finish.countDown() }
@@ -278,11 +343,11 @@ class DbJobWorkerTest {
             waiting.countDown()
             try { CountDownLatch(1).await() } finally { stopped.countDown() }
         }).use { h ->
-            whenever(h.store.claim(any(), any())).thenThrow(IllegalStateException("bad query"))
+            whenever(h.store.claim(any(), any(), any())).thenThrow(IllegalStateException("bad query"))
             h.worker.start(); await(waiting)
             h.worker.stop(); await(stopped)
             assertThat(h.worker.probe()).isFalse()
-            verify(h.store, times(1)).claim(any(), any())
+            verify(h.store, times(1)).claim(any(), any(), any())
             verifyNoInteractions(h.runner)
         }
     }
@@ -295,13 +360,13 @@ class DbJobWorkerTest {
             waiting.countDown()
             try { CountDownLatch(1).await() } finally { stopped.countDown() }
         }).use { h ->
-            whenever(h.store.claim(any(), any())).thenAnswer {
-                it.getArgument<(ExecutionToken) -> Unit>(1)(testToken)
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
+                it.getArgument<(ExecutionToken) -> Unit>(2)(testToken)
                 throw DataAccessResourceFailureException("offline")
             }
             h.worker.start(); await(waiting)
             h.worker.stop(); await(stopped)
-            verify(h.store, times(1)).claim(any(), any())
+            verify(h.store, times(1)).claim(any(), any(), any())
             verify(h.store, never()).resolveClaim(any())
             verifyNoInteractions(h.runner)
         }
@@ -315,7 +380,7 @@ class DbJobWorkerTest {
             val finish = CountDownLatch(1)
             val count = AtomicInteger()
             val tokens = java.util.concurrent.ConcurrentHashMap.newKeySet<ExecutionToken>()
-            whenever(h.store.claim(any(), any())).thenAnswer { job(count.incrementAndGet().toLong()) }
+            whenever(h.store.claim(any(), any(), any())).thenAnswer { job(count.incrementAndGet().toLong()) }
             whenever(h.store.renew(any())).thenAnswer {
                 assertThat(Thread.currentThread().name).isEqualTo("job-heartbeat")
                 if (tokens.add(it.getArgument(0))) renewed.countDown()
@@ -332,7 +397,7 @@ class DbJobWorkerTest {
         Harness(concurrency = 2).use { h ->
             val started = CountDownLatch(2)
             val finish = CountDownLatch(1)
-            whenever(h.store.claim(any(), any())).thenReturn(job(), job(2))
+            whenever(h.store.claim(any(), any(), any())).thenReturn(job(), job(2))
             whenever(h.store.renew(job().token)).thenThrow(IllegalStateException("bad update"))
             whenever(h.store.renew(job(2).token)).thenReturn(1)
             doAnswer { started.countDown(); finish.await(); null }.whenever(h.runner).run(any<ClaimedJob>())
@@ -352,7 +417,7 @@ class DbJobWorkerTest {
             val nextStarted = CountDownLatch(1)
             val finish = CountDownLatch(1)
             val firstThread = AtomicReference<Thread>()
-            whenever(h.store.claim(any(), any())).thenReturn(job(), job(2), null)
+            whenever(h.store.claim(any(), any(), any())).thenReturn(job(), job(2), null)
             doAnswer {
                 firstThread.set(Thread.currentThread()); started.countDown()
                 try { CountDownLatch(1).await() } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
@@ -381,7 +446,7 @@ class DbJobWorkerTest {
             val interrupted = AtomicBoolean(false)
             val firstThread = AtomicReference<Thread>()
             val pool = Executors.newSingleThreadExecutor()
-            whenever(h.store.claim(any(), any())).thenReturn(job(), job(2), null)
+            whenever(h.store.claim(any(), any(), any())).thenReturn(job(), job(2), null)
             whenever(h.store.renew(any())).thenReturn(1)
             whenever(h.store.renew(job().token)).thenAnswer { renewing.countDown(); returnRenew.await(); 0 }
             doAnswer {
@@ -408,15 +473,40 @@ class DbJobWorkerTest {
     }
 
     @Test
+    fun `owner가 해제된 완료 증거는 heartbeat가 cleanup을 중단하지 않는다`() {
+        Harness().use { h ->
+            val started = CountDownLatch(1); val finish = CountDownLatch(1); val cleaned = CountDownLatch(1)
+            val interrupted = AtomicBoolean()
+            whenever(h.store.claim(any(), any(), any())).thenReturn(job(), null)
+            whenever(h.store.snapshot(testToken)).thenReturn(JobSnapshot(null, 1, IndexingJobStatus.COMPLETED,
+                null, null, testNow, 2, "INDEXED", JobType.INDEX, job().documentId, job().documentVersionId))
+            doAnswer {
+                started.countDown()
+                try { finish.await() } catch (_: InterruptedException) { interrupted.set(true) }
+                finally { cleaned.countDown() }
+                null
+            }.whenever(h.runner).run(job())
+            h.worker.start()
+            try {
+                await(started); h.worker.heartbeat(); finish.countDown(); await(cleaned)
+                assertThat(interrupted.get()).isFalse()
+            } finally { finish.countDown() }
+        }
+    }
+
+    @Test
     fun `실패로 자발적 해제된 실행은 heartbeat가 정리 중인 스레드를 중단하지 않는다`() {
         Harness().use { h ->
             val released = CountDownLatch(1)
             val finish = CountDownLatch(1)
             val cleaned = CountDownLatch(1)
             val interrupted = AtomicBoolean(false)
-            whenever(h.store.claim(any(), any())).thenReturn(job(), null)
+            whenever(h.store.claim(any(), any(), any())).thenReturn(job(), null)
             whenever(h.store.snapshot(testToken)).thenReturn(JobSnapshot(null, testToken.epoch,
-                IndexingJobStatus.RETRY_WAIT, null, testNow.plusSeconds(30), testNow, testToken.epoch))
+                IndexingJobStatus.RETRY_WAIT, null, testNow.plusSeconds(30), testNow, testToken.epoch,
+                outcome = "RETRY_SCHEDULED", errorCode = "TEMP", errorMessage = "message"))
+            h.results.prepare(testToken) { FailureRecord(com.osscontest.worker.indexing.pipeline.service.FailureDecision(
+                IndexingJobStatus.RETRY_WAIT, testNow.plusSeconds(30)), "TEMP", "message") }
             doAnswer {
                 released.countDown()
                 try { finish.await() } catch (_: InterruptedException) { interrupted.set(true) }
@@ -439,7 +529,7 @@ class DbJobWorkerTest {
             val started = CountDownLatch(1)
             val finish = CountDownLatch(1)
             val count = AtomicInteger()
-            whenever(h.store.claim(any(), any())).thenAnswer {
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
                 if (count.incrementAndGet() == 1) {
                     claiming.countDown(); awaitIgnoringInterrupt(returnClaim); job()
                 } else job(2)
@@ -455,7 +545,7 @@ class DbJobWorkerTest {
                 returnClaim.countDown(); wake(h.worker); await(started)
                 verify(h.runner, never()).run(job())
                 verify(h.runner, times(1)).run(job(2))
-                verify(h.store, times(2)).claim(any(), any())
+                verify(h.store, times(2)).claim(any(), any(), any())
             } finally { h.worker.stop(); returnClaim.countDown(); finish.countDown() }
         }
     }
@@ -465,7 +555,7 @@ class DbJobWorkerTest {
         Harness().use { h ->
             val started = CountDownLatch(1)
             val interrupted = CountDownLatch(1)
-            whenever(h.store.claim(any(), any())).thenReturn(job())
+            whenever(h.store.claim(any(), any(), any())).thenReturn(job())
             doAnswer {
                 started.countDown()
                 try { CountDownLatch(1).await() } catch (_: InterruptedException) {
@@ -477,7 +567,7 @@ class DbJobWorkerTest {
             h.worker.stop(); await(interrupted)
             assertThat(h.worker.isRunning).isFalse()
             assertThat(h.worker.probe()).isFalse()
-            verify(h.store, times(1)).claim(any(), any())
+            verify(h.store, times(1)).claim(any(), any(), any())
         }
     }
 

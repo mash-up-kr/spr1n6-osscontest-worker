@@ -55,6 +55,30 @@ class IndexingJobRepositoryIntegrationTest(
     }
 
     @Test
+    fun `DELETE 공통 완료는 DELETED와 owner lease 해제를 함께 저장한다`() {
+        queue.enqueue(UUID.randomUUID(), 1, null, JobType.DELETE, null)
+        val job = checkNotNull(queue.claim(5) {})
+        assertThat(indexingJobRepository.complete(job.token.jobId, job.token.workerId, job.token.epoch)).isEqualTo(1)
+        val snapshot = checkNotNull(queue.snapshot(job.token))
+        assertThat(snapshot.completed(job.token)).isTrue()
+        assertThat(snapshot.outcome).isEqualTo("DELETED")
+        assertThat(snapshot.workerId).isNull()
+        assertThat(snapshot.leaseUntil).isNull()
+        assertThat(indexingJobRepository.complete(job.token.jobId, job.token.workerId, job.token.epoch)).isZero()
+    }
+
+    @Test
+    fun `INDEX skip만 허용하며 DELETE를 skip outcome으로 기록하지 않는다`() {
+        queue.enqueue(UUID.randomUUID(), 1, null, JobType.DELETE, null)
+        val job = checkNotNull(queue.claim(5) {})
+        org.assertj.core.api.Assertions.assertThatThrownBy {
+            indexingJobRepository.complete(job.token.jobId, job.token.workerId, job.token.epoch,
+                com.osscontest.worker.indexing.queue.JobOutcome.SKIPPED_DOCUMENT_DELETED)
+        }.isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(queue.snapshot(job.token)!!.status).isEqualTo(IndexingJobStatus.PROCESSING)
+    }
+
+    @Test
     fun `큐 등록은 source event id에 대해 멱등이다`() {
         val event = UUID.randomUUID()
         queue.enqueue(event, 1, 1, JobType.INDEX, null)
@@ -74,7 +98,9 @@ class IndexingJobRepositoryIntegrationTest(
         entityManager.clear()
         val saved = indexingJobRepository.findById(job.token.jobId).orElseThrow()
         assertThat(saved.status).isEqualTo(IndexingJobStatus.COMPLETED)
-        assertThat(saved.workerId).isEqualTo(job.token.workerId)
+        assertThat(saved.workerId).isNull()
+        assertThat(saved.leaseUntil).isNull()
+        assertThat(saved.outcome).isEqualTo("INDEXED")
         assertThat(saved.executionEpoch).isEqualTo(job.token.epoch)
     }
 

@@ -1,13 +1,7 @@
 package com.osscontest.worker.indexing.queue
 
-import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.pipeline.service.IndexingPipelineRunner
-import org.slf4j.LoggerFactory
-import org.slf4j.MDC
-import org.springframework.beans.factory.annotation.Value
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
-import org.springframework.context.SmartLifecycle
-import org.springframework.stereotype.Component
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -17,6 +11,13 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import org.slf4j.LoggerFactory
+import org.slf4j.MDC
+import org.springframework.beans.factory.annotation.Value
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import org.springframework.context.SmartLifecycle
+import org.springframework.stereotype.Component
 
 @Component
 @ConditionalOnProperty(prefix = "indexing.queue", name = ["enabled"], havingValue = "true", matchIfMissing = true)
@@ -27,6 +28,7 @@ class DbJobWorker(
     private val runner: IndexingPipelineRunner,
     private val waiter: QueueLoopWaiter,
     @Value("\${indexing.retry.max-attempts:5}") private val maxAttempts: Int,
+    private val results: ExecutionResults,
 ) : SmartLifecycle {
     init { require(maxAttempts > 0) }
 
@@ -34,7 +36,10 @@ class DbJobWorker(
     @Volatile private var current: Generation? = null
     // Reservations include claim/DB waits and survive stop/start until old loops actually exit.
     private val slots = Semaphore(properties.concurrency)
-    private class RunningExecution(private val thread: Thread) {
+    // A configured instance label may survive a restart; the boot ID must not.
+    private val instanceId = "${properties.workerId}.${UUID.randomUUID()}"
+    private val claimIds = AtomicLong()
+    private class RunningExecution(private val thread: Thread, val job: ClaimedJob) {
         private var closed = false
         @Synchronized fun close() { closed = true }
         @Synchronized fun revoke() { if (!closed) thread.interrupt() }
@@ -61,7 +66,7 @@ class DbJobWorker(
             properties.pollInterval.toMillis(), TimeUnit.MILLISECONDS)
         generation.heartbeats.scheduleWithFixedDelay({ guarded { heartbeat(generation) } },
             properties.heartbeatInterval.toMillis(), properties.heartbeatInterval.toMillis(), TimeUnit.MILLISECONDS)
-        log.info("WORKER_STARTED workerId={} maxConcurrency={}", properties.workerId, properties.concurrency)
+        log.info("WORKER_STARTED workerId={} maxConcurrency={}", instanceId, properties.concurrency)
     }
 
     override fun stop(): Unit = synchronized(lifecycle) {
@@ -115,16 +120,17 @@ class DbJobWorker(
 
     private fun claim(generation: Generation): ClaimedJob? {
         var prepared: ExecutionToken? = null
+        val ownerId = "$instanceId-${claimIds.updateAndGet { Math.incrementExact(it) }}"
         return database.execute {
             if (!generation.running.get()) throw InterruptedException("Worker stopping")
             val previous = prepared
             if (previous != null) store.resolveClaim(previous)
-            else store.claim(maxAttempts) { prepared = it }
+            else store.claim(maxAttempts, ownerId) { prepared = it }
         }
     }
 
     private fun runJob(generation: Generation, job: ClaimedJob) {
-        val handle = RunningExecution(Thread.currentThread())
+        val handle = RunningExecution(Thread.currentThread(), job)
         synchronized(lifecycle) {
             if (current !== generation || !generation.running.get()) return
             generation.active[job.token] = handle
@@ -154,6 +160,7 @@ class DbJobWorker(
         } finally {
             handle.close()
             generation.active.remove(job.token, handle)
+            results.forget(job.token)
             MDC.remove("traceId")
             // Job cancellation must not poison the next claim. A stopped generation never resumes.
             if (generation.running.get()) Thread.interrupted()
@@ -175,8 +182,8 @@ class DbJobWorker(
                     store.snapshot(token)
                 }
                 if (generation.active.remove(token, handle) &&
-                    (snapshot == null || !snapshot.matches(token) || snapshot.status != IndexingJobStatus.COMPLETED) &&
-                    snapshot?.isReleasedFailure(token) != true) {
+                    (snapshot == null || !snapshot.completed(token) || !snapshot.identifies(handle.job)) &&
+                    (snapshot == null || !results.isOwnFailure(snapshot, token))) {
                     handle.revoke()
                 }
             }
