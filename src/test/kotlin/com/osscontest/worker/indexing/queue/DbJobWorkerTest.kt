@@ -161,7 +161,7 @@ class DbJobWorkerTest {
         val job = ClaimedJob(testToken, JobType.INDEX, UUID.randomUUID(), 2, 3, null)
         whenever(store.claim(any(), anyOrNull(), any())).thenReturn(job, null)
         whenever(store.snapshot(testToken)).thenReturn(JobSnapshot(null, testToken.epoch,
-            com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.RETRY_WAIT, null, testNow.plusSeconds(30), testNow))
+            com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.RETRY_WAIT, null, testNow.plusSeconds(30), testNow, testToken.epoch))
         doAnswer {
             released.countDown()
             try { finish.await(3, TimeUnit.SECONDS) }

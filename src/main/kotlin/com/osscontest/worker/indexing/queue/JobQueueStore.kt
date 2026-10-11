@@ -1,106 +1,81 @@
 package com.osscontest.worker.indexing.queue
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
-import com.osscontest.worker.indexing.pipeline.domain.JobOutcome
 import org.springframework.jdbc.core.RowMapper
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.annotation.Isolation
+import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 
 /** All lease decisions use the DB clock; no waiting occurs inside these transactions. */
 @Repository
-class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val properties: QueueProperties) {
-    private val jobMapper = RowMapper { rs, _ ->
-        ClaimedJob(
-            ExecutionToken(rs.getLong("id"), rs.getString("worker_id"), rs.getLong("execution_epoch")),
-            JobType.valueOf(rs.getString("job_type")),
-            rs.getObject("source_event_id", UUID::class.java),
-            rs.getLong("document_id"),
-            (rs.getObject("document_version_id") as Number?)?.toLong(),
-            rs.getString("trace_id"),
-            rs.getInt("attempt_count"),
-        )
-    }
+class JobQueueStore(
+    private val jdbc: NamedParameterJdbcTemplate,
+    private val properties: QueueProperties,
+    private val claims: JobClaimTransactions,
+    private val locks: JobExecutionLocks,
+    private val ownership: JobOwnershipGuard,
+) {
+    fun claim(maxAttempts: Int, prepared: (ExecutionToken) -> Unit): ClaimedJob? =
+        claimForWorker(properties.workerId, properties.leaseDuration.toMillis(), maxAttempts, prepared)
 
-    /** [onlyType]을 주면 그 종류의 Job만 후보로 본다. 같은 문서의 선행 Job 순서 조건은 그대로 지킨다. */
-    @Transactional
-    fun claim(maxAttempts: Int, onlyType: JobType? = null, prepared: (ExecutionToken) -> Unit): ClaimedJob? =
-        claimForWorker(properties.workerId, properties.leaseDuration.toMillis(), maxAttempts, onlyType, prepared)
-
-    @Transactional
-    fun claimForWorker(workerId: String, leaseMillis: Long, maxAttempts: Int, onlyType: JobType? = null,
+    fun claimForWorker(workerId: String, leaseMillis: Long, maxAttempts: Int,
                        prepared: (ExecutionToken) -> Unit = {}): ClaimedJob? {
-        require(leaseMillis > 0 && maxAttempts > 0)
-        // 종류 값은 enum 이름이라 문자열 보간이 안전하다.
-        val typeFilter = onlyType?.let { "AND j.job_type = '${it.name}'" }.orEmpty()
-        val candidates = jdbc.query(
-            """
-            SELECT j.id, d.execution_epoch FROM indexing_job j
-            JOIN document d ON d.id = j.document_id
-            WHERE j.worker_id IS NULL AND j.lease_until IS NULL
-              AND j.attempt_count < :maxAttempts
-              AND (j.status = 'PENDING' OR (j.status = 'RETRY_WAIT' AND j.next_retry_at <= $UTC_NOW))
-              $typeFilter
-              AND NOT EXISTS (
-                  SELECT 1 FROM indexing_job predecessor
-                  WHERE predecessor.document_id = j.document_id AND predecessor.enqueue_seq < j.enqueue_seq
-                    AND predecessor.status IN ('PENDING', 'PROCESSING', 'RETRY_WAIT')
-              )
-            ORDER BY j.enqueue_seq
-            LIMIT 1 FOR UPDATE OF j, d SKIP LOCKED
-            """.trimIndent(), mapOf("maxAttempts" to maxAttempts),
-        ) { rs, _ -> rs.getLong("id") to rs.getLong("execution_epoch") }
-        val candidate = candidates.firstOrNull() ?: return null
-        val token = ExecutionToken(candidate.first, workerId, candidate.second + 1)
-        // Capture before UPDATE/COMMIT so a lost response resolves this exact generation.
-        prepared(token)
-        check(jdbc.update(
-            """
-            WITH bumped AS (
-                UPDATE document d SET execution_epoch = :epoch
-                FROM indexing_job j WHERE j.id = :id AND d.id = j.document_id
-                  AND d.execution_epoch = :previousEpoch
-                RETURNING d.id
-            )
-            UPDATE indexing_job j SET status = 'PROCESSING', worker_id = :workerId,
-                execution_epoch = :epoch, lease_until = clock_timestamp() + :leaseMillis * INTERVAL '1 millisecond',
-                attempt_count = attempt_count + 1, next_retry_at = NULL,
-                started_at = COALESCE(started_at, $UTC_NOW), updated_at = $UTC_NOW
-            FROM bumped b WHERE j.id = :id AND j.document_id = b.id AND j.worker_id IS NULL
-            """.trimIndent(), token.params() + mapOf("previousEpoch" to candidate.second, "leaseMillis" to leaseMillis),
-        ) == 1)
-        return resolveClaim(token)
+        require(workerId.isNotBlank() && leaseMillis > 0 && maxAttempts > 0)
+        val excluded = mutableSetOf<Long>()
+        repeat(CLAIM_CANDIDATE_LIMIT) {
+            when (val attempt = claims.claim(workerId, leaseMillis, maxAttempts, excluded, prepared)) {
+                ClaimAttempt.Empty -> return null
+                is ClaimAttempt.Acquired -> return attempt.job
+                is ClaimAttempt.Skipped -> {
+                    // An enclosing caller owns its transaction; it must release that lock before retrying.
+                    if (TransactionSynchronizationManager.isActualTransactionActive()) return null
+                    excluded.add(attempt.documentId)
+                }
+            }
+        }
+        return null
     }
 
     fun resolveClaim(token: ExecutionToken): ClaimedJob? = jdbc.query(
-        "SELECT * FROM indexing_job WHERE id = :id AND worker_id = :workerId AND execution_epoch = :epoch " +
-            "AND status = 'PROCESSING'",
-        token.params(), jobMapper,
-    ).firstOrNull()
+        """
+        SELECT j.* FROM indexing_job j JOIN document d ON d.id = j.document_id
+        WHERE j.id = :id AND j.worker_id = :workerId AND j.execution_epoch = :epoch
+          AND d.execution_epoch = :epoch AND j.status = 'PROCESSING' AND j.lease_until IS NOT NULL
+        """.trimIndent(), token.params(), JobExecutionLocks.JOB_MAPPER,
+    ).firstOrNull()?.claimed()
 
     fun snapshot(token: ExecutionToken): JobSnapshot? = jdbc.query(
         """
-        SELECT worker_id, execution_epoch, status, lease_until,
-               next_retry_at AS retry_at, clock_timestamp() AS db_now
-        FROM indexing_job WHERE id = :id
+        SELECT j.worker_id, j.execution_epoch, j.status, j.lease_until, d.execution_epoch AS document_epoch,
+               j.next_retry_at AS retry_at, clock_timestamp() AS db_now
+        FROM indexing_job j LEFT JOIN document d ON d.id = j.document_id WHERE j.id = :id
         """.trimIndent(), token.params(),
     ) { rs, _ ->
         JobSnapshot(rs.getString("worker_id"), rs.getLong("execution_epoch"),
             IndexingJobStatus.valueOf(rs.getString("status")), rs.getTimestamp("lease_until")?.toInstant(),
-            rs.getTimestamp("retry_at")?.toInstant(), rs.getTimestamp("db_now").toInstant())
+            rs.getTimestamp("retry_at")?.toInstant(), rs.getTimestamp("db_now").toInstant(),
+            (rs.getObject("document_epoch") as Number?)?.toLong())
     }.firstOrNull()
 
-    fun renew(token: ExecutionToken): Int = jdbc.update(
-        """
-        UPDATE indexing_job SET lease_until = clock_timestamp() + :leaseMillis * INTERVAL '1 millisecond',
-            updated_at = $UTC_NOW
-        WHERE id = :id AND worker_id = :workerId AND execution_epoch = :epoch
-          AND status = 'PROCESSING' AND lease_until IS NOT NULL
-        """.trimIndent(), token.params() + ("leaseMillis" to properties.leaseDuration.toMillis()),
-    )
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    fun renew(token: ExecutionToken): Int {
+        val execution = locks.lock(token.jobId) ?: return 0
+        if (!ownership.owns(execution, token)) return 0
+        return jdbc.update(
+            """
+            UPDATE indexing_job j SET lease_until = clock_timestamp() + :leaseMillis * INTERVAL '1 millisecond',
+                updated_at = clock_timestamp()
+            WHERE j.id = :id AND j.worker_id = :workerId AND j.execution_epoch = :epoch
+              AND j.status = 'PROCESSING' AND j.lease_until IS NOT NULL
+              AND EXISTS (SELECT 1 FROM document d WHERE d.id = j.document_id AND d.execution_epoch = :epoch)
+            """.trimIndent(), token.params() + ("leaseMillis" to properties.leaseDuration.toMillis()),
+        )
+    }
 
     fun dbNow(): Instant = checkNotNull(jdbc.queryForObject("SELECT clock_timestamp()", emptyMap<String, Any>(),
         RowMapper { rs, _ -> rs.getTimestamp(1).toInstant() }))
@@ -110,28 +85,6 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
         require(maxAttempts > 0 && baseDelay.toMillis() > 0)
         val recovered = checkNotNull(jdbc.queryForObject("SELECT recover_expired_indexing_jobs(:maxAttempts, :baseMillis)",
             mapOf("maxAttempts" to maxAttempts, "baseMillis" to baseDelay.toMillis()), Long::class.java))
-        // 삭제된 문서는 시도 횟수와 무관하게 정상 종결해야 하므로 시도 횟수 초과 처리보다 먼저 실행한다.
-        completeDeletedDocumentJobs()
-        failExhaustedJobs(maxAttempts)
-        failIneligibleJobs()
-        return recovered
-    }
-
-    /** 삭제된 문서의 미종결 INDEX Job을 오류가 아닌 정상 종결(SKIPPED)로 정리해 후속 DELETE Job이 막히지 않게 한다. */
-    private fun completeDeletedDocumentJobs() {
-        // worker_id를 비우고 epoch를 올려 실행 중인 Worker의 실행권을 무효화한다. outcome 값은 상수라 문자열 보간이 안전하다.
-        jdbc.update(
-            """
-            UPDATE indexing_job j SET status = 'COMPLETED', outcome = '${JobOutcome.SKIPPED_DOCUMENT_DELETED}',
-                completed_at = $UTC_NOW, updated_at = $UTC_NOW, next_retry_at = NULL,
-                worker_id = NULL, lease_until = NULL, execution_epoch = execution_epoch + 1
-            WHERE j.job_type = 'INDEX' AND j.status IN ('PENDING','PROCESSING','RETRY_WAIT')
-              AND EXISTS (SELECT 1 FROM document d WHERE d.id = j.document_id AND d.deleted_at IS NOT NULL)
-            """.trimIndent(), emptyMap<String, Any>(),
-        )
-    }
-
-    private fun failExhaustedJobs(maxAttempts: Int) {
         jdbc.update(
             """
             UPDATE indexing_job j SET status = 'FAILED', completed_at = $UTC_NOW, updated_at = $UTC_NOW,
@@ -140,10 +93,7 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
             WHERE worker_id IS NULL AND status IN ('PENDING', 'RETRY_WAIT') AND attempt_count >= :maxAttempts
             """.trimIndent(), mapOf("maxAttempts" to maxAttempts),
         )
-    }
-
-    /** 문서-버전 불일치와 과거 버전 재시도는 비정상 입력이므로 FAILED로 남겨 추적한다. 삭제된 문서는 여기서 다루지 않는다. */
-    private fun failIneligibleJobs() {
+        // Reject deleted documents and late historical retries before they can block successors.
         jdbc.update(
             """
             UPDATE indexing_job j SET status = 'FAILED', completed_at = $UTC_NOW, updated_at = $UTC_NOW,
@@ -153,7 +103,7 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
               AND EXISTS (
                 SELECT 1 FROM document d JOIN document_version candidate ON candidate.id = j.document_version_id
                 WHERE d.id = j.document_id AND (
-                    candidate.document_id <> d.id OR
+                    d.deleted_at IS NOT NULL OR candidate.document_id <> d.id OR
                     EXISTS (SELECT 1 FROM document_version searchable
                             WHERE searchable.id = d.searchable_version_id AND searchable.version_no > candidate.version_no) OR
                     EXISTS (SELECT 1 FROM indexing_job prior JOIN document_version v ON v.id = prior.document_version_id
@@ -162,6 +112,7 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
               )
             """.trimIndent(), emptyMap<String, Any>(),
         )
+        return recovered
     }
 
     /** 문서 행을 잠그고 source_event_id가 중복되지 않는 Job을 등록한다. */
@@ -181,6 +132,8 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
     }
 
     companion object {
+        // Bound retries against legacy Job-only locks; normal writers lock the document first.
+        private const val CLAIM_CANDIDATE_LIMIT = 32
         const val UTC_NOW = "clock_timestamp()"
         fun ExecutionToken.params(): Map<String, Any> = mapOf("id" to jobId, "workerId" to workerId, "epoch" to epoch)
     }

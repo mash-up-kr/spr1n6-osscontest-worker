@@ -12,7 +12,29 @@ class ExecutionOperationsTest {
     private val store: JobQueueStore = mock()
     private val execution = ExecutionOperations(directDatabase(), store)
     private fun snapshot(epoch: Long = testToken.epoch, expired: Boolean = false) = JobSnapshot(testToken.workerId, epoch,
-        IndexingJobStatus.PROCESSING, testNow.plusSeconds(if (expired) -1 else 60), null, testNow)
+        IndexingJobStatus.PROCESSING, testNow.plusSeconds(if (expired) -1 else 60), null, testNow, testToken.epoch)
+
+    @Test
+    fun `문서 epoch만 바뀌어도 이전 실행은 갱신하거나 DB 작업을 재개하지 않는다`() {
+        whenever(store.snapshot(testToken)).thenReturn(snapshot().copy(documentEpoch = 2))
+        assertThatThrownBy { execution.checkpoint(testToken) }.isInstanceOf(ExecutionLostException::class.java)
+        verify(store, never()).renew(any())
+    }
+
+    @Test
+    fun `lease 갱신 뒤에도 전체 실행권을 다시 확인한다`() {
+        whenever(store.snapshot(testToken)).thenReturn(snapshot(expired = true), snapshot().copy(documentEpoch = 2))
+        whenever(store.renew(testToken)).thenReturn(1)
+        assertThatThrownBy { execution.checkpoint(testToken) }.isInstanceOf(ExecutionLostException::class.java)
+    }
+
+    @Test
+    fun `완료 확인은 후속 Job으로 증가한 문서 epoch와 무관하다`() {
+        whenever(store.snapshot(testToken)).thenReturn(snapshot().copy(status = IndexingJobStatus.COMPLETED,
+            documentEpoch = 2, leaseUntil = null))
+        execution.checkpoint(testToken, allowCompleted = true)
+        verify(store, never()).renew(any())
+    }
 
     @Test
     fun `아직 회수되지 않은 동일 실행의 만료 lease는 조건부 연장 후 재개한다`() {

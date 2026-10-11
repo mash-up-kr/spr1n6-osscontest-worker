@@ -31,7 +31,7 @@ class IndexingFailureService(
         baseDelay: Duration,
         retryAfter: String? = null,
     ): IndexingJobStatus {
-        val job = indexingJobRepository.findByIdForUpdate(token.jobId) ?: throw ExecutionLostException(token)
+        val job = ownership.lockForResult(token)
         if (job.executionEpoch != token.epoch) throw ExecutionLostException(token)
         // The failure commit clears the owner. Its unchanged epoch proves this execution's release.
         if (job.workerId == null && job.leaseUntil == null &&

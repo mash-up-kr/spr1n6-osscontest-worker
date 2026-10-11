@@ -26,8 +26,11 @@ data class JobSnapshot(
     val leaseUntil: Instant?,
     val retryAt: Instant?,
     val now: Instant,
+    val documentEpoch: Long?,
 ) {
     fun matches(token: ExecutionToken) = workerId == token.workerId && epoch == token.epoch
+    fun ownsProcessing(token: ExecutionToken) = matches(token) && documentEpoch == token.epoch &&
+        status == IndexingJobStatus.PROCESSING && leaseUntil != null
 }
 
 class ExecutionLostException(val token: ExecutionToken) : RuntimeException("Execution no longer owned: $token")

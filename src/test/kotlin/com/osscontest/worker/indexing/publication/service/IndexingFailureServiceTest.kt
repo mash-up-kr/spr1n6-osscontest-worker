@@ -15,18 +15,26 @@ import java.time.Duration
 
 class IndexingFailureServiceTest {
     private val jobs: IndexingJobRepository = mock()
-    private val store: JobQueueStore = mock<JobQueueStore>().apply { whenever(dbNow()).thenReturn(testNow) }
+    private val locks: JobExecutionLocks = mock()
     private val meters = SimpleMeterRegistry()
     private val policy = RetryPolicy(RetryJitter { 1.0 })
-    private val service = IndexingFailureService(jobs, meters, JobOwnershipGuard(jobs, store), policy)
+    private val service = IndexingFailureService(jobs, meters, JobOwnershipGuard(locks), policy)
 
     private fun fail(permanent: Boolean = false) = service.recordFailure(testToken, "TIMEOUT", "message",
         permanent, 5, Duration.ofSeconds(30))
 
     private fun setup(attempts: Int = 1) {
-        whenever(jobs.findByIdForUpdate(1)).thenReturn(processingJob(attempt = attempts))
+        whenever(locks.lock(1)).thenReturn(lockedJob(processingJob(attempt = attempts)))
         whenever(jobs.currentDbTimestamp()).thenReturn(testNow)
         whenever(jobs.fail(any(), any(), any(), any(), anyOrNull(), any(), any())).thenReturn(1)
+    }
+
+    @Test
+    fun `문서 epoch 불일치는 실패 상태와 메트릭을 기록하지 않는다`() {
+        whenever(locks.lock(1)).thenReturn(lockedJob(documentEpoch = 2))
+        assertThatThrownBy { fail() }.isInstanceOf(ExecutionLostException::class.java)
+        verify(jobs, never()).fail(any(), any(), any(), any(), anyOrNull(), any(), any())
+        assertThat(meters.meters).isEmpty()
     }
 
     @Test
@@ -51,7 +59,7 @@ class IndexingFailureServiceTest {
         val released = processingJob(status = IndexingJobStatus.RETRY_WAIT).apply {
             workerId = null; leaseUntil = null; nextRetryAt = testNow.plusSeconds(30)
         }
-        whenever(jobs.findByIdForUpdate(1)).thenReturn(released)
+        whenever(locks.lock(1)).thenReturn(lockedJob(released, documentEpoch = 2))
         assertThat(fail()).isEqualTo(IndexingJobStatus.RETRY_WAIT)
         verify(jobs, never()).fail(any(), any(), any(), any(), anyOrNull(), any(), any())
         assertThat(meters.meters).isEmpty()
@@ -59,7 +67,7 @@ class IndexingFailureServiceTest {
 
     @Test
     fun `다음 claim의 epoch는 실패 재호출로 덮어쓰지 않는다`() {
-        whenever(jobs.findByIdForUpdate(1)).thenReturn(processingJob(testToken.copy(epoch = 2)))
+        whenever(locks.lock(1)).thenReturn(lockedJob(processingJob(testToken.copy(epoch = 2))))
         assertThatThrownBy { fail() }.isInstanceOf(ExecutionLostException::class.java)
         verify(jobs, never()).fail(any(), any(), any(), any(), anyOrNull(), any(), any())
     }

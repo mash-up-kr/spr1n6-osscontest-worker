@@ -40,7 +40,7 @@ class IndexingPipelineRunnerTest {
 
     private fun setup() {
         whenever(store.snapshot(testToken)).thenReturn(JobSnapshot(testToken.workerId, testToken.epoch,
-            IndexingJobStatus.PROCESSING, testNow.plusSeconds(60), null, testNow))
+            IndexingJobStatus.PROCESSING, testNow.plusSeconds(60), null, testNow, testToken.epoch))
         whenever(documents.findById(2)).thenReturn(Optional.of(DocumentEntity(2, 1, null, null)))
         whenever(versions.findById(3)).thenReturn(Optional.of(DocumentVersionEntity(3, 2, 1, "key", "text/plain",
             "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", fileSize = 11)))

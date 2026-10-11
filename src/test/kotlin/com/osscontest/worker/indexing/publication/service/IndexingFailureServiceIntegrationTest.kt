@@ -68,6 +68,7 @@ class IndexingFailureServiceIntegrationTest(
         status: IndexingJobStatus,
         attemptCount: Int,
     ): Long {
+        jdbcTemplate.update("UPDATE document SET execution_epoch = 1 WHERE id = 1")
         val job =
             indexingJobRepository.save(
                 IndexingJobEntity(

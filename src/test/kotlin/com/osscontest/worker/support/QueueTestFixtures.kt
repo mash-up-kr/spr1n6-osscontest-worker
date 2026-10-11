@@ -5,6 +5,7 @@ import com.osscontest.worker.indexing.publication.entity.IndexingJobEntity
 import com.osscontest.worker.indexing.queue.DatabaseOperations
 import com.osscontest.worker.indexing.queue.ExecutionOperations
 import com.osscontest.worker.indexing.queue.ExecutionToken
+import com.osscontest.worker.indexing.queue.LockedJobExecution
 import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
@@ -30,3 +31,6 @@ fun directExecution(): ExecutionOperations = mock<ExecutionOperations>().apply {
     whenever(failure<Any?>(any(), any())).thenAnswer { it.getArgument<() -> Any?>(1)() }
     whenever(database<Any?>(any(), any(), any())).thenAnswer { it.getArgument<() -> Any?>(2)() }
 }
+
+fun lockedJob(job: IndexingJobEntity = processingJob(), documentEpoch: Long = job.executionEpoch) =
+    LockedJobExecution(job, documentEpoch, testNow)
