@@ -3,6 +3,7 @@ package com.osscontest.worker.indexing.pipeline.service
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.support.testNow
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import java.time.Duration
 
@@ -39,5 +40,22 @@ class RetryPolicyTest {
         assertThat(policy.decideFailure(false, 1, 5, base, testNow, "60").nextRetryAt).isEqualTo(testNow.plusSeconds(60))
         assertThat(policy.decideFailure(false, 1, 5, base, testNow, "Sat, 10 Oct 2026 00:02:00 GMT").nextRetryAt)
             .isEqualTo(testNow.plusSeconds(120))
+    }
+
+    @Test
+    fun `Retry After의 0 동일 기한 과거 날짜는 지연을 줄이지 않고 앞뒤 공백은 허용한다`() {
+        val policy = RetryPolicy(RetryJitter { 1.0 })
+        for (value in listOf("0", "30", "Fri, 09 Oct 2026 00:00:00 GMT")) {
+            assertThat(policy.decideFailure(false, 1, 5, base, testNow, value).nextRetryAt).isEqualTo(testNow.plusSeconds(30))
+        }
+        assertThat(policy.decideFailure(false, 1, 5, base, testNow, " 60 ").nextRetryAt).isEqualTo(testNow.plusSeconds(60))
+    }
+
+    @Test
+    fun `범위를 벗어나거나 유한하지 않은 지터는 임의 deadline으로 저장하지 않는다`() {
+        for (factor in listOf(0.79, 1.21, Double.NaN, Double.POSITIVE_INFINITY)) {
+            assertThatThrownBy { RetryPolicy(RetryJitter { factor }).decideFailure(false, 1, 5, base, testNow) }
+                .isInstanceOf(IllegalArgumentException::class.java)
+        }
     }
 }

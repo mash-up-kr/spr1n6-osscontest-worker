@@ -20,6 +20,7 @@ import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
+import org.mockito.kotlin.verifyNoInteractions
 import org.mockito.kotlin.whenever
 
 class IndexingPublicationServiceTest {
@@ -82,8 +83,11 @@ class IndexingPublicationServiceTest {
         whenever(documentChunkRepository.countByDocumentVersionId(3)).thenReturn(1)
         whenever(documentVersionRepository.complete(3, 2, 1, context().extractedMetadata)).thenReturn(1)
         whenever(indexingJobRepository.complete(1, "worker", 1, JobOutcome.INDEXED)).thenReturn(1)
-        assertThat(service.publish(context(), listOf(chunk(0)))).isEqualTo(IndexingJobStatus.COMPLETED)
-        verify(documentChunkWriter).upsertAll(any())
+        val chunks = listOf(chunk(0))
+        assertThat(service.publish(context(), chunks)).isEqualTo(IndexingJobStatus.COMPLETED)
+        verify(documentChunkWriter).upsertAll(chunks)
+        verify(documentChunkRepository).deleteTrailingChunks(3, 0)
+        verify(documentVersionRepository).complete(3, 2, 1, context().extractedMetadata)
         verify(documentRepository, never()).promoteSearchableVersion(any(), any())
         verify(indexingJobRepository).complete(1, "worker", 1, JobOutcome.INDEXED)
     }
@@ -96,6 +100,35 @@ class IndexingPublicationServiceTest {
         whenever(state.version(4)).thenReturn(com.osscontest.worker.indexing.publication.repository.PublicationVersion(99, 2))
         assertThatThrownBy { service.publish(context(), listOf(chunk(0))) }.isInstanceOf(IllegalStateException::class.java)
         verify(documentChunkWriter, never()).upsertAll(any())
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = ["worker", "job-epoch", "document-epoch", "no-lease", "RETRY_WAIT", "FAILED", "expired"])
+    fun `구버전이라도 실행권이나 유효 lease가 없으면 결과 버전 검색 포인터 Job을 변경하지 않는다`(condition: String) {
+        val job = processingJob()
+        var documentEpoch = testToken.epoch
+        when (condition) {
+            "worker" -> job.workerId = "other"
+            "job-epoch" -> job.executionEpoch++
+            "document-epoch" -> documentEpoch++
+            "no-lease" -> job.leaseUntil = null
+            "expired" -> job.leaseUntil = testNow.minusSeconds(1)
+            else -> {
+                job.status = IndexingJobStatus.valueOf(condition)
+                job.workerId = null
+                job.leaseUntil = null
+                job.nextRetryAt = if (job.status == IndexingJobStatus.RETRY_WAIT) testNow.plusSeconds(30) else null
+            }
+        }
+        whenever(locks.lock(1)).thenReturn(lockedJob(job, documentEpoch))
+        whenever(state.document(2)).thenReturn(com.osscontest.worker.indexing.publication.repository.PublicationDocument(false, 4))
+        whenever(state.version(3)).thenReturn(com.osscontest.worker.indexing.publication.repository.PublicationVersion(2, 1))
+        whenever(state.version(4)).thenReturn(com.osscontest.worker.indexing.publication.repository.PublicationVersion(2, 2))
+
+        assertThatThrownBy { service.publish(context(), listOf(chunk(0))) }
+            .isInstanceOf(if (condition == "expired") LeaseExpiredException::class.java else ExecutionLostException::class.java)
+        verifyNoInteractions(state, documentChunkWriter, documentChunkRepository, documentVersionRepository,
+            documentRepository, indexingJobRepository)
     }
 
     @Test

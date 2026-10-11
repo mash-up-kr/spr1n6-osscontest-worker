@@ -11,6 +11,19 @@ import com.osscontest.worker.indexing.publication.repository.*
 import com.osscontest.worker.indexing.queue.*
 import com.osscontest.worker.support.CommitResponseLossDataSource
 import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
+import com.osscontest.worker.support.seedReleasedExecution
+import com.osscontest.worker.indexing.chunking.domain.Chunk
+import com.osscontest.worker.indexing.chunking.service.ChunkGuard
+import com.osscontest.worker.indexing.chunking.service.ChunkingService
+import com.osscontest.worker.indexing.chunking.service.ChunkingStrategy
+import com.osscontest.worker.indexing.embedding.service.EmbeddingIndexingProcessor
+import com.osscontest.worker.indexing.embedding.service.NoriTokenizer
+import com.osscontest.worker.indexing.embedding.usecase.EmbeddingUseCase
+import com.osscontest.worker.indexing.parsing.DocumentParserRegistry
+import com.osscontest.worker.indexing.parsing.ParsingTimeoutGuard
+import com.osscontest.worker.indexing.pipeline.service.IndexingPipelineRunner
+import com.osscontest.worker.indexing.retrieval.DocumentDownloadClient
+import com.osscontest.worker.indexing.deletion.service.DocumentDeletionService
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import jakarta.persistence.EntityManagerFactory
 import org.assertj.core.api.Assertions.assertThat
@@ -34,13 +47,19 @@ import org.springframework.test.context.junit.jupiter.SpringJUnitConfig
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.annotation.EnableTransactionManagement
 import org.springframework.transaction.support.TransactionTemplate
+import org.springframework.transaction.support.TransactionSynchronizationManager
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
+import java.time.Clock
 import java.time.LocalDateTime
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import javax.sql.DataSource
 
 /** Worker-owned private schema. Uses the real JDBC writer and JPA repositories on one transaction manager. */
@@ -62,6 +81,7 @@ class PublicationTransactionsIntegrationTest(
     @MockitoSpyBean private lateinit var documents: DocumentRepository
     @MockitoSpyBean private lateinit var jobs: IndexingJobRepository
     @MockitoSpyBean private lateinit var state: PublicationStateReader
+    @MockitoSpyBean private lateinit var store: JobQueueStore
 
     @Configuration
     @EnableTransactionManagement(proxyTargetClass = true)
@@ -152,6 +172,7 @@ class PublicationTransactionsIntegrationTest(
     @ParameterizedTest @ValueSource(strings = ["upsert", "trailing", "version", "promotion", "completion"])
     fun `각 저장 단계 중단은 청크 버전 검색 Job을 함께 롤백한다`(stage: String) {
         val job = claim(); val before = row(job)
+        val allBefore = databaseState()
         val interrupt = { error("stop after $stage") }
         when (stage) {
             "upsert" -> doAnswer { it.callRealMethod(); interrupt() }.whenever(writer).upsertAll(any())
@@ -162,16 +183,19 @@ class PublicationTransactionsIntegrationTest(
         }
         assertThatThrownBy { publish(job) }.isInstanceOf(IllegalStateException::class.java)
         assertRolledBack(job, before)
+        assertThat(databaseState()).isEqualTo(allBefore)
     }
 
     @Test fun `완료 직전 lease 만료는 이미 쓴 결과 전체를 롤백한다`() {
         val job = claim(); val before = row(job)
+        val allBefore = databaseState()
         doAnswer {
             jdbc.update("UPDATE indexing_job SET lease_until=clock_timestamp()-INTERVAL '1 second' WHERE id=?", job.token.jobId)
             it.callRealMethod()
         }.whenever(jobs).complete(any(), any(), any(), any())
         assertThatThrownBy { publish(job) }.isInstanceOf(LeaseExpiredException::class.java)
         assertRolledBack(job, before)
+        assertThat(databaseState()).isEqualTo(allBefore)
     }
 
     @ParameterizedTest @ValueSource(longs = [1, 2])
@@ -191,6 +215,14 @@ class PublicationTransactionsIntegrationTest(
         jdbc.update("UPDATE document SET searchable_version_id=1,latest_embedding_version_no=1 WHERE id=1")
         val job = claim(2); val before = row(job); publish(job)
         val after = row(job)
+        assertThat(after["status"]).isEqualTo("COMPLETED")
+        assertThat(after["outcome"]).isEqualTo("INDEXED")
+        assertThat(after["worker_id"]).isNull()
+        assertThat(after["lease_until"]).isNull()
+        assertThat(jdbc.queryForObject("SELECT chunk_count FROM document_version WHERE id=2", Int::class.java)).isEqualTo(1)
+        assertThat(jdbc.queryForObject("SELECT indexed_at FROM document_version WHERE id=2", java.sql.Timestamp::class.java)).isNotNull()
+        assertThat(jdbc.queryForObject("SELECT extracted_metadata->>'language' FROM document_version WHERE id=2", String::class.java)).isEqualTo("ko")
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM document_chunk WHERE document_version_id=2", Int::class.java)).isEqualTo(1)
         assertThat(jdbc.queryForObject("SELECT searchable_version_id FROM document WHERE id=1", Long::class.java)).isEqualTo(2)
         for (column in listOf("enqueue_seq", "execution_epoch", "attempt_count", "source_event_id")) {
             assertThat(after[column]).isEqualTo(before[column])
@@ -323,6 +355,368 @@ class PublicationTransactionsIntegrationTest(
             deletion.get(5, TimeUnit.SECONDS)
             assertThat(row(job)["outcome"]).isEqualTo("INDEXED")
         } finally { finish.countDown(); pool.shutdownNow() }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["worker", "request-epoch", "document-epoch", "no-lease", "PENDING", "RETRY_WAIT", "FAILED", "COMPLETED"])
+    fun `실패 서비스와 실제 finalize 가드 거절은 문서 버전 Job 결과 데이터를 모두 보존한다`(condition: String) {
+        val job = claim()
+        var token = job.token
+        when (condition) {
+            "worker" -> token = token.copy(workerId = "other")
+            "request-epoch" -> token = token.copy(epoch = token.epoch + 1)
+            "document-epoch" -> jdbc.update("UPDATE document SET execution_epoch=execution_epoch+1 WHERE id=1")
+            "no-lease" -> jdbc.update("UPDATE indexing_job SET lease_until=NULL WHERE id=?", token.jobId)
+            else -> jdbc.update("UPDATE indexing_job SET status=? WHERE id=?", condition, token.jobId)
+        }
+        val before = databaseState()
+        assertThatThrownBy { failures.recordFailure(token, "ERROR", "test", false, 5, Duration.ofSeconds(30)) }
+            .isInstanceOf(ExecutionLostException::class.java)
+        assertThatThrownBy { publication.publish(context(job.copy(token = token)), listOf(chunk(job))) }
+            .isInstanceOf(ExecutionLostException::class.java)
+        assertThat(databaseState()).isEqualTo(before)
+        verify(writer, never()).upsertAll(any())
+    }
+
+    @ParameterizedTest @ValueSource(strings = ["RETRY_WAIT", "FAILED"])
+    fun `커밋된 외부 회수 fixture는 재claim 전 이전 Worker의 모든 변경을 차단한다`(released: String) {
+        val job = claim()
+        val status = IndexingJobStatus.valueOf(released)
+        seedReleasedExecution(jdbc, job.token, status,
+            if (status == IndexingJobStatus.RETRY_WAIT) queue.dbNow().plusSeconds(60) else null)
+        val before = databaseState()
+        assertThat(queue.renew(job.token)).isZero()
+        assertThat(jobs.updatePhase(job.token.jobId, "PARSING", job.token.workerId, job.token.epoch)).isZero()
+        assertThat(jobs.complete(job.token.jobId, job.token.workerId, job.token.epoch)).isZero()
+        assertThatThrownBy { failures.recordFailure(job.token, "ERROR", "test", false, 5, Duration.ofSeconds(30)) }
+            .isInstanceOf(ExecutionLostException::class.java)
+        assertThatThrownBy { publish(job) }.isInstanceOf(ExecutionLostException::class.java)
+        assertThat(databaseState()).isEqualTo(before)
+    }
+
+    @Test fun `다른 Worker 재claim 뒤 이전 실패와 finalize는 새 실행 lease와 결과를 덮어쓰지 못한다`() {
+        val old = claim()
+        seedReleasedExecution(jdbc, old.token, IndexingJobStatus.RETRY_WAIT, queue.dbNow().minusSeconds(1))
+        val next = checkNotNull(queue.claim(5, "instance-2"))
+        assertThat(next.token.jobId).isEqualTo(old.token.jobId)
+        assertThat(next.token.epoch).isEqualTo(old.token.epoch + 1)
+        TransactionTemplate(transactionManager).execute { writer.upsertAll(listOf(chunk(next).copy(content = "new-result"))) }
+        val before = databaseState()
+        assertThatThrownBy { failures.recordFailure(old.token, "LATE", "old failure", true, 5, Duration.ofSeconds(30)) }
+            .isInstanceOf(ExecutionLostException::class.java)
+        assertThatThrownBy { publish(old) }.isInstanceOf(ExecutionLostException::class.java)
+        assertThat(databaseState()).isEqualTo(before)
+        assertThat(row(next)["status"]).isEqualTo("PROCESSING")
+        assertThat(row(next)["worker_id"]).isEqualTo("instance-2")
+    }
+
+    @ParameterizedTest @ValueSource(booleans = [false, true])
+    fun `실패 UPDATE 직후 중단은 오류 상태 deadline owner lease 해제를 함께 롤백한다`(permanent: Boolean) {
+        val job = claim()
+        val before = databaseState()
+        doAnswer { it.callRealMethod(); error("stop after failure UPDATE before service commit") }
+            .whenever(jobs).fail(any(), any(), any(), any(), anyOrNull(), any(), any())
+        assertThatThrownBy { failures.recordFailure(job.token, "ERROR", "test", permanent, 5, Duration.ofSeconds(30)) }
+            .isInstanceOf(IllegalStateException::class.java)
+        assertThat(databaseState()).isEqualTo(before)
+    }
+
+    @ParameterizedTest @ValueSource(strings = ["phase", "failure", "finalize"])
+    fun `일반 변경의 상위 흐름은 만료 동일 실행을 갱신한 뒤 같은 attempt와 epoch로 진행한다`(operation: String) {
+        val job = claim()
+        jdbc.update("UPDATE indexing_job SET lease_until=clock_timestamp()-INTERVAL '1 second' WHERE id=?", job.token.jobId)
+        val before = row(job)
+        val execution = execution()
+        when (operation) {
+            "phase" -> execution.database(job.token) {
+                if (jobs.updatePhase(job.token.jobId, "PARSING", job.token.workerId, job.token.epoch) == 0) throw LeaseExpiredException()
+            }
+            "failure" -> execution.failure(job.token) {
+                failures.recordFailure(job.token, "TEMP", "test", false, 5, Duration.ofSeconds(30))
+            }
+            else -> execution.completion(job.token, ExecutionIdentity(job), { IndexingJobStatus.COMPLETED }) { publish(job) }
+        }
+        verify(store, times(1)).renew(job.token)
+        val after = row(job)
+        for (column in listOf("source_event_id", "enqueue_seq", "attempt_count", "execution_epoch")) {
+            assertThat(after[column]).isEqualTo(before[column])
+        }
+        assertThat(jdbc.queryForObject("SELECT execution_epoch FROM document WHERE id=1", Long::class.java)).isEqualTo(job.token.epoch)
+        when (operation) {
+            "phase" -> {
+                assertThat(after["phase"]).isEqualTo("PARSING")
+                assertThat(queue.snapshot(job.token)!!.leaseUntil).isAfter(queue.dbNow())
+            }
+            "failure" -> assertThat(after["status"]).isEqualTo("RETRY_WAIT")
+            else -> assertThat(after["outcome"]).isEqualTo("INDEXED")
+        }
+    }
+
+    @ParameterizedTest @ValueSource(strings = ["failure", "finalize"])
+    fun `서비스도 문서 잠금 대기 중 Job을 먼저 잠그지 않고 대기 중 만료 뒤 무변경으로 거절한다`(operation: String) {
+        val job = claim()
+        jdbc.update("UPDATE indexing_job SET lease_until=clock_timestamp()+INTERVAL '2 seconds' WHERE id=?", job.token.jobId)
+        val before = databaseState()
+        val held = CountDownLatch(1); val release = CountDownLatch(1); val entered = CountDownLatch(1)
+        val pid = AtomicInteger()
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val holder = pool.submit {
+                TransactionTemplate(transactionManager).execute {
+                    jdbc.queryForList("SELECT id FROM document WHERE id=1 FOR UPDATE")
+                    held.countDown(); check(release.await(10, TimeUnit.SECONDS))
+                }
+            }
+            check(held.await(5, TimeUnit.SECONDS))
+            val pending = pool.submit {
+                assertThatThrownBy {
+                    TransactionTemplate(transactionManager).execute {
+                        pid.set(jdbc.queryForObject("SELECT pg_backend_pid()", Int::class.java)!!)
+                        assertThat(queue.snapshot(job.token)!!.canWrite(job.token)).isTrue()
+                        entered.countDown()
+                        if (operation == "failure") failures.recordFailure(job.token, "ERROR", "test", false, 5, Duration.ofSeconds(30))
+                        else publish(job)
+                    }
+                }.isInstanceOf(LeaseExpiredException::class.java)
+            }
+            check(entered.await(5, TimeUnit.SECONDS))
+            waitUntil { jdbc.queryForObject("SELECT cardinality(pg_blocking_pids(?)) > 0", Boolean::class.java, pid.get()) == true }
+            TransactionTemplate(transactionManager).execute {
+                jdbc.queryForList("SELECT id FROM indexing_job WHERE id=${job.token.jobId} FOR UPDATE NOWAIT")
+            }
+            waitUntil { jdbc.queryForObject("SELECT lease_until <= clock_timestamp() FROM indexing_job WHERE id=?", Boolean::class.java, job.token.jobId) == true }
+            release.countDown(); holder.get(5, TimeUnit.SECONDS); pending.get(5, TimeUnit.SECONDS)
+            assertThat(databaseState()).isEqualTo(before)
+        } finally { release.countDown(); pool.shutdownNow() }
+    }
+
+    @Test fun `삭제된 RETRY_WAIT도 due 이전에 종결하거나 같은 문서 후속을 건너뛰지 않는다`() {
+        val job = claim()
+        failures.recordFailure(job.token, "TEMP", "test", false, 5, Duration.ofDays(1))
+        queue.enqueue(UUID.randomUUID(), 1, 2, JobType.INDEX, null)
+        queue.enqueue(UUID.randomUUID(), 2, 3, JobType.INDEX, null)
+        jdbc.update("UPDATE document SET deleted_at=clock_timestamp() WHERE id=1")
+        val before = row(job)
+        assertThat(queue.claim(5, "other-1")!!.documentId).isEqualTo(2)
+        assertThat(queue.claim(5, "other-2")).isNull()
+        assertThat(row(job)).isEqualTo(before)
+        assertThat(jdbc.queryForObject("SELECT status FROM indexing_job WHERE document_id=1 AND id<>?", String::class.java,
+            job.token.jobId)).isEqualTo("PENDING")
+        jdbc.update("UPDATE indexing_job SET next_retry_at=clock_timestamp()-INTERVAL '1 second' WHERE id=?", job.token.jobId)
+        val retry = checkNotNull(queue.claim(5, "other-3"))
+        assertThat(retry.token.jobId).isEqualTo(job.token.jobId)
+        assertThat(publication.preflight(retry)).isTrue()
+        assertThat(row(retry)["outcome"]).isEqualTo("SKIPPED_DOCUMENT_DELETED")
+        assertThat(queue.claim(5, "other-4")!!.documentVersionId).isEqualTo(2)
+    }
+
+    @Test fun `삭제 INDEX의 실제 runner는 외부 호출 없이 skip 완료한다`() {
+        val job = claim()
+        jdbc.update("UPDATE document SET deleted_at=clock_timestamp() WHERE id=1")
+        val pipeline = PipelineFixture()
+        pipeline.runner.run(job)
+        assertThat(row(job)["status"]).isEqualTo("COMPLETED")
+        assertThat(row(job)["outcome"]).isEqualTo("SKIPPED_DOCUMENT_DELETED")
+        assertThat(row(job)["worker_id"]).isNull()
+        assertThat(row(job)["lease_until"]).isNull()
+        verifyNoInteractions(pipeline.download, pipeline.parsing, pipeline.embedding)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM document_chunk", Int::class.java)).isZero()
+    }
+
+    @Test fun `비활성 문서 DELETE runner는 INDEX skip 없이 처리기 성공을 DELETED 완료로 연결한다`() {
+        jdbc.update("UPDATE document SET deleted_at=clock_timestamp() WHERE id=1")
+        queue.enqueue(UUID.randomUUID(), 1, null, JobType.DELETE, null)
+        val job = checkNotNull(queue.claim(5, "delete-1"))
+        val handler: DocumentDeletionService = mock()
+        // Only model the handler's successful completion contract, never execute its internal cleanup.
+        doAnswer { check(jobs.complete(job.token.jobId, job.token.workerId, job.token.epoch) == 1); null }
+            .whenever(handler).delete(job)
+        val pipeline = PipelineFixture(deletion = handler)
+        pipeline.runner.run(job)
+        verify(handler, times(1)).delete(job)
+        verifyNoInteractions(pipeline.download, pipeline.parsing, pipeline.embedding)
+        verify(versions, never()).findById(any())
+        assertThat(row(job)["status"]).isEqualTo("COMPLETED")
+        assertThat(row(job)["outcome"]).isEqualTo("DELETED")
+        assertThat(row(job)["worker_id"]).isNull()
+        assertThat(row(job)["lease_until"]).isNull()
+    }
+
+    @Test fun `임베딩 응답을 보류한 동안 커밋된 삭제는 응답 재개 뒤 결과 없이 skip 완료한다`() {
+        val job = claim()
+        val pipeline = PipelineFixture()
+        val entered = CountDownLatch(1); val resume = CountDownLatch(1)
+        whenever(pipeline.embedding.embed(any())).thenAnswer {
+            entered.countDown(); check(resume.await(10, TimeUnit.SECONDS)); listOf(FloatArray(1536) { 0.1f })
+        }
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val running = pool.submit { pipeline.runner.run(job) }
+            check(entered.await(5, TimeUnit.SECONDS))
+            TransactionTemplate(transactionManager).execute { jdbc.update("UPDATE document SET deleted_at=clock_timestamp() WHERE id=1") }
+            resume.countDown(); running.get(5, TimeUnit.SECONDS)
+            assertThat(row(job)["outcome"]).isEqualTo("SKIPPED_DOCUMENT_DELETED")
+            assertThat(row(job)["worker_id"]).isNull()
+            assertThat(row(job)["lease_until"]).isNull()
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM document_chunk", Int::class.java)).isZero()
+            verify(versions, never()).complete(any(), any(), any(), anyOrNull())
+            verify(pipeline.embedding, times(1)).embed(any())
+            assertThat(Files.exists(pipeline.path.get())).isFalse()
+        } finally { resume.countDown(); pool.shutdownNow() }
+    }
+
+    @ParameterizedTest @ValueSource(strings = ["download", "parsing", "embedding"])
+    fun `실제 pipeline의 지연 단계는 DB 자원과 행 잠금을 놓으며 별도 heartbeat가 갱신한다`(stage: String) {
+        queue.enqueue(UUID.randomUUID(), 1, 1, JobType.INDEX, null)
+        val pipeline = PipelineFixture()
+        val entered = CountDownLatch(1); val resume = CountDownLatch(1)
+        val token = AtomicReference<ExecutionToken>()
+        doAnswer { token.set(it.getArgument(0)); it.callRealMethod() }.whenever(store).snapshot(any())
+        fun paused() {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse()
+            entered.countDown(); check(resume.await(10, TimeUnit.SECONDS))
+        }
+        when (stage) {
+            "download" -> whenever(pipeline.download.download(any())).thenAnswer { paused(); pipeline.temporaryFile() }
+            "parsing" -> whenever(pipeline.parsing.parse(any(), any(), any())).thenAnswer { paused(); emptyList<com.osscontest.worker.indexing.parsing.domain.ParsedBlock>() }
+            else -> whenever(pipeline.embedding.embed(any())).thenAnswer { paused(); listOf(FloatArray(1536) { 0.1f }) }
+        }
+        val worker = DbJobWorker(QueueProperties(concurrency = 1, pollInterval = Duration.ofDays(1)),
+            pipeline.database, queue, pipeline.runner, ThreadSleepQueueLoopWaiter(), 5, ExecutionResults())
+        worker.start()
+        try {
+            check(entered.await(5, TimeUnit.SECONDS))
+            assertThat(source.openConnections.get()).isZero()
+            val owned = token.get()
+            val before = checkNotNull(queue.snapshot(owned))
+            TransactionTemplate(transactionManager).execute {
+                jdbc.queryForList("SELECT id FROM document WHERE id=1 FOR UPDATE NOWAIT")
+                jdbc.queryForList("SELECT id FROM indexing_job WHERE id=${owned.jobId} FOR UPDATE NOWAIT")
+            }
+            worker.heartbeat().forEach { it.get(5, TimeUnit.SECONDS) }
+            val renewed = checkNotNull(queue.snapshot(owned))
+            assertThat(renewed.leaseUntil).isAfter(before.leaseUntil)
+            assertThat(renewed.epoch).isEqualTo(before.epoch)
+            assertThat(renewed.documentEpoch).isEqualTo(before.documentEpoch)
+            assertThat(jdbc.queryForObject("SELECT attempt_count FROM indexing_job WHERE id=?", Int::class.java, owned.jobId)).isEqualTo(1)
+            resume.countDown()
+            waitUntil { queue.snapshot(owned)?.completed(owned) == true && pipeline.path.get()?.let { !Files.exists(it) } == true }
+        } finally { worker.stop(); resume.countDown() }
+    }
+
+    @ParameterizedTest @ValueSource(booleans = [false, true])
+    fun `finalize DB 장애 대기는 커넥션을 반환하고 복구 후 기존 결과 재사용 또는 회수 종료를 선택한다`(released: Boolean) {
+        val job = claim()
+        val waiting = CountDownLatch(1); val recover = CountDownLatch(1)
+        val calls = AtomicInteger()
+        doAnswer {
+            it.callRealMethod()
+            if (calls.incrementAndGet() == 1) throw java.sql.SQLException("injected DB fault before commit", "08006")
+            1
+        }.whenever(versions).complete(any(), any(), any(), anyOrNull())
+        val database = DatabaseOperations(jdbc, RetryWaiter {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse()
+            assertThat(source.openConnections.get()).isZero()
+            waiting.countDown(); check(recover.await(10, TimeUnit.SECONDS))
+        }, DatabaseWaitProperties(checkInterval = Duration.ofMillis(1)), SimpleMeterRegistry())
+        val pipeline = PipelineFixture(database)
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val running = pool.submit { pipeline.runner.run(job) }
+            check(waiting.await(5, TimeUnit.SECONDS))
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM document_chunk", Int::class.java)).isZero()
+            if (released) seedReleasedExecution(jdbc, job.token, IndexingJobStatus.RETRY_WAIT, queue.dbNow().plusSeconds(60))
+            else jdbc.update("UPDATE indexing_job SET lease_until=clock_timestamp()-INTERVAL '1 second' WHERE id=?", job.token.jobId)
+            val recoveryState = databaseState()
+            recover.countDown(); running.get(5, TimeUnit.SECONDS)
+            verify(pipeline.download, times(1)).download(any())
+            verify(pipeline.embedding, times(1)).embed(any())
+            assertThat(Files.exists(pipeline.path.get())).isFalse()
+            if (released) {
+                assertThat(databaseState()).isEqualTo(recoveryState)
+                verify(writer, times(1)).upsertAll(any())
+                verify(store, never()).renew(job.token)
+            } else {
+                assertThat(row(job)["outcome"]).isEqualTo("INDEXED")
+                val retained = argumentCaptor<List<DocumentChunk>>()
+                verify(writer, times(2)).upsertAll(retained.capture())
+                assertThat(retained.secondValue).isSameAs(retained.firstValue)
+                verify(store, times(1)).renew(job.token)
+                assertThat(row(job)["attempt_count"]).isEqualTo(job.attemptCount)
+                assertThat(row(job)["execution_epoch"]).isEqualTo(job.token.epoch)
+            }
+        } finally { recover.countDown(); pool.shutdownNow() }
+    }
+
+    @Test fun `실제 완료 커밋 응답 유실과 후속 claim 뒤에도 pipeline은 외부 호출과 결과 쓰기를 반복하지 않는다`() {
+        val job = claim()
+        queue.enqueue(UUID.randomUUID(), 1, 2, JobType.INDEX, null)
+        val completed = CountDownLatch(1); val advance = CountDownLatch(1)
+        doAnswer { it.callRealMethod(); source.loseNextCommit.set(true); 1 }.whenever(jobs).complete(any(), any(), any(), any())
+        val database = DatabaseOperations(jdbc, RetryWaiter {
+            completed.countDown(); check(advance.await(10, TimeUnit.SECONDS))
+        }, DatabaseWaitProperties(checkInterval = Duration.ofMillis(1)), SimpleMeterRegistry())
+        val controlled = PipelineFixture(database)
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val running = pool.submit { controlled.runner.run(job) }
+            check(completed.await(5, TimeUnit.SECONDS))
+            assertThat(row(job)["status"]).isEqualTo("COMPLETED")
+            assertThat(row(job)["worker_id"]).isNull()
+            assertThat(row(job)["lease_until"]).isNull()
+            val next = checkNotNull(queue.claim(5, "next-2"))
+            assertThat(next.token.epoch).isEqualTo(job.token.epoch + 1)
+            val before = databaseState()
+            advance.countDown(); running.get(5, TimeUnit.SECONDS)
+            assertThat(databaseState()).isEqualTo(before)
+            verify(controlled.download, times(1)).download(any())
+            verify(controlled.embedding, times(1)).embed(any())
+            verify(writer, times(1)).upsertAll(any())
+            verify(jobs, times(1)).complete(any(), any(), any(), any())
+            assertThat(Files.exists(controlled.path.get())).isFalse()
+        } finally { advance.countDown(); pool.shutdownNow() }
+    }
+
+    /** Actual Worker/runner/embedding orchestration and Spring services; external work stays controlled. */
+    private inner class PipelineFixture(
+        val database: DatabaseOperations = DatabaseOperations(jdbc, RetryWaiter {}, DatabaseWaitProperties(), SimpleMeterRegistry()),
+        deletion: DocumentDeletionService = mock(),
+    ) {
+        val download: DocumentDownloadClient = mock()
+        val parsing: ParsingTimeoutGuard = mock()
+        val embedding: EmbeddingUseCase = mock()
+        val path = AtomicReference<Path>()
+        private val operations = ExecutionOperations(database, queue)
+        private val registry: DocumentParserRegistry = mock()
+        private val chunker: ChunkingService = mock()
+        private val processor = EmbeddingIndexingProcessor(embedding, publication, NoriTokenizer(), Clock.systemUTC(),
+            250, ExternalApiOperations(operations, database), operations)
+        val runner = IndexingPipelineRunner(jobs, documents, versions, download, registry, parsing, chunker,
+            mock<ChunkGuard>(), processor, failures, mock(), operations, deletion, 5, Duration.ofSeconds(30), 10000,
+            ChunkingStrategy.FIXED_TOKEN, SimpleMeterRegistry(), publication = publication)
+
+        init {
+            jdbc.update("UPDATE document_version SET file_size=11, content_hash=? WHERE id=1",
+                "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9")
+            whenever(download.download(any())).thenAnswer { temporaryFile() }
+            whenever(registry.findParser(any())).thenReturn(mock())
+            whenever(parsing.parse(any(), any(), any())).thenReturn(emptyList())
+            whenever(chunker.chunk(any(), any())).thenReturn(listOf(Chunk(0, "hello world", "hash", 1, null, null, null, null)))
+            whenever(embedding.embed(any())).thenReturn(listOf(FloatArray(1536) { 0.1f }))
+        }
+        fun temporaryFile(): Path = Files.createTempFile("worker-contract-", ".txt").also {
+            Files.writeString(it, "hello world"); path.set(it)
+        }
+    }
+
+    private fun databaseState(): Map<String, List<Map<String, Any?>>> =
+        listOf("document", "document_version", "indexing_job", "document_chunk").associateWith {
+            jdbc.queryForList("SELECT * FROM $it ORDER BY id")
+        }
+
+    private fun waitUntil(condition: () -> Boolean) {
+        val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (!condition()) { check(System.nanoTime() < until); Thread.sleep(10) }
     }
 
     private fun waitForLock() {

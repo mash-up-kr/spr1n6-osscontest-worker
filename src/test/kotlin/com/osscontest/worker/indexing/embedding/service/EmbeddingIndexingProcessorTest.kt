@@ -17,6 +17,14 @@ import org.mockito.kotlin.never
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
+import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.verifyNoInteractions
+import com.osscontest.worker.indexing.queue.DatabaseOperations
+import com.osscontest.worker.indexing.queue.ExecutionLostException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -113,6 +121,58 @@ class EmbeddingIndexingProcessorTest {
         verify(publicationService).publish(any(), captor.capture())
         assertThat(captor.firstValue.map { it.chunkNo }).containsExactly(0, 1, 2)
         assertThat(captor.firstValue.map { it.embedding[0] }).containsExactly(0.1f, 0.2f, 0.3f)
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = [false, true])
+    fun `배치 사이 DB 대기에는 다음 외부 호출을 시작하지 않고 복구 뒤 실행권부터 확인한다`(lost: Boolean) {
+        val database: DatabaseOperations = mock()
+        val execution = directExecution()
+        val waiting = CountDownLatch(1)
+        val recover = CountDownLatch(1)
+        val gates = AtomicInteger()
+        val checkpoints = AtomicInteger()
+        doAnswer {
+            if (gates.incrementAndGet() == 2) {
+                waiting.countDown()
+                check(recover.await(5, TimeUnit.SECONDS))
+            }
+            null
+        }.whenever(database).awaitAvailable()
+        doAnswer {
+            if (checkpoints.incrementAndGet() == 2 && lost) throw ExecutionLostException(testToken)
+            null
+        }.whenever(execution).checkpoint(testToken)
+        whenever(embeddingUseCase.embed(listOf("content-0"))).thenReturn(listOf(embedding(0.1f)))
+        whenever(embeddingUseCase.embed(listOf("content-1"))).thenReturn(listOf(embedding(0.2f)))
+        whenever(publicationService.publish(any(), any())).thenReturn(com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.COMPLETED)
+        val actual = EmbeddingIndexingProcessor(embeddingUseCase, publicationService, NoriTokenizer(),
+            Clock.systemUTC(), 100, ExternalApiOperations(execution, database), execution)
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val running = pool.submit {
+                actual.process(context(), listOf(chunkWithTokens(0, 100), chunkWithTokens(1, 100)))
+            }
+            check(waiting.await(3, TimeUnit.SECONDS))
+            verify(embeddingUseCase, times(1)).embed(listOf("content-0"))
+            verify(embeddingUseCase, never()).embed(listOf("content-1"))
+            verifyNoInteractions(publicationService)
+            assertThat(checkpoints.get()).isEqualTo(1)
+            recover.countDown()
+            if (lost) {
+                assertThatThrownBy { running.get(3, TimeUnit.SECONDS) }.hasCauseInstanceOf(ExecutionLostException::class.java)
+                verify(embeddingUseCase, never()).embed(listOf("content-1"))
+                verifyNoInteractions(publicationService)
+            } else {
+                running.get(3, TimeUnit.SECONDS)
+                verify(embeddingUseCase, times(1)).embed(listOf("content-1"))
+                val results = org.mockito.kotlin.argumentCaptor<List<DocumentChunk>>()
+                verify(publicationService).publish(any(), results.capture())
+                assertThat(results.firstValue.map { it.embedding[0] }).containsExactly(0.1f, 0.2f)
+            }
+            assertThat(checkpoints.get()).isEqualTo(2)
+            verify(embeddingUseCase, times(1)).embed(listOf("content-0"))
+        } finally { recover.countDown(); pool.shutdownNow() }
     }
 
     private fun context() =
