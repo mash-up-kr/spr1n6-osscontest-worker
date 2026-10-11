@@ -76,6 +76,7 @@ The execution exits and releases its slot so other documents can run. next_retry
 claim eligibility time, not a guaranteed execution time. There is no global retry admission block or
 retry request serialization. Consecutive transient embedding failures are handled by a DB-shared circuit breaker:
 while it is open, INDEX claims and embedding calls stop and DELETE Jobs are still claimed ([Failure Handling](FAILURE_HANDLING_EN.md)).
+Quota exhaustion (429 insufficient_quota) counts as a breaker failure instead of using the 429 retry above.
 
 ## DELETE processing
 

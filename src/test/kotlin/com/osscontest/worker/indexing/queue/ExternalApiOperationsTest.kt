@@ -1,5 +1,6 @@
 package com.osscontest.worker.indexing.queue
 
+import com.osscontest.worker.indexing.embedding.service.EmbeddingQuotaExceededException
 import com.osscontest.worker.indexing.embedding.service.EmbeddingRateLimitedException
 import com.osscontest.worker.indexing.embedding.service.EmbeddingRequestRejectedException
 import com.osscontest.worker.indexing.pipeline.service.RetryWaiter
@@ -37,6 +38,21 @@ class ExternalApiOperationsTest {
         assertThatThrownBy { ExternalApiOperations(execution, directDatabase(), breaker, RetryWaiter {}, DatabaseWaitProperties()).execute(testToken, action) }
             .isInstanceOf(ExecutionLostException::class.java)
         verifyNoInteractions(action)
+    }
+
+    @Test
+    fun `결제 한도 초과는 breaker 실패로 세어 열리면 기다린 뒤 같은 호출을 재시도한다`() {
+        val breaker: CircuitBreaker = mock()
+        whenever(breaker.acquire()).thenReturn(Duration.ZERO, Duration.ofSeconds(30), Duration.ZERO)
+        whenever(breaker.recordTransientFailure()).thenReturn(true)
+        var calls = 0
+        val result = simpleApi(breaker).execute(testToken) {
+            if (++calls == 1) throw EmbeddingQuotaExceededException(RuntimeException("insufficient_quota"))
+            "ok"
+        }
+        assertThat(result).isEqualTo("ok")
+        assertThat(calls).describedAs("시도 횟수를 쓰지 않고 같은 호출을 다시 한다").isEqualTo(2)
+        verify(breaker).recordTransientFailure()
     }
 
     @Test

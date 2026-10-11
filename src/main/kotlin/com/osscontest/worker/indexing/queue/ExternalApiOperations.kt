@@ -40,7 +40,10 @@ class ExternalApiOperations(
         }
     }
 
-    /** 재시도로 풀릴 수 있는 임베딩 호출 실패만 센다. 실행권 상실·중단·Rate Limit은 API 장애가 아니다. */
+    /**
+     * 재시도로 풀릴 수 있는 임베딩 호출 실패만 센다. 실행권 상실·중단·Rate Limit은 API 장애가 아니다.
+     * 결제 한도 초과(`EmbeddingQuotaExceededException`)는 분류기에서 일시 오류이므로 여기서 센다.
+     */
     private fun isBreakerFailure(error: Exception): Boolean =
         error !is InterruptedException && !Thread.currentThread().isInterrupted &&
             error !is ExecutionLostException && error !is ExecutionCompletedException && error !is LeaseExpiredException &&

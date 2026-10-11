@@ -81,7 +81,8 @@ SDK 자동 재시도는 비활성화합니다. 일반 오류와 429는 runner의
 ### 임베딩 API circuit breaker
 
 임베딩 호출의 일시 실패(5xx, 타임아웃, 연결 오류)가 연속 5회 쌓이면 DB(`external_circuit_breaker`)에 OPEN을 기록해
-모든 Worker가 공유합니다. 429는 별도 쿨다운 경로를 쓰며 횟수에 넣지 않습니다.
+모든 Worker가 공유합니다. 429는 별도 쿨다운 경로를 쓰며 횟수에 넣지 않습니다. 단, 결제 한도 초과
+(429 `insufficient_quota`)는 충전 전까지 계속 실패하므로 일시 실패로 세어 breaker로 대기합니다.
 OPEN 동안에는 임베딩을 호출하지 않고 대기하므로 Job의 시도 횟수가 소비되지 않습니다. 신규 claim은 임베딩을 쓰지 않는
 DELETE Job만 허용하고 INDEX Job은 멈춥니다.
 60초 뒤 한 Worker만 시험 호출을 하며 성공하면 닫고 실패하면 다시 엽니다.
@@ -120,6 +121,7 @@ Server의 과거 버전 재시도 제한은 외부 의존성이며 Worker도 부
 | 재시도 중 Worker 종료 | 회수 시 deadline 유지, 새 실행은 전체 처리 가능 |
 | DELETE 완료 재호출·오래된 INDEX 저장 | 멱등 완료 및 실행권 거절 |
 | breaker OPEN 중 INDEX·DELETE 대기 | DELETE만 claim, INDEX는 대기 |
+| 결제 한도 초과(429 `insufficient_quota`) | rate limit 재시도가 아닌 breaker 실패로 계산, 열리면 시도 횟수 소비 없이 대기 |
 
 일반 테스트와 실제 PostgreSQL 통합 테스트를 구분합니다. SQL 경쟁·롤백 검증은
 전용 DB에 공용 스키마와 [큐 계약](sql/DB_JOB_QUEUE_CONTRACT.sql)을 적용한 뒤 실행해야 합니다.

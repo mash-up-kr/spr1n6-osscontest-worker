@@ -1,6 +1,9 @@
 package com.osscontest.worker.indexing.embedding.service
 
+import com.openai.core.http.Headers
 import com.openai.errors.BadRequestException
+import com.openai.errors.RateLimitException
+import com.openai.models.ErrorObject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -52,5 +55,33 @@ class EmbeddingServiceTest {
         assertEquals("EMBEDDING_REQUEST_REJECTED", exception.code)
         assertTrue(exception.message!!.contains("maximum input tokens exceeded"))
         assertSame(cause, exception.cause)
+    }
+
+    private fun rateLimit(code: String): RateLimitException =
+        RateLimitException.builder()
+            .headers(Headers.builder().put("retry-after", "7").build())
+            .error(ErrorObject.builder().code(code).message("429").param(null as String?).type("requests").build())
+            .build()
+
+    @Test
+    fun `OpenAI가 결제 한도 초과 429를 보내면 rate limit이 아닌 한도 초과 예외로 변환한다`() {
+        val contents = listOf("content")
+        val cause = rateLimit("insufficient_quota")
+        Mockito.`when`(embeddingModel.embed(contents)).thenThrow(cause)
+
+        val exception = assertThrows(EmbeddingQuotaExceededException::class.java) { embeddingService.embed(contents) }
+
+        assertSame(cause, exception.cause)
+    }
+
+    @Test
+    fun `일반 429는 Retry-After와 함께 rate limit 예외로 변환한다`() {
+        val contents = listOf("content")
+        val cause = rateLimit("rate_limit_exceeded")
+        Mockito.`when`(embeddingModel.embed(contents)).thenThrow(cause)
+
+        val exception = assertThrows(EmbeddingRateLimitedException::class.java) { embeddingService.embed(contents) }
+
+        assertEquals("7", exception.retryAfter)
     }
 }

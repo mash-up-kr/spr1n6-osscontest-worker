@@ -20,6 +20,13 @@ class EmbeddingService(
             // 기존 인라인 재시도 대상에 남긴다.
             throw EmbeddingRequestRejectedException(e)
         } catch (e: RateLimitException) {
+            // 결제 한도 초과도 429로 온다. 충전 전까지 계속 실패하므로 rate limit 경로(시도 횟수 소비)가 아니라
+            // circuit breaker로 보내 Job이 대기하게 한다.
+            if (e.code().orElse(null) == INSUFFICIENT_QUOTA) throw EmbeddingQuotaExceededException(e)
             throw EmbeddingRateLimitedException(e.headers().values("retry-after").firstOrNull(), e)
         }
+
+    private companion object {
+        const val INSUFFICIENT_QUOTA = "insufficient_quota"
+    }
 }
