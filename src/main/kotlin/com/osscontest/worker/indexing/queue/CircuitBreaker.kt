@@ -6,7 +6,7 @@ import org.springframework.stereotype.Component
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 
-/** claim 허용 수준. LIMITED는 시험 호출을 할 Job이 필요할 때 poll마다 1건만 claim하고, BLOCKED는 DELETE Job만 claim한다. */
+/** BLOCKED는 활성 INDEX를 제외한다. LIMITED의 시험 호출권은 실제 LLM 호출 직전에 DB에서 경쟁한다. */
 enum class ClaimAdmission { NORMAL, LIMITED, BLOCKED }
 
 /**

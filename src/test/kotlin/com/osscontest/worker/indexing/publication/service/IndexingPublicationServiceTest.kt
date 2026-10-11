@@ -63,6 +63,35 @@ class IndexingPublicationServiceTest {
     }
 
     @Test
+    fun `활성 문서 preflight는 완료하지 않고 정상 실행을 허용한다`() {
+        whenever(locks.lock(1)).thenReturn(lockedJob())
+        whenever(state.document(2)).thenReturn(com.osscontest.worker.indexing.publication.repository.PublicationDocument(false, null))
+        assertThat(service.preflight(ClaimedJob(testToken, JobType.INDEX, java.util.UUID.randomUUID(), 2, 3, null))).isFalse()
+        verifyNoInteractions(indexingJobRepository, documentChunkWriter, documentChunkRepository, documentVersionRepository, documentRepository)
+    }
+
+    @Test
+    fun `완료된 삭제 INDEX preflight는 소유권 해제와 문서 epoch 증가 뒤에도 다시 쓰지 않는다`() {
+        val job = processingJob(status = IndexingJobStatus.COMPLETED).apply {
+            workerId = null; leaseUntil = null; outcome = JobOutcome.SKIPPED_DOCUMENT_DELETED.name
+        }
+        whenever(locks.lock(1)).thenReturn(lockedJob(job, documentEpoch = 2))
+        assertThat(service.preflight(ClaimedJob(testToken, JobType.INDEX, java.util.UUID.randomUUID(), 2, 3, null))).isTrue()
+        verifyNoInteractions(state, indexingJobRepository, documentChunkWriter, documentChunkRepository, documentVersionRepository, documentRepository)
+    }
+
+    @Test
+    fun `삭제 preflight 완료 UPDATE가 거절되면 성공으로 반환하지 않는다`() {
+        whenever(locks.lock(1)).thenReturn(lockedJob())
+        whenever(state.document(2)).thenReturn(com.osscontest.worker.indexing.publication.repository.PublicationDocument(true, null))
+        whenever(indexingJobRepository.complete(1, "worker", 1, JobOutcome.SKIPPED_DOCUMENT_DELETED)).thenReturn(0)
+        assertThatThrownBy {
+            service.preflight(ClaimedJob(testToken, JobType.INDEX, java.util.UUID.randomUUID(), 2, 3, null))
+        }.isInstanceOf(LeaseExpiredException::class.java)
+        verifyNoInteractions(documentChunkWriter, documentChunkRepository, documentVersionRepository, documentRepository)
+    }
+
+    @Test
     fun `계산 중 삭제된 문서는 finalize에서 결과를 버리고 SKIPPED 완료한다`() {
         whenever(locks.lock(1)).thenReturn(lockedJob())
         whenever(state.document(2)).thenReturn(com.osscontest.worker.indexing.publication.repository.PublicationDocument(true, null))

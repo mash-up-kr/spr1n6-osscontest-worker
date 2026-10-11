@@ -18,13 +18,17 @@ class JobQueueStore(
     private val claims: JobClaimTransactions,
     private val locks: JobExecutionLocks,
     private val ownership: JobOwnershipGuard,
+    private val breaker: CircuitBreaker,
 ) {
     /** Single operational entry point; the caller supplies an owner unique to this claim attempt. */
     fun claim(maxAttempts: Int, ownerId: String, prepared: (ExecutionToken) -> Unit = {}): ClaimedJob? {
         require(ownerId.isNotBlank() && maxAttempts > 0)
         val excluded = mutableSetOf<Long>()
         repeat(CLAIM_CANDIDATE_LIMIT) {
-            when (val attempt = claims.claim(ownerId, properties.leaseDuration.toMillis(), maxAttempts, excluded, prepared)) {
+            // Admission only filters candidates; excluded INDEX Jobs still block their successors.
+            val allowLlm = breaker.admission() != ClaimAdmission.BLOCKED
+            when (val attempt = claims.claim(ownerId, properties.leaseDuration.toMillis(), maxAttempts, excluded,
+                allowLlm, prepared)) {
                 ClaimAttempt.Empty -> return null
                 is ClaimAttempt.Acquired -> return attempt.job
                 is ClaimAttempt.Skipped -> {

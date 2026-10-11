@@ -17,6 +17,8 @@ import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.jdbc.core.JdbcTemplate
+import org.mockito.kotlin.whenever
+import org.springframework.test.context.bean.override.mockito.MockitoBean
 import org.springframework.test.context.ActiveProfiles
 import java.time.Duration
 import java.time.LocalDateTime
@@ -33,8 +35,12 @@ class DbJobQueueIntegrationTest(
     private val failures: IndexingFailureService,
     private val execution: ExecutionOperations,
 ) {
+    @MockitoBean private lateinit var breaker: CircuitBreaker
+
     @BeforeEach
     fun fixture() {
+        whenever(breaker.admission()).thenReturn(ClaimAdmission.NORMAL)
+        whenever(breaker.acquire()).thenReturn(java.time.Duration.ZERO)
         assertDedicatedIntegrationDatabase(jdbc)
         jdbc.update("INSERT INTO tenant (id, name) VALUES (800001, 'queue-integration')")
         for (id in 800001L..800002L) {

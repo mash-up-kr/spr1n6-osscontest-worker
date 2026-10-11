@@ -57,6 +57,8 @@ class IndexingPipelineRunnerIntegrationTest(
     @MockitoBean
     private lateinit var downloadClient: DocumentDownloadClient
 
+    @MockitoBean private lateinit var breaker: com.osscontest.worker.indexing.queue.CircuitBreaker
+
     @BeforeAll
     fun verifyDedicatedDatabase() {
         assertDedicatedIntegrationDatabase(jdbcTemplate)
@@ -64,6 +66,8 @@ class IndexingPipelineRunnerIntegrationTest(
 
     @BeforeEach
     fun resetProcessor() {
+        whenever(breaker.admission()).thenReturn(com.osscontest.worker.indexing.queue.ClaimAdmission.NORMAL)
+        whenever(breaker.acquire()).thenReturn(java.time.Duration.ZERO)
         fakeIndexingProcessor.reset()
     }
 

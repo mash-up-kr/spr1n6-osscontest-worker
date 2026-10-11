@@ -57,3 +57,9 @@ fun directExecution(): ExecutionOperations = mock<ExecutionOperations>().apply {
 
 fun lockedJob(job: IndexingJobEntity = processingJob(), documentEpoch: Long = job.executionEpoch,
               now: Instant = testNow) = LockedJobExecution(job, documentEpoch, now)
+
+/** Closed breaker without DB reads for fixtures testing other Worker contracts. */
+fun closedCircuitBreaker() = mock<com.osscontest.worker.indexing.queue.CircuitBreaker>().apply {
+    whenever(admission()).thenReturn(com.osscontest.worker.indexing.queue.ClaimAdmission.NORMAL)
+    whenever(acquire()).thenReturn(java.time.Duration.ZERO)
+}

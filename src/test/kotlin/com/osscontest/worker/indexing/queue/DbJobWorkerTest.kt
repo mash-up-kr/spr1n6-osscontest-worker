@@ -29,14 +29,45 @@ class DbJobWorkerTest {
         workerIdleTimeout: Duration = Duration.ofSeconds(60),
         database: DatabaseOperations = directDatabase(),
         waiter: QueueLoopWaiter = ThreadSleepQueueLoopWaiter(),
+        val store: JobQueueStore = mock(),
     ) : AutoCloseable {
-        val store: JobQueueStore = mock()
         val runner: IndexingPipelineRunner = mock()
         val results = ExecutionResults()
         val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = concurrency,
             pollInterval = pollInterval, heartbeatInterval = heartbeatInterval, workerIdleTimeout = workerIdleTimeout),
             database, store, runner, waiter, 5, results)
         override fun close() { worker.stop() }
+    }
+
+    @Test
+    fun `OPEN에서도 공통 claim이 반환한 DELETE와 삭제 INDEX를 실행하고 LLM 성공을 기록하지 않는다`() {
+        val breaker = com.osscontest.worker.support.closedCircuitBreaker()
+        whenever(breaker.admission()).thenReturn(ClaimAdmission.BLOCKED)
+        val claims: JobClaimTransactions = mock()
+        val delete = job().copy(type = JobType.DELETE, documentVersionId = null)
+        val deletedIndex = job(2)
+        whenever(claims.claim(any(), any(), any(), any(), eq(false), any()))
+            .thenReturn(ClaimAttempt.Acquired(delete), ClaimAttempt.Acquired(deletedIndex), ClaimAttempt.Empty)
+        val store = JobQueueStore(mock(), QueueProperties(), claims, mock(), mock(), breaker)
+        Harness(store = store).use { h ->
+            val processed = CountDownLatch(2)
+            val finish = CountDownLatch(1)
+            doAnswer {
+                processed.countDown()
+                if (it.getArgument<ClaimedJob>(0) == deletedIndex) finish.await()
+                null
+            }.whenever(h.runner).run(any<ClaimedJob>())
+            h.worker.start()
+            try {
+                await(processed)
+                verify(h.runner).run(delete)
+                verify(h.runner).run(deletedIndex)
+                verify(claims, times(2)).claim(any(), any(), any(), any(), eq(false), any())
+                verify(claims, never()).claim(any(), any(), any(), any(), eq(true), any())
+                verify(breaker, never()).acquire()
+                verify(breaker, never()).recordSuccess()
+            } finally { h.worker.stop(); finish.countDown() }
+        }
     }
 
     @Test

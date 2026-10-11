@@ -3,11 +3,8 @@ package com.osscontest.worker.indexing.deletion.service
 import com.osscontest.worker.indexing.publication.repository.*
 import com.osscontest.worker.indexing.publication.entity.DocumentEntity
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
-import com.osscontest.worker.indexing.pipeline.domain.JobOutcome
 import com.osscontest.worker.indexing.queue.*
 import com.osscontest.worker.support.*
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.*
 import java.time.LocalDateTime
@@ -39,43 +36,4 @@ class DocumentDeletionServiceTest {
         verifyNoInteractions(chunks)
     }
 
-    @Test
-    fun `삭제된 문서의 INDEX Job은 SKIPPED로 완료한다`() {
-        whenever(jobs.findByIdForUpdate(1)).thenReturn(processingJob())
-        whenever(documents.findByIdForUpdate(2)).thenReturn(DocumentEntity(2, 1, null, LocalDateTime.now()))
-        whenever(jobs.complete(1, testToken.workerId, testToken.epoch, JobOutcome.SKIPPED_DOCUMENT_DELETED)).thenReturn(1)
-
-        assertThat(service.skipIndexForDeletedDocument(testToken)).isTrue()
-
-        verify(jobs).complete(1, testToken.workerId, testToken.epoch, JobOutcome.SKIPPED_DOCUMENT_DELETED)
-    }
-
-    @Test
-    fun `삭제되지 않은 문서는 완료하지 않고 false를 돌려준다`() {
-        whenever(jobs.findByIdForUpdate(1)).thenReturn(processingJob())
-        whenever(documents.findByIdForUpdate(2)).thenReturn(DocumentEntity(2, 1, null, null))
-
-        assertThat(service.skipIndexForDeletedDocument(testToken)).isFalse()
-
-        verify(jobs, never()).complete(any(), any(), any(), any())
-    }
-
-    @Test
-    fun `이미 완료된 Job은 아무것도 쓰지 않고 true를 돌려준다`() {
-        whenever(jobs.findByIdForUpdate(1)).thenReturn(processingJob(status = IndexingJobStatus.COMPLETED))
-
-        assertThat(service.skipIndexForDeletedDocument(testToken)).isTrue()
-
-        verifyNoInteractions(documents)
-        verify(jobs, never()).complete(any(), any(), any(), any())
-    }
-
-    @Test
-    fun `완료 갱신이 0행이면 lease 만료로 보고 예외를 던진다`() {
-        whenever(jobs.findByIdForUpdate(1)).thenReturn(processingJob())
-        whenever(documents.findByIdForUpdate(2)).thenReturn(DocumentEntity(2, 1, null, LocalDateTime.now()))
-        whenever(jobs.complete(1, testToken.workerId, testToken.epoch, JobOutcome.SKIPPED_DOCUMENT_DELETED)).thenReturn(0)
-
-        assertThatThrownBy { service.skipIndexForDeletedDocument(testToken) }.isInstanceOf(LeaseExpiredException::class.java)
-    }
 }

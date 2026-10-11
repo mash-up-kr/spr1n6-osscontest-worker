@@ -1,5 +1,9 @@
 package com.osscontest.worker.indexing.embedding.service
 
+import com.osscontest.worker.support.directDatabase
+import com.osscontest.worker.support.closedCircuitBreaker
+import com.osscontest.worker.indexing.queue.DatabaseWaitProperties
+
 import com.osscontest.worker.indexing.chunking.domain.Chunk
 import com.osscontest.worker.indexing.embedding.usecase.EmbeddingUseCase
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
@@ -126,7 +130,7 @@ class EmbeddingIndexingProcessorTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = [false, true])
     fun `배치 사이 DB 대기에는 다음 외부 호출을 시작하지 않고 복구 뒤 실행권부터 확인한다`(lost: Boolean) {
-        val database: DatabaseOperations = mock()
+        val database: DatabaseOperations = directDatabase()
         val execution = directExecution()
         val waiting = CountDownLatch(1)
         val recover = CountDownLatch(1)
@@ -147,7 +151,7 @@ class EmbeddingIndexingProcessorTest {
         whenever(embeddingUseCase.embed(listOf("content-1"))).thenReturn(listOf(embedding(0.2f)))
         whenever(publicationService.publish(any(), any())).thenReturn(com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.COMPLETED)
         val actual = EmbeddingIndexingProcessor(embeddingUseCase, publicationService, NoriTokenizer(),
-            Clock.systemUTC(), 100, ExternalApiOperations(execution, database), execution)
+            Clock.systemUTC(), 100, ExternalApiOperations(execution, database, closedCircuitBreaker(), com.osscontest.worker.indexing.pipeline.service.RetryWaiter {}, DatabaseWaitProperties()), execution)
         val pool = Executors.newSingleThreadExecutor()
         try {
             val running = pool.submit {

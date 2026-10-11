@@ -16,6 +16,37 @@ class ExternalApiOperationsTest {
         ExternalApiOperations(directExecution(), directDatabase(), breaker, waiter, DatabaseWaitProperties())
 
     @Test
+    fun `claim 뒤 OPEN은 호출 실패를 만들지 않고 대기 후 실제 LLM 호출 한 번만 실행한다`() {
+        val execution = directExecution()
+        val breaker: CircuitBreaker = mock()
+        whenever(breaker.acquire()).thenReturn(Duration.ofSeconds(30), Duration.ofSeconds(20), Duration.ZERO)
+        val action: () -> String = mock()
+        whenever(action()).thenReturn("ok")
+        val waits = mutableListOf<Duration>()
+        val api = ExternalApiOperations(execution, directDatabase(), breaker, RetryWaiter { waits.add(it) }, DatabaseWaitProperties())
+        assertThat(api.execute(testToken, action)).isEqualTo("ok")
+        assertThat(waits).containsExactly(Duration.ofSeconds(5), Duration.ofSeconds(5))
+        verify(execution, times(3)).checkpoint(testToken)
+        verify(action, times(1)).invoke()
+        verify(breaker, never()).recordTransientFailure()
+        verify(breaker, times(1)).recordSuccess()
+    }
+
+    @Test
+    fun `OPEN 대기 중 실행권 상실은 호출이나 서킷 성공 실패 기록 없이 종료한다`() {
+        val execution = directExecution()
+        doNothing().doThrow(ExecutionLostException(testToken)).whenever(execution).checkpoint(testToken)
+        val breaker: CircuitBreaker = mock()
+        whenever(breaker.acquire()).thenReturn(Duration.ofSeconds(30))
+        val action: () -> String = mock()
+        val api = ExternalApiOperations(execution, directDatabase(), breaker, RetryWaiter {}, DatabaseWaitProperties())
+        assertThatThrownBy { api.execute(testToken, action) }.isInstanceOf(ExecutionLostException::class.java)
+        verifyNoInteractions(action)
+        verify(breaker, never()).recordSuccess()
+        verify(breaker, never()).recordTransientFailure()
+    }
+
+    @Test
     fun `429는 같은 호출을 반복하지 않고 runner로 전파한다`() {
         val execution = directExecution()
         val database = directDatabase()

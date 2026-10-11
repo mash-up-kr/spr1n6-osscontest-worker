@@ -17,10 +17,10 @@ sealed interface ClaimAttempt {
 class JobClaimTransactions(private val jdbc: NamedParameterJdbcTemplate, private val locks: JobExecutionLocks) {
     @Transactional(isolation = Isolation.READ_COMMITTED)
     fun claim(workerId: String, leaseMillis: Long, maxAttempts: Int, excludedDocuments: Set<Long>,
-              prepared: (ExecutionToken) -> Unit): ClaimAttempt {
+              allowLlm: Boolean, prepared: (ExecutionToken) -> Unit): ClaimAttempt {
         locks.requireTransaction()
         val exclusions = if (excludedDocuments.isEmpty()) "" else "AND d.id NOT IN (:excludedDocuments)"
-        val params = mapOf("maxAttempts" to maxAttempts, "excludedDocuments" to excludedDocuments)
+        val params = mapOf("maxAttempts" to maxAttempts, "excludedDocuments" to excludedDocuments, "allowLlm" to allowLlm)
         val candidate = jdbc.query("""
             SELECT j.id, j.document_id FROM indexing_job j JOIN document d ON d.id = j.document_id
             WHERE $ELIGIBLE $exclusions
@@ -58,6 +58,10 @@ class JobClaimTransactions(private val jdbc: NamedParameterJdbcTemplate, private
         private const val ELIGIBLE = """
             j.worker_id IS NULL AND j.lease_until IS NULL AND j.attempt_count < :maxAttempts
             AND (j.status = 'PENDING' OR (j.status = 'RETRY_WAIT' AND j.next_retry_at <= clock_timestamp()))
+            AND (:allowLlm OR j.job_type = 'DELETE' OR EXISTS (
+                SELECT 1 FROM document admission_document
+                WHERE admission_document.id = j.document_id AND admission_document.deleted_at IS NOT NULL
+            ))
             AND NOT EXISTS (
                 SELECT 1 FROM indexing_job predecessor WHERE predecessor.document_id = j.document_id
                 AND predecessor.enqueue_seq < j.enqueue_seq AND predecessor.status IN ('PENDING','PROCESSING','RETRY_WAIT')

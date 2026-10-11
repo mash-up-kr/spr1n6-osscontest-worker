@@ -51,7 +51,7 @@ class CircuitBreakerTest {
         whenever(store.snapshot("embedding-api")).thenReturn(snapshot(BreakerState.OPEN, now.minusSeconds(1)))
         whenever(store.tryStartProbe("embedding-api", 60_000)).thenReturn(true)
         assertThat(breaker.acquire()).isEqualTo(Duration.ZERO)
-        assertThat(breaker.admission()).describedAs("시험 호출 자격이 있으면 claim은 1건으로 제한한다")
+        assertThat(breaker.admission()).describedAs("시험 호출 기한이 되어 실제 호출 직전 시험권을 얻을 수 있다")
             .isEqualTo(ClaimAdmission.LIMITED)
     }
 

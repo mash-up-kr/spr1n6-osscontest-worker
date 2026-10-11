@@ -15,6 +15,8 @@ import org.springframework.context.annotation.Import
 @Import(com.osscontest.worker.indexing.queue.ExecutionResults::class, JobExecutionLocks::class, JobClaimTransactions::class, JobOwnershipGuard::class, JobQueueStore::class, com.osscontest.worker.indexing.pipeline.service.RetryPolicy::class, com.osscontest.worker.indexing.pipeline.service.RandomRetryJitter::class)
 class QueueIntegrationConfiguration {
     @Bean
+    fun circuitBreaker() = closedCircuitBreaker()
+    @Bean
     fun queueProperties() = QueueProperties(workerId = "integration-worker")
     @Bean
     fun meterRegistry(): MeterRegistry = SimpleMeterRegistry()
