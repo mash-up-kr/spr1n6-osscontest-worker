@@ -12,6 +12,7 @@ data class BreakerSnapshot(val state: BreakerState, val openedUntil: Instant?, v
  * breaker 상태의 모든 전이는 조건부 UPDATE 한 문장이다. 경합하는 Worker 중 한 곳만 이긴다.
  * 시각 판단은 DB 시계만 쓰고, 읽기와 쓰기 모두 큐와 같은 Primary 연결을 쓴다.
  * 행이 없으면 조회는 null, 기록은 0건으로 끝나 호출자가 breaker 없이 동작한다.
+ * 테이블 자체가 없으면 예외가 그대로 전파되어 poll이 claim 전에 끝난다. 테이블은 스키마 담당자가 계약 SQL로 만든다.
  */
 @Repository
 class CircuitBreakerStore(private val jdbc: NamedParameterJdbcTemplate) {
@@ -25,7 +26,7 @@ class CircuitBreakerStore(private val jdbc: NamedParameterJdbcTemplate) {
 
     /**
      * 유지 시간이 지난 OPEN(또는 시험 호출자가 사라진 HALF_OPEN)에서 시험 호출권을 얻는다. 얻으면 true.
-     * 시험 호출의 유효 시간도 [openMillis]를 쓴다. 호출이 이보다 오래 걸리면 다른 Worker가 두 번째 시험 호출을 얻을 수 있다.
+     * 시험 호출의 유효 시간도 [openMillis]를 쓴다. 호출이 이보다 오래 걸리면 다른 Worker가 두 번째 시험 호출을 얻는다.
      */
     fun tryStartProbe(name: String, openMillis: Long): Boolean = jdbc.update(
         """

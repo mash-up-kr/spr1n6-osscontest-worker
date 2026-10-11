@@ -30,7 +30,8 @@ class CircuitBreaker(
 
     /**
      * 호출 전에 기다려야 할 시간을 돌려준다. ZERO이면 호출해도 된다.
-     * breaker 행이 없으면 breaker 없이 동작한다. 행은 계약 SQL이 만들고, 호출자는 돌려받은 시간을 상한으로만 쓴다.
+     * 돌려받은 시간은 상한이다. 호출자는 확인 간격으로 끊어 기다리고 다시 부른다.
+     * breaker 행이 없으면 breaker 없이 동작한다. 행은 스키마 담당자가 적용하는 계약 SQL이 만든다.
      */
     fun acquire(): Duration {
         val snapshot = store.snapshot(properties.name) ?: return Duration.ZERO
@@ -39,12 +40,13 @@ class CircuitBreaker(
         val openedUntil = snapshot.openedUntil ?: return Duration.ZERO
         val remaining = Duration.between(snapshot.now, openedUntil)
         if (remaining.isPositive) return remaining
-        // 다른 Worker가 시험 호출권을 먼저 얻었다. 정확한 남은 시간을 모르므로 상한을 돌려주고, 호출자가 확인 간격으로 끊어 다시 확인한다.
+        // 시험 호출권을 못 얻으면 다른 Worker가 먼저 얻은 것이다. 남은 시간을 모르므로 상한(openDuration)을 돌려준다.
         if (!store.tryStartProbe(properties.name, properties.openDuration.toMillis())) return properties.openDuration
         log.info("CIRCUIT_BREAKER_HALF_OPEN name={}", properties.name)
         return Duration.ZERO
     }
 
+    /** claim 전에 부른다. OPEN 유지 시간이 지났으면 LIMITED, 아직이면 BLOCKED를 돌려준다. */
     fun admission(): ClaimAdmission {
         val snapshot = store.snapshot(properties.name) ?: return ClaimAdmission.NORMAL
         observe(snapshot.state)

@@ -7,6 +7,10 @@ import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import java.time.Duration
 
+/**
+ * 임베딩 API 호출 경계. 호출 전에 DB 가용성·실행권·breaker를 확인한다.
+ * breaker를 연 실패는 삼키고 열려 있는 동안 기다린 뒤 같은 [action]을 다시 실행하므로, [action]은 재실행해도 안전해야 한다.
+ */
 @Component
 class ExternalApiOperations(
     private val execution: ExecutionOperations,
@@ -24,6 +28,7 @@ class ExternalApiOperations(
             // OPEN이면 호출하지 않고 기다린다. 실패가 만들어지지 않으므로 시도 횟수가 소비되지 않는다.
             val breakerWait = database.execute { breaker.acquire() }
             if (breakerWait.isPositive) {
+                // DB 대기와 같은 확인 간격으로 끊는다. 그 사이 실행권 상실·종료 신호를 놓치지 않는다.
                 waiter.waitFor(minOf(breakerWait, properties.checkInterval))
                 continue
             }
