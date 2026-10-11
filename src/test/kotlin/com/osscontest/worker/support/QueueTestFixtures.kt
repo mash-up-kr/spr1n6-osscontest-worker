@@ -6,14 +6,22 @@ import com.osscontest.worker.indexing.queue.DatabaseOperations
 import com.osscontest.worker.indexing.queue.ExecutionOperations
 import com.osscontest.worker.indexing.queue.ExecutionToken
 import com.osscontest.worker.indexing.queue.LockedJobExecution
+import com.osscontest.worker.indexing.queue.JobQueueStore
 import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 val testNow: Instant = Instant.parse("2026-10-10T00:00:00Z")
 val testToken = ExecutionToken(1, "worker", 1)
+
+private val fixtureClaimIds = AtomicLong()
+
+/** Fixture convenience only; every claim still uses the production API and a distinct owner. */
+fun JobQueueStore.claimFixture(maxAttempts: Int = 5, prepared: (ExecutionToken) -> Unit = {}) =
+    claim(maxAttempts, "fixture-${fixtureClaimIds.updateAndGet { Math.incrementExact(it) }}", prepared)
 
 fun processingJob(token: ExecutionToken = testToken, status: IndexingJobStatus = IndexingJobStatus.PROCESSING,
                   attempt: Int = 1) = IndexingJobEntity(
@@ -47,5 +55,5 @@ fun directExecution(): ExecutionOperations = mock<ExecutionOperations>().apply {
     whenever(database<Any?>(any(), any())).thenAnswer { it.getArgument<() -> Any?>(1)() }
 }
 
-fun lockedJob(job: IndexingJobEntity = processingJob(), documentEpoch: Long = job.executionEpoch) =
-    LockedJobExecution(job, documentEpoch, testNow)
+fun lockedJob(job: IndexingJobEntity = processingJob(), documentEpoch: Long = job.executionEpoch,
+              now: Instant = testNow) = LockedJobExecution(job, documentEpoch, now)

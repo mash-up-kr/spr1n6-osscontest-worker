@@ -1,5 +1,6 @@
 package com.osscontest.worker.indexing.queue
 
+import com.osscontest.worker.support.claimFixture
 import com.osscontest.worker.indexing.deletion.service.DocumentDeletionService
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
@@ -59,7 +60,7 @@ class DbJobQueueIntegrationTest(
 
     private fun claim(): ClaimedJob {
         queue.enqueue(UUID.randomUUID(), 800001, 800001, JobType.INDEX, null)
-        return checkNotNull(queue.claim(5) {})
+        return checkNotNull(queue.claimFixture(5) {})
     }
 
     private fun expire(job: ClaimedJob) {
@@ -108,11 +109,11 @@ class DbJobQueueIntegrationTest(
         queue.enqueue(UUID.randomUUID(), 800002, 800002, JobType.INDEX, null)
         jdbc.update("UPDATE indexing_job SET status = 'RETRY_WAIT', worker_id = NULL, lease_until = NULL, " +
             "next_retry_at = clock_timestamp() + INTERVAL '1 minute' WHERE id = ?", job.token.jobId)
-        val other = checkNotNull(queue.claim(5) {})
+        val other = checkNotNull(queue.claimFixture(5) {})
         assertThat(other.documentId).isEqualTo(800002)
-        assertThat(queue.claim(5) {}).isNull()
+        assertThat(queue.claimFixture(5) {}).isNull()
         jdbc.update("UPDATE indexing_job SET next_retry_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
-        val retry = checkNotNull(queue.claim(5) {})
+        val retry = checkNotNull(queue.claimFixture(5) {})
         assertThat(retry.token.jobId).isEqualTo(job.token.jobId)
         assertThat(retry.sourceEventId).isEqualTo(job.sourceEventId)
         assertThat(retry.token.epoch).isEqualTo(job.token.epoch + 1)
@@ -125,7 +126,7 @@ class DbJobQueueIntegrationTest(
         publication.publish(context(old), listOf(chunk(0)))
         jdbc.update("UPDATE document SET deleted_at = clock_timestamp() WHERE id = 800001")
         queue.enqueue(UUID.randomUUID(), 800001, null, JobType.DELETE, null)
-        val job = checkNotNull(queue.claim(5) {})
+        val job = checkNotNull(queue.claimFixture(5) {})
         execution.completion(job.token, ExecutionIdentity(job), completed = {}) { deletion.delete(job); Unit }
         execution.completion(job.token, ExecutionIdentity(job), completed = {}) { error("Completed DELETE must not replay") }
         publication.publish(context(old), listOf(chunk(0))) // old completion is acknowledged without writes
@@ -148,9 +149,9 @@ class DbJobQueueIntegrationTest(
         failures.recordFailure(job.token, "OTHER", "replayed", false, 5, Duration.ofSeconds(60))
         val replayed = jdbc.queryForMap("SELECT * FROM indexing_job WHERE id = ?", job.token.jobId)
         assertThat(replayed).isEqualTo(committed)
-        assertThat(queue.claim(5) {}).isNull()
+        assertThat(queue.claimFixture(5) {}).isNull()
         jdbc.update("UPDATE indexing_job SET next_retry_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
-        val next = checkNotNull(queue.claim(5) {})
+        val next = checkNotNull(queue.claimFixture(5) {})
         assertThat(next.sourceEventId).isEqualTo(job.sourceEventId)
         assertThat(next.attemptCount).isEqualTo(job.attemptCount + 1)
         assertThat(next.token.epoch).isEqualTo(job.token.epoch + 1)
@@ -176,7 +177,7 @@ class DbJobQueueIntegrationTest(
         val job = claim()
         seedReleasedExecution(jdbc, job.token, IndexingJobStatus.FAILED)
         val before = jdbc.queryForMap("SELECT * FROM indexing_job WHERE id = ?", job.token.jobId)
-        assertThat(queue.claim(5) {}).isNull()
+        assertThat(queue.claimFixture(5) {}).isNull()
         assertThat(queue.renew(job.token)).isZero()
         assertThat(jdbc.queryForMap("SELECT * FROM indexing_job WHERE id = ?", job.token.jobId)).isEqualTo(before)
     }

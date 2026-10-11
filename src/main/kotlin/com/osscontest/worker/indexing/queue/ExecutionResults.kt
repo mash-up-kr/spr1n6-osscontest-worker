@@ -18,8 +18,7 @@ enum class JobOutcome {
 
 /** A read-only receipt never grants permission to write or renew. */
 fun IndexingJobEntity.isCompletedExecution(token: ExecutionToken) = id == token.jobId &&
-    executionEpoch == token.epoch && status == IndexingJobStatus.COMPLETED && workerId == null &&
-    leaseUntil == null && JobOutcome.entries.any { it.name == outcome && it.completes(jobType) }
+    snapshot().completed(token)
 
 data class FailureRecord(val decision: FailureDecision, val code: String, val message: String) {
     val confirmed = AtomicBoolean()
@@ -29,9 +28,7 @@ data class FailureRecord(val decision: FailureDecision, val code: String, val me
         snapshot.outcome == (if (decision.status == IndexingJobStatus.RETRY_WAIT) JobOutcome.RETRY_SCHEDULED
             else JobOutcome.FAILED_PROCESSING).name
 
-    fun matches(job: IndexingJobEntity, token: ExecutionToken) = matches(JobSnapshot(job.workerId,
-        job.executionEpoch, job.status, job.leaseUntil, job.nextRetryAt, job.updatedAt, null,
-        job.outcome, job.jobType, job.documentId, job.documentVersionId, job.lastErrorCode, job.lastErrorMessage), token)
+    fun matches(job: IndexingJobEntity, token: ExecutionToken) = job.id == token.jobId && matches(job.snapshot(), token)
 }
 
 /** Retains the original decision through rollback, database waits and an unknown commit result. */

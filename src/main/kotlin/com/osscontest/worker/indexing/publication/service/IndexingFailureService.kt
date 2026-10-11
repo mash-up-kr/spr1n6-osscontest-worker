@@ -36,7 +36,8 @@ class IndexingFailureService(
         baseDelay: Duration,
         retryAfter: String? = null,
     ): IndexingJobStatus {
-        val job = ownership.lockForResult(token)
+        val execution = ownership.lockForResult(token)
+        val job = execution.job
         if (job.executionEpoch != token.epoch) throw ExecutionLostException(token)
         if (job.isCompletedExecution(token)) return job.status
         val previous = results.failure(token)
@@ -44,7 +45,7 @@ class IndexingFailureService(
             previous.confirmed.set(true)
             return job.status
         }
-        ownership.requireProcessing(job, token)
+        ownership.requireProcessing(execution, token)
         val record = results.prepare(token) {
             FailureRecord(retryPolicy.decideFailure(permanent, job.attemptCount, maxAttempts, baseDelay,
                 indexingJobRepository.currentDbTimestamp(), retryAfter), errorCode.take(100), errorMessage.take(1000))

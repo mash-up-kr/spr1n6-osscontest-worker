@@ -19,19 +19,12 @@ class JobQueueStore(
     private val locks: JobExecutionLocks,
     private val ownership: JobOwnershipGuard,
 ) {
-    // Fixture helper; the Worker supplies a distinct owner for every claim attempt.
-    internal fun claim(maxAttempts: Int, prepared: (ExecutionToken) -> Unit): ClaimedJob? =
-        claimForWorker(properties.workerId, properties.leaseDuration.toMillis(), maxAttempts, prepared)
-
-    fun claim(maxAttempts: Int, ownerId: String, prepared: (ExecutionToken) -> Unit): ClaimedJob? =
-        claimForWorker(ownerId, properties.leaseDuration.toMillis(), maxAttempts, prepared)
-
-    fun claimForWorker(workerId: String, leaseMillis: Long, maxAttempts: Int,
-                       prepared: (ExecutionToken) -> Unit = {}): ClaimedJob? {
-        require(workerId.isNotBlank() && leaseMillis > 0 && maxAttempts > 0)
+    /** Single operational entry point; the caller supplies an owner unique to this claim attempt. */
+    fun claim(maxAttempts: Int, ownerId: String, prepared: (ExecutionToken) -> Unit = {}): ClaimedJob? {
+        require(ownerId.isNotBlank() && maxAttempts > 0)
         val excluded = mutableSetOf<Long>()
         repeat(CLAIM_CANDIDATE_LIMIT) {
-            when (val attempt = claims.claim(workerId, leaseMillis, maxAttempts, excluded, prepared)) {
+            when (val attempt = claims.claim(ownerId, properties.leaseDuration.toMillis(), maxAttempts, excluded, prepared)) {
                 ClaimAttempt.Empty -> return null
                 is ClaimAttempt.Acquired -> return attempt.job
                 is ClaimAttempt.Skipped -> {
@@ -46,9 +39,7 @@ class JobQueueStore(
 
     fun resolveClaim(token: ExecutionToken): ClaimedJob? = jdbc.query(
         """
-        SELECT j.* FROM indexing_job j JOIN document d ON d.id = j.document_id
-        WHERE j.id = :id AND j.worker_id = :workerId AND j.execution_epoch = :epoch
-          AND d.execution_epoch = :epoch AND j.status = 'PROCESSING' AND j.lease_until IS NOT NULL
+        SELECT j.* FROM indexing_job j WHERE ${JobOwnershipSql.OWNED_PROCESSING}
         """.trimIndent(), token.params(), JobExecutionLocks.JOB_MAPPER,
     ).firstOrNull()?.claimed()
 
@@ -77,9 +68,7 @@ class JobQueueStore(
             """
             UPDATE indexing_job j SET lease_until = clock_timestamp() + :leaseMillis * INTERVAL '1 millisecond',
                 updated_at = clock_timestamp()
-            WHERE j.id = :id AND j.worker_id = :workerId AND j.execution_epoch = :epoch
-              AND j.status = 'PROCESSING' AND j.lease_until IS NOT NULL
-              AND EXISTS (SELECT 1 FROM document d WHERE d.id = j.document_id AND d.execution_epoch = :epoch)
+            WHERE ${JobOwnershipSql.OWNED_PROCESSING}
             """.trimIndent(), token.params() + ("leaseMillis" to properties.leaseDuration.toMillis()),
         )
     }

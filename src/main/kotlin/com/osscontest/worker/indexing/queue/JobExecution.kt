@@ -2,6 +2,7 @@ package com.osscontest.worker.indexing.queue
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobType
+import com.osscontest.worker.indexing.publication.entity.IndexingJobEntity
 import java.time.Instant
 import java.util.UUID
 
@@ -37,12 +38,19 @@ data class JobSnapshot(
     fun matches(token: ExecutionToken) = workerId == token.workerId && epoch == token.epoch
     fun ownsProcessing(token: ExecutionToken) = matches(token) && documentEpoch == token.epoch &&
         status == IndexingJobStatus.PROCESSING && leaseUntil != null
+    fun canWrite(token: ExecutionToken) = ownsProcessing(token) && leaseUntil!!.isAfter(now)
     fun completed(token: ExecutionToken) = epoch == token.epoch && status == IndexingJobStatus.COMPLETED &&
         workerId == null && leaseUntil == null && type != null &&
         JobOutcome.entries.any { it.name == outcome && it.completes(type) }
-    fun identifies(job: ClaimedJob) = type == job.type && documentId == job.documentId &&
-        documentVersionId == job.documentVersionId
+    fun identifies(job: ClaimedJob) = ExecutionIdentity(job).matches(this)
 }
+
+/** Both locked writes and read-only receipts use the same execution rules. */
+internal fun IndexingJobEntity.snapshot(documentEpoch: Long? = null, now: Instant = updatedAt) =
+    JobSnapshot(workerId, executionEpoch, status, leaseUntil, nextRetryAt, now, documentEpoch,
+        outcome, jobType, documentId, documentVersionId, lastErrorCode, lastErrorMessage)
+
+internal fun LockedJobExecution.snapshot() = job.snapshot(documentEpoch, now)
 
 class ExecutionLostException(val token: ExecutionToken) : RuntimeException("Execution no longer owned: $token")
 class ExecutionCompletedException(val token: ExecutionToken) : RuntimeException("Execution already completed: $token")

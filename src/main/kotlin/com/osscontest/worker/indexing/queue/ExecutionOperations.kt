@@ -16,11 +16,11 @@ class ExecutionOperations(
                 throw ExecutionCompletedException(token)
             }
             if (!job.ownsProcessing(token)) throw ExecutionLostException(token)
-            if (checkNotNull(job.leaseUntil) <= job.now) {
+            if (!job.canWrite(token)) {
                 if (store.renew(token) != 1) throw ExecutionLostException(token)
                 job = store.snapshot(token) ?: throw ExecutionLostException(token)
                 if (!job.ownsProcessing(token)) throw ExecutionLostException(token)
-                if (job.leaseUntil == null || job.leaseUntil <= job.now) throw LeaseExpiredException()
+                if (!job.canWrite(token)) throw LeaseExpiredException()
             }
         }
     }

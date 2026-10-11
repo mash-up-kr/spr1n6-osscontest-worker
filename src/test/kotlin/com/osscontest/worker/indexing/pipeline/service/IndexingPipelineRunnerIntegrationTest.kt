@@ -1,5 +1,6 @@
 package com.osscontest.worker.indexing.pipeline.service
 
+import com.osscontest.worker.support.claimFixture
 import com.osscontest.worker.indexing.queue.JobQueueStore
 import com.osscontest.worker.indexing.queue.JobType
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
@@ -169,7 +170,7 @@ class IndexingPipelineRunnerIntegrationTest(
         val sourceEventId = UUID.randomUUID()
         queue.enqueue(sourceEventId, 900003L, 900003L, JobType.INDEX, null)
 
-        pipelineRunner.run(checkNotNull(queue.claim(5) {}))
+        pipelineRunner.run(checkNotNull(queue.claimFixture(5) {}))
 
         val job = indexingJobRepository.findBySourceEventId(sourceEventId)
         assertThat(job).isNotNull
@@ -182,7 +183,7 @@ class IndexingPipelineRunnerIntegrationTest(
         var original: Map<String, Any?>? = null
         var previousEpoch = 0L
         repeat(count) { index ->
-            val claim = checkNotNull(queue.claimForWorker("runner-test-${index + 1}", 60_000, 5))
+            val claim = checkNotNull(queue.claim(5, "runner-test-${index + 1}"))
             val claimed = jdbcTemplate.queryForMap("SELECT * FROM indexing_job WHERE id=?", claim.token.jobId)
             if (original == null) original = claimed
             for (column in listOf("id", "source_event_id", "enqueue_seq")) {
@@ -202,12 +203,12 @@ class IndexingPipelineRunnerIntegrationTest(
                 assertThat(saved.outcome).isEqualTo("RETRY_SCHEDULED")
                 // Set a deterministic future deadline before checking eligibility, then make it due.
                 jdbcTemplate.update("UPDATE indexing_job SET next_retry_at=clock_timestamp()+INTERVAL '1 minute' WHERE id=?", saved.id)
-                assertThat(queue.claim(5) {}).isNull()
+                assertThat(queue.claimFixture(5) {}).isNull()
                 jdbcTemplate.update("UPDATE indexing_job SET next_retry_at=clock_timestamp()-INTERVAL '1 second' WHERE id=?", saved.id)
             } else {
                 assertThat(saved.status).isEqualTo(terminal)
                 assertThat(saved.outcome).isEqualTo(if (terminal == IndexingJobStatus.COMPLETED) "INDEXED" else "FAILED_PROCESSING")
-                assertThat(queue.claim(5) {}).isNull()
+                assertThat(queue.claimFixture(5) {}).isNull()
             }
             previousEpoch = claim.token.epoch
         }

@@ -131,7 +131,7 @@ class PublicationTransactionsIntegrationTest(
     }
     private fun claim(version: Long = 1): ClaimedJob {
         queue.enqueue(UUID.randomUUID(), 1, version, JobType.INDEX, null)
-        return checkNotNull(queue.claimForWorker("instance-1", 60_000, 5))
+        return checkNotNull(queue.claim(5, "instance-1"))
     }
     private fun context(job: ClaimedJob) = IndexingContext(job.token.jobId, 1, job.documentVersionId!!,
         job.documentVersionId, mapOf("language" to "ko"), job.token)

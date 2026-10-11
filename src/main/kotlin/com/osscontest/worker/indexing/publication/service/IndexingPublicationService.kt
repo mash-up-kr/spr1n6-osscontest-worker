@@ -34,11 +34,12 @@ class IndexingPublicationService(
     @Transactional(isolation = Isolation.READ_COMMITTED)
     fun preflight(claim: ClaimedJob): Boolean {
         check(claim.type == JobType.INDEX)
-        val job = ownership.lockForResult(claim.token)
+        val execution = ownership.lockForResult(claim.token)
+        val job = execution.job
         check(job.jobType == claim.type && job.documentId == claim.documentId &&
             job.documentVersionId == claim.documentVersionId)
         if (job.isCompletedExecution(claim.token)) return true
-        ownership.requireProcessing(job, claim.token)
+        ownership.requireProcessing(execution, claim.token)
         if (!state.document(claim.documentId).deleted) return false
         complete(claim.token, JobOutcome.SKIPPED_DOCUMENT_DELETED)
         return true
@@ -54,11 +55,12 @@ class IndexingPublicationService(
         documentChunks: List<DocumentChunk>,
     ): IndexingJobStatus {
         check(context.executionToken.jobId == context.jobId)
-        val job = ownership.lockForResult(context.executionToken)
+        val execution = ownership.lockForResult(context.executionToken)
+        val job = execution.job
         check(job.jobType == JobType.INDEX && job.documentId == context.documentId &&
             job.documentVersionId == context.documentVersionId)
         if (job.isCompletedExecution(context.executionToken)) return IndexingJobStatus.COMPLETED
-        ownership.requireProcessing(job, context.executionToken)
+        ownership.requireProcessing(execution, context.executionToken)
         val document = state.document(context.documentId)
         if (document.deleted) {
             complete(context.executionToken, JobOutcome.SKIPPED_DOCUMENT_DELETED)
