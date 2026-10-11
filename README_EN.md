@@ -31,7 +31,9 @@ The Server owns uploads, permissions, search, and the shared schema. Producers m
 Jobs; removing source objects remains the Server's responsibility.
 
 **Deployment dependencies:** The [DB queue contract SQL](docs/sql/DB_JOB_QUEUE_CONTRACT.sql)
-is a proposal for the schema owner; the Worker does not execute it automatically.
+is a proposal for the schema owner; the Worker does not execute it automatically. Existing queue deployments
+require the [retry upgrade SQL](docs/sql/DB_JOB_RETRY_MIGRATION.sql). Database schedulers must call
+recover_expired_indexing_jobs(max_attempts, base_delay_ms) with the same settings as the Worker.
 Durable Job production and restrictions on historical version retries must be implemented
 and verified in the Server repository. Worker changes do not migrate the Server.
 
@@ -47,7 +49,7 @@ Related repositories: [Server](https://github.com/mash-up-kr/spr1n6-osscontest-s
 - Once a database outage is detected, new claims and subsequent external calls wait. Requests already in progress may complete.
 - After recovery, the same owner resumes at the suspended point. An expired lease may be renewed conditionally; if recovery invalidates ownership first, the current execution exits.
 - Chunk UPSERT, version completion, searchable pointer promotion, and Job completion share one transaction. Replaying a save checks whether the same execution already completed before writing again.
-- Application code handles 429 and `Retry-After`, persists `RETRY_WAIT` and `next_retry_at`, and retains heartbeats. Fresh Jobs remain blocked until the retry cohort reaches terminal states.
+- Ordinary errors and 429 persist RETRY_WAIT with a database-time deadline or FAILED, atomically release worker/lease, and return the slot. Linear backoff has ±20% jitter; valid Retry-After is a minimum. The next claim runs the same Job as a new execution.
 - A `DELETE` Job removes chunks for a deleted document.
 
 ```mermaid
@@ -55,10 +57,10 @@ stateDiagram-v2
     [*] --> PENDING
     PENDING --> PROCESSING: claim / increment epoch
     PROCESSING --> RETRY_WAIT: transient failure
-    RETRY_WAIT --> PROCESSING: deadline reached / same execution
+    RETRY_WAIT --> PROCESSING: new claim after due / increment attempts and epoch
     PROCESSING --> COMPLETED: atomic result save
     PROCESSING --> FAILED: permanent error or budget exhausted
-    PROCESSING --> PENDING: lease recovery / increment epoch
+    PROCESSING --> RETRY_WAIT: lease expired / attempts remaining
 ```
 
 Recovery preserves retry deadlines. Losing ownership or restarting a Worker can cause the
@@ -110,11 +112,12 @@ set +a
 | `INDEXING_EMBEDDING_MAX_TOKENS_PER_REQUEST` | `300000` |
 | `INDEXING_STORAGE_ENDPOINT`, `INDEXING_STORAGE_REGION` | Empty, `us-east-1` |
 | `INDEXING_STORAGE_DOWNLOAD_TIMEOUT` | `PT30S` |
+| `INDEXING_JOB_AFTER_UPLOAD_CONFIRMED` | `false`; confirm Core uploads before registering INDEX, then enable permanent NoSuchKey classification |
 | `FAULT_INJECTION_ENABLED`, `FAULT_INJECTION_PHASE` | `false`, `EMBEDDING` |
 
-See [application.yml](src/main/resources/application.yml) for all settings. Active Job limits
-and retry request serialization are per Worker. Other Workers consult shared retry deadlines
-and claim admission in the database. There is no global external request concurrency limiter.
+See [application.yml](src/main/resources/application.yml) for all settings. Active Job limits are per Worker.
+Claims follow enqueue_seq and reject unfinished predecessors for the same document, including future retries.
+Other documents remain eligible. There is no global external request concurrency limiter.
 
 ```bash
 ./gradlew bootJar
@@ -150,7 +153,7 @@ the key conditions in their test code are met.
 
 ```text
 src/main/kotlin/com/osscontest/worker/indexing
-├── queue/         # Claims, ownership, DB waits, heartbeats, API backoff
+├── queue/         # Claims, ownership, DB waits, heartbeats, external call boundary
 ├── retrieval/     # Source downloads
 ├── parsing/       # MIME parsers and timeouts
 ├── chunking/      # Strategies and token limits

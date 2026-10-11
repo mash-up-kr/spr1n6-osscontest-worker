@@ -84,7 +84,7 @@ class IndexingFailureServiceIntegrationTest(
                     startedAt = Instant.now(),
                     completedAt = if (status == IndexingJobStatus.COMPLETED) Instant.now() else null,
                     updatedAt = Instant.now(),
-                    executionEpoch = 1, leaseUntil = Instant.now().plusSeconds(60),
+                    executionEpoch = 1, leaseUntil = if (status == IndexingJobStatus.PROCESSING) indexingJobRepository.currentDbTimestamp().plusSeconds(60) else null,
                 ),
             )
         return job.id!!
@@ -93,7 +93,7 @@ class IndexingFailureServiceIntegrationTest(
     @Test
     fun `recordFailure는 permanent=false에 상한 미만이면 RETRY_WAIT로 전이시킨다`() {
         val jobId = seedJob(status = IndexingJobStatus.PROCESSING, attemptCount = 1)
-        val failedAt = Instant.now()
+        val failedAt = indexingJobRepository.currentDbTimestamp()
 
         val result =
             indexingFailureService.recordFailure(
@@ -108,16 +108,20 @@ class IndexingFailureServiceIntegrationTest(
         assertThat(result).isEqualTo(IndexingJobStatus.RETRY_WAIT)
         val reloaded = indexingJobRepository.findById(jobId).orElseThrow()
         assertThat(reloaded.status).isEqualTo(IndexingJobStatus.RETRY_WAIT)
-        // §3.8 선형 백오프: attempt_count=1 → failedAt + base_delay * 1
-        assertThat(reloaded.nextRetryAt).isBetween(failedAt.plus(BASE_DELAY), Instant.now().plus(BASE_DELAY))
+        // 선형 backoff에 ±20% 지터를 적용한다.
+        assertThat(reloaded.nextRetryAt).isBetween(failedAt.plusMillis(24_000), indexingJobRepository.currentDbTimestamp().plusMillis(36_000))
         assertThat(reloaded.lastErrorCode).isEqualTo("SOME_ERROR")
+        assertThat(reloaded.workerId).isNull()
+        assertThat(reloaded.leaseUntil).isNull()
+        assertThat(reloaded.executionEpoch).isEqualTo(1)
+        assertThat(reloaded.attemptCount).isEqualTo(1)
     }
 
-    // §3.8: next_retry_at = now() + base_delay * attempt_count — 상수 지연이 아니라 선형이어야 한다.
+    // 지터가 있어도 회차 증가에 비례하는 지연 범위여야 한다.
     @Test
     fun `recordFailure는 next_retry_at을 base_delay와 attempt_count의 곱으로 계산한다`() {
         val jobId = seedJob(status = IndexingJobStatus.PROCESSING, attemptCount = 3)
-        val failedAt = Instant.now()
+        val failedAt = indexingJobRepository.currentDbTimestamp()
 
         val result =
             indexingFailureService.recordFailure(
@@ -131,14 +135,14 @@ class IndexingFailureServiceIntegrationTest(
 
         assertThat(result).isEqualTo(IndexingJobStatus.RETRY_WAIT)
         val reloaded = indexingJobRepository.findById(jobId).orElseThrow()
-        assertThat(reloaded.nextRetryAt).isBetween(failedAt.plus(BASE_DELAY.multipliedBy(3)), Instant.now().plus(BASE_DELAY.multipliedBy(3)))
+        assertThat(reloaded.nextRetryAt).isBetween(failedAt.plusMillis(72_000), indexingJobRepository.currentDbTimestamp().plusMillis(108_000))
         assertThat(reloaded.nextRetryAt).isNotEqualTo(failedAt.plus(BASE_DELAY))
     }
 
     @Test
     fun `recordFailure는 permanent=false여도 상한 도달이면 FAILED로 전이시킨다`() {
         val jobId = seedJob(status = IndexingJobStatus.PROCESSING, attemptCount = 5)
-        val failedAt = Instant.now()
+        val failedAt = indexingJobRepository.currentDbTimestamp()
 
         val result =
             indexingFailureService.recordFailure(
@@ -160,7 +164,7 @@ class IndexingFailureServiceIntegrationTest(
     @Test
     fun `recordFailure는 permanent=true면 attempt_count가 상한 미만이어도 즉시 FAILED로 전이시킨다`() {
         val jobId = seedJob(status = IndexingJobStatus.PROCESSING, attemptCount = 1)
-        val failedAt = Instant.now()
+        val failedAt = indexingJobRepository.currentDbTimestamp()
 
         val result =
             indexingFailureService.recordFailure(
@@ -183,7 +187,7 @@ class IndexingFailureServiceIntegrationTest(
     @Test
     fun `recordFailure는 PROCESSING이 아니면 조용히 무시한다`() {
         val jobId = seedJob(status = IndexingJobStatus.COMPLETED, attemptCount = 1)
-        val failedAt = Instant.now()
+        val failedAt = indexingJobRepository.currentDbTimestamp()
 
         val result =
             indexingFailureService.recordFailure(

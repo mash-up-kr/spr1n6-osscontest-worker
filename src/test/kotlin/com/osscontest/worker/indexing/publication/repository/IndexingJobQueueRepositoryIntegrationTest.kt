@@ -20,7 +20,7 @@ import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.transaction.support.TransactionTemplate
-import java.time.LocalDateTime
+import java.time.Instant
 import java.time.OffsetDateTime
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -32,7 +32,7 @@ import java.util.concurrent.TimeUnit
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("integration")
-@Import(IndexingJobQueueRepository::class)
+@Import(IndexingJobQueueRepository::class, com.osscontest.worker.support.QueueIntegrationConfiguration::class)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class IndexingJobQueueRepositoryIntegrationTest(
     private val queueRepository: IndexingJobQueueRepository,
@@ -97,8 +97,8 @@ class IndexingJobQueueRepositoryIntegrationTest(
         jdbcTemplate.queryForObject(
             """
             INSERT INTO indexing_job
-                (source_event_id, document_id, document_version_id, status, kafka_topic, kafka_partition, kafka_offset)
-            VALUES (gen_random_uuid(), ?, ?, ?, 'test', 0, 0)
+                (source_event_id, document_id, document_version_id, status)
+            VALUES (gen_random_uuid(), ?, ?, ?)
             RETURNING id
             """,
             Long::class.java,
@@ -117,8 +117,8 @@ class IndexingJobQueueRepositoryIntegrationTest(
             documentId,
         )!!
 
-    private fun dbNow(): LocalDateTime =
-        jdbcTemplate.queryForObject("SELECT LOCALTIMESTAMP", LocalDateTime::class.java)!!
+    private fun dbNow(): Instant =
+        jdbcTemplate.queryForObject("SELECT clock_timestamp()", java.sql.Timestamp::class.java)!!.toInstant()
 
     private fun claimedContext(): JobContext {
         seedDocument(1)
@@ -212,7 +212,7 @@ class IndexingJobQueueRepositoryIntegrationTest(
     @Test
     fun `fail은 RETRY_WAIT과 재시도 시각을 기록하고 lease를 해제한다`() {
         val ctx = claimedContext()
-        val retryAt = jdbcTemplate.queryForObject("SELECT LOCALTIMESTAMP", LocalDateTime::class.java)!!.plusSeconds(30)
+        val retryAt = dbNow().plusSeconds(30)
 
         val updated =
             queueRepository.fail(
@@ -227,15 +227,16 @@ class IndexingJobQueueRepositoryIntegrationTest(
         val row = jobRow(ctx.jobId)
         val stored =
             jdbcTemplate.queryForObject(
-                "SELECT next_retry_at::timestamp FROM indexing_job WHERE id = ?",
-                LocalDateTime::class.java,
+                "SELECT next_retry_at FROM indexing_job WHERE id = ?",
+                java.sql.Timestamp::class.java,
                 ctx.jobId,
             )
         assertThat(row["status"]).isEqualTo("RETRY_WAIT")
-        assertThat(stored).isEqualTo(retryAt)
+        assertThat(stored!!.toInstant()).isEqualTo(retryAt)
         assertThat(row["last_error_code"]).isEqualTo("EMBEDDING_FAILED")
         assertThat(row["last_error_message"]).isEqualTo("temporary error")
         assertThat(row["lease_until"]).isNull()
+        assertThat(row["worker_id"]).isNull()
         assertThat(row["completed_at"]).isNull()
     }
 
@@ -289,7 +290,7 @@ class IndexingJobQueueRepositoryIntegrationTest(
         val ctx = claimedContext()
 
         assertThrows<IllegalArgumentException> {
-            queueRepository.fail(ctx, IndexingJobStatus.FAILED, LocalDateTime.now(), "X", "x")
+            queueRepository.fail(ctx, IndexingJobStatus.FAILED, Instant.now(), "X", "x")
         }
     }
 
@@ -371,7 +372,7 @@ class IndexingJobQueueRepositoryIntegrationTest(
         queueRepository.fail(
             firstClaim.context,
             IndexingJobStatus.RETRY_WAIT,
-            dbNow().plusHours(1),
+            dbNow().plusSeconds(3_600),
             "TEMP",
             "temporary",
         )

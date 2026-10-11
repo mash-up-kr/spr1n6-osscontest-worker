@@ -1,60 +1,74 @@
 package com.osscontest.worker.indexing.publication.service
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
-import com.osscontest.worker.indexing.publication.entity.IndexingJobEntity
+import com.osscontest.worker.indexing.pipeline.service.RetryJitter
+import com.osscontest.worker.indexing.pipeline.service.RetryPolicy
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
+import com.osscontest.worker.indexing.queue.*
+import com.osscontest.worker.support.*
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
-import org.mockito.kotlin.mock
-import org.mockito.kotlin.whenever
+import org.mockito.kotlin.*
 import java.time.Duration
-import com.osscontest.worker.indexing.queue.JobOwnershipGuard
-import com.osscontest.worker.indexing.queue.JobQueueStore
-import com.osscontest.worker.support.testToken
-import com.osscontest.worker.support.testNow
-import java.time.Instant
-import java.util.UUID
 
 class IndexingFailureServiceTest {
-    private val indexingJobRepository: IndexingJobRepository = mock()
-    private val meterRegistry = SimpleMeterRegistry()
+    private val jobs: IndexingJobRepository = mock()
     private val store: JobQueueStore = mock<JobQueueStore>().apply { whenever(dbNow()).thenReturn(testNow) }
-    private val service = IndexingFailureService(indexingJobRepository, meterRegistry, JobOwnershipGuard(indexingJobRepository, store))
+    private val meters = SimpleMeterRegistry()
+    private val policy = RetryPolicy(RetryJitter { 1.0 })
+    private val service = IndexingFailureService(jobs, meters, JobOwnershipGuard(jobs, store), policy)
 
-    private fun processingJob(attemptCount: Int = 5) =
-        IndexingJobEntity(
-            id = 1L, sourceEventId = UUID.randomUUID(), documentId = 1L, documentVersionId = 1L,
-            status = IndexingJobStatus.PROCESSING, attemptCount = attemptCount, nextRetryAt = null, workerId = testToken.workerId,
-            lastErrorCode = null, lastErrorMessage = null, traceId = null, startedAt = null,
-            completedAt = null, updatedAt = testNow,
-            executionEpoch = testToken.epoch, leaseUntil = testNow.plusSeconds(60),
-        )
+    private fun fail(permanent: Boolean = false) = service.recordFailure(testToken, "TIMEOUT", "message",
+        permanent, 5, Duration.ofSeconds(30))
 
-    @Test
-    fun `영구 실패로 FAILED 종결되면 indexing_job_failed_total이 errorCode 태그로 증가한다`() {
-        whenever(indexingJobRepository.currentDbTimestamp()).thenReturn(testNow)
-        whenever(indexingJobRepository.findByIdForUpdate(1L)).thenReturn(processingJob())
-
-        service.recordFailure(
-            token = testToken, errorCode = "HASH_MISMATCH", errorMessage = "mismatch", permanent = true,
-            maxAttempts = 5, baseDelay = Duration.ofSeconds(30),
-        )
-
-        assertThat(meterRegistry.get("indexing_job_failed_total").tag("errorCode", "HASH_MISMATCH").counter().count())
-            .isEqualTo(1.0)
+    private fun setup(attempts: Int = 1) {
+        whenever(jobs.findByIdForUpdate(1)).thenReturn(processingJob(attempt = attempts))
+        whenever(jobs.currentDbTimestamp()).thenReturn(testNow)
+        whenever(jobs.fail(any(), any(), any(), any(), anyOrNull(), any(), any())).thenReturn(1)
     }
 
     @Test
-    fun `RETRY_WAIT으로 끝나면 indexing_job_failed_total이 증가하지 않는다`() {
-        whenever(indexingJobRepository.currentDbTimestamp()).thenReturn(testNow)
-        whenever(indexingJobRepository.findByIdForUpdate(1L)).thenReturn(processingJob(attemptCount = 1))
+    fun `일시 실패는 DB 시각의 선형 지연을 기록하고 재시도 예약으로 집계한다`() {
+        setup(3)
+        assertThat(fail()).isEqualTo(IndexingJobStatus.RETRY_WAIT)
+        verify(jobs).fail(1, testToken.workerId, 1, "RETRY_WAIT", testNow.plusSeconds(90), "TIMEOUT", "message")
+        assertThat(meters.get("indexing_retry_scheduled_total").counter().count()).isEqualTo(1.0)
+        assertThat(meters.find("indexing_job_failed_total").counters()).isEmpty()
+    }
 
-        service.recordFailure(
-            token = testToken, errorCode = "TIMEOUT", errorMessage = "timeout", permanent = false,
-            maxAttempts = 5, baseDelay = Duration.ofSeconds(30),
-        )
+    @Test
+    fun `영구 실패와 마지막 시도는 재시도 시각 없이 최종 실패로 집계한다`() {
+        setup(5)
+        assertThat(fail()).isEqualTo(IndexingJobStatus.FAILED)
+        verify(jobs).fail(1, testToken.workerId, 1, "FAILED", null, "TIMEOUT", "message")
+        assertThat(meters.get("indexing_job_failed_total").counter().count()).isEqualTo(1.0)
+    }
 
-        assertThat(meterRegistry.find("indexing_job_failed_total").counters()).isEmpty()
+    @Test
+    fun `실패 커밋 뒤 소유자가 해제돼도 같은 epoch 재호출은 deadline을 다시 쓰지 않는다`() {
+        val released = processingJob(status = IndexingJobStatus.RETRY_WAIT).apply {
+            workerId = null; leaseUntil = null; nextRetryAt = testNow.plusSeconds(30)
+        }
+        whenever(jobs.findByIdForUpdate(1)).thenReturn(released)
+        assertThat(fail()).isEqualTo(IndexingJobStatus.RETRY_WAIT)
+        verify(jobs, never()).fail(any(), any(), any(), any(), anyOrNull(), any(), any())
+        assertThat(meters.meters).isEmpty()
+    }
+
+    @Test
+    fun `다음 claim의 epoch는 실패 재호출로 덮어쓰지 않는다`() {
+        whenever(jobs.findByIdForUpdate(1)).thenReturn(processingJob(testToken.copy(epoch = 2)))
+        assertThatThrownBy { fail() }.isInstanceOf(ExecutionLostException::class.java)
+        verify(jobs, never()).fail(any(), any(), any(), any(), anyOrNull(), any(), any())
+    }
+
+    @Test
+    fun `검증 이후 lease가 만료돼 UPDATE가 거절되면 메트릭도 기록하지 않는다`() {
+        setup()
+        whenever(jobs.fail(any(), any(), any(), any(), anyOrNull(), any(), any())).thenReturn(0)
+        assertThatThrownBy { fail() }.isInstanceOf(LeaseExpiredException::class.java)
+        assertThat(meters.meters).isEmpty()
     }
 }

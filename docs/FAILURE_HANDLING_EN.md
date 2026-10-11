@@ -33,12 +33,12 @@ may complete. Process termination loses retained memory; a new claim recomputes 
 ## Ownership and conditional lease renewal
 
 The execution token is `job_id + worker_id + execution_epoch`. Ownership requires a matching token,
-`PROCESSING` or `RETRY_WAIT`, and a non-null lease. Processing resumes only with a future lease by database time.
+`PROCESSING`, and a non-null lease. Processing resumes only with a future lease by database time.
 
 An expired lease can conditionally renew under the same token. Renewal matches Job ID, Worker ID,
 epoch, owned state, and lease presence; it does not require the old lease to remain in the future.
 State and lease are checked again afterward. Recovery matches expiry, clears ownership and lease,
-and increments epoch. Competing updates lock the same row and recheck conditions after the winner:
+and retains epoch until the next claim. Competing updates lock the same row and recheck conditions after the winner:
 
 - If renewal wins, the recovery expiry predicate fails.
 - If recovery wins, renewal's owner/epoch predicate fails.
@@ -60,24 +60,31 @@ Otherwise it validates ownership/lease and UPSERTs retained results. A different
 is rejected. Chunks and Job completion are not committed in separate transactions.
 
 Claims capture the proposed token before UPDATE and resolve that claim after recovery.
-Failure record replay recognizes the same execution's already committed `RETRY_WAIT`, `FAILED`, or
-`COMPLETED`, without consuming another attempt or shifting the deadline.
+Failure commits clear the worker and lease, so replay resolves the released state separately from normal ownership
+checkpoints. RETRY_WAIT or FAILED with the same epoch returns without moving the deadline; a newer epoch or
+another owner is rejected. Same-token COMPLETED returns without a failure write.
 
 ## 429 and general retries
 
-Application code handles 429; SDK automatic retries are disabled. It first sets a local marker,
-then persists `RATE_LIMITED`, `RETRY_WAIT`, and `next_retry_at`. `Retry-After` accepts seconds or HTTP
-dates and falls back to base backoff when missing or invalid. The same execution retains its heartbeat
-and retries only the failed embedding batch.
+SDK automatic retries are disabled. Ordinary errors and 429 propagate to the runner's shared failure path.
+Transient errors with attempt_count < maxAttempts select RETRY_WAIT; permanent errors or exhausted attempts select FAILED.
+The failure write checks status, worker, epoch, and a valid lease and atomically releases the worker and lease.
+Execution exits and returns its slot. The next claim increments attempts and epoch and runs the complete pipeline.
 
-Other Workers read shared deadlines. Recovery after process termination preserves the deadline, so a
-new claim respects backoff. Successful batches in memory are not transferred to the new execution.
-The deadline marker remains during retry `PROCESSING`, blocking fresh claims until the retry cohort
-is terminal. Retry request serialization is within each Worker. There is no external API circuit breaker.
+next_retry_at = database time + base-delay × max(attempt_count, 1) × U(0.8, 1.2).
+A valid Retry-After in seconds or HTTP-date form is a minimum: the later of it and linear jitter is persisted.
+Retries retain Job identity, source_event_id, and enqueue_seq. A future retry predecessor blocks later Jobs
+for the same document, while other documents can run. Successful batches in memory are not retained across claims.
+There is no external API circuit breaker.
 
-General transient failures wait `base-delay * attempt_count` and rerun the full attempt. Hash mismatch,
-unsupported MIME, corrupted files, size/chunk/token limits, invalid embeddings, and rejected requests
-are permanent errors. The default budget is five attempts. DB waits and probes do not consume attempts.
+Expired PROCESSING recovery uses the same attempt budget and jittered linear backoff. It selects RETRY_WAIT
+with attempts remaining and FAILED otherwise. Existing RETRY_WAIT deadlines are preserved; recovery does not
+increment attempts or epoch. A database scheduler must pass the Worker's actual max_attempts and base_delay_ms.
+
+Hash mismatch, unsupported MIME, corrupted files, size/chunk/token limits, invalid embeddings, and rejected
+requests are permanent. Set INDEXING_JOB_AFTER_UPLOAD_CONFIRMED=true only after confirming that Core registers
+INDEX Jobs after successful object upload. Only then is explicit NoSuchKey permanent; general 404 and storage
+errors are not treated as permanent together. The default budget is five attempts. DB waits do not consume attempts.
 
 ## Deletion and version safety
 
@@ -97,7 +104,9 @@ retries remain an external dependency; the Worker also terminates ineligible IND
 | Validation fails after chunk UPSERT | Roll back chunks and completion together |
 | Save commits but response is lost | Recognize same-token completion; avoid repeated save and external processing |
 | Claim response is lost | Resolve the previously captured token |
-| One embedding batch returns 429 | Retain successful batches; retry only the failed batch |
+| One embedding batch returns 429 | Persist retry and release the slot; next claim runs the full pipeline |
+| Failure commit response is lost | Resolve same-epoch released state without moving deadline or attempts |
+| Predecessor retry deadline is in the future | Block successors for the same document; allow other documents |
 | Worker dies during retry | Preserve deadline on recovery; new execution may recompute |
 | DELETE replay or stale INDEX publication | Idempotent completion and ownership rejection |
 
@@ -105,7 +114,7 @@ Unit and PostgreSQL integration tests are distinct. Validate SQL races and rollb
 database with the shared schema and [queue contract](sql/DB_JOB_QUEUE_CONTRACT.sql) applied.
 This document does not claim that production migrations or integration tests have been completed.
 
-Metrics: `indexing_db_wait_total`, `indexing_inline_retry_total`,
+Metrics: `indexing_db_wait_total`, `indexing_retry_scheduled_total{errorCode}`,
 `indexing_job_failed_total{errorCode}`, `indexing_job_duration_seconds{phase=total}`, and `parse_timeout_total`.
 
 [Architecture](ARCHITECTURE_EN.md) · [Processing model](PROCESSING_MODEL_EN.md)

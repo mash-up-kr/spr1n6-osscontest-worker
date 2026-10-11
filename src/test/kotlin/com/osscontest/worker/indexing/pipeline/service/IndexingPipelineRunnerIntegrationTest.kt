@@ -25,8 +25,7 @@ import org.springframework.test.context.jdbc.Sql
 import java.nio.file.Files
 import java.util.UUID
 
-// 이 테스트는 pipelineRunner.run()을 직접 호출해 단일 실행 경로(인프로세스 재시도 포함)만
-// 검증하려는 의도다.
+// 매 시도를 새 claim으로 실행하여 영속 재시도와 시도 상한을 검증한다.
 @Tag("integration")
 @SpringBootTest(
     properties = [
@@ -94,7 +93,7 @@ class IndexingPipelineRunnerIntegrationTest(
                 " 'sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9', 1, 'test-user')",
         ],
     )
-    fun `재시도 가능한 오류는 인프로세스로 재시도하다가 성공하면 COMPLETED로 끝난다`() {
+    fun `재시도 가능한 오류는 새 claim에서 성공하면 COMPLETED로 끝난다`() {
         whenever(downloadClient.download("docs/900001/v1.txt")).thenAnswer {
             Files.createTempFile("integration-test-", ".tmp")
                 .also { Files.write(it, "hello world".toByteArray()) }
@@ -105,7 +104,19 @@ class IndexingPipelineRunnerIntegrationTest(
         // 처음 두 번은 실패(재시도 가능한 RuntimeException), 세 번째는 성공하도록 설정.
         fakeIndexingProcessor.failuresBeforeSuccess = 2
 
-        pipelineRunner.run(checkNotNull(queue.claim(false, 5) {}))
+        repeat(3) { attempt ->
+            repeat(5) { attempt ->
+            pipelineRunner.run(checkNotNull(queue.claim(5) {}))
+            if (attempt < 4) jdbcTemplate.update(
+                "UPDATE indexing_job SET next_retry_at = clock_timestamp() - INTERVAL '1 second' WHERE source_event_id = ?", sourceEventId)
+        }
+            if (attempt < 2) {
+                val waiting = checkNotNull(indexingJobRepository.findBySourceEventId(sourceEventId))
+                assertThat(waiting.status).isEqualTo(IndexingJobStatus.RETRY_WAIT)
+                assertThat(waiting.workerId).isNull()
+                jdbcTemplate.update("UPDATE indexing_job SET next_retry_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", waiting.id)
+            }
+        }
 
         val job = indexingJobRepository.findBySourceEventId(sourceEventId)
         assertThat(job).isNotNull
@@ -138,7 +149,7 @@ class IndexingPipelineRunnerIntegrationTest(
 
         fakeIndexingProcessor.failuresBeforeSuccess = Int.MAX_VALUE // 계속 실패
 
-        pipelineRunner.run(checkNotNull(queue.claim(false, 5) {}))
+        pipelineRunner.run(checkNotNull(queue.claim(5) {}))
 
         val job = indexingJobRepository.findBySourceEventId(sourceEventId)
         assertThat(job).isNotNull
@@ -170,7 +181,7 @@ class IndexingPipelineRunnerIntegrationTest(
         val sourceEventId = UUID.randomUUID()
         queue.enqueue(sourceEventId, 900003L, 900003L, JobType.INDEX, null)
 
-        pipelineRunner.run(checkNotNull(queue.claim(false, 5) {}))
+        pipelineRunner.run(checkNotNull(queue.claim(5) {}))
 
         val job = indexingJobRepository.findBySourceEventId(sourceEventId)
         assertThat(job).isNotNull

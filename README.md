@@ -31,7 +31,8 @@ Server는 업로드·권한·검색과 공용 DB 스키마를 소유합니다. �
 Worker는 이미 등록된 Job을 실행하며 원본 Object Storage 삭제는 담당하지 않습니다.
 
 **배포 의존성:** [DB 큐 계약 SQL](docs/sql/DB_JOB_QUEUE_CONTRACT.sql)은 스키마 소유자가 적용할
-변경안이며 Worker가 자동 실행하지 않습니다. Server의 Job 생산 경로와 과거 버전 재시도 제한도
+변경안이며 Worker가 자동 실행하지 않습니다. 기존 큐 계약을 적용한 DB는 [재시도 전환 SQL](docs/sql/DB_JOB_RETRY_MIGRATION.sql)이 필요합니다.
+DB 스케줄러도 `recover_expired_indexing_jobs(max_attempts, base_delay_ms)`에 Worker와 같은 설정을 전달해야 합니다. Server의 Job 생산 경로와 과거 버전 재시도 제한도
 별도 저장소에서 구현·검증해야 합니다. 이 저장소의 수정으로 Server가 전환되지는 않습니다.
 
 관련 저장소: [Server](https://github.com/mash-up-kr/spr1n6-osscontest-server),
@@ -46,7 +47,7 @@ Worker는 이미 등록된 Job을 실행하며 원본 Object Storage 삭제는 �
 - 장애 감지 이후 신규 claim과 다음 외부 호출을 보류합니다. 이미 진행 중인 외부 호출은 완료될 수 있습니다.
 - 복구 후 같은 실행권이면 중단한 위치에서 재개합니다. 만료 lease는 동일 소유권 조건으로 갱신을 시도하고, 회수 절차가 먼저 이기면 현재 실행을 종료합니다.
 - 청크 UPSERT·버전 완료·검색 포인터 승격·Job 완료를 한 트랜잭션에서 저장합니다. 커밋 응답 유실 시 같은 실행의 완료 상태를 확인해 중복 저장을 건너뜁니다.
-- 429는 애플리케이션이 `Retry-After`를 해석해 대기합니다. `RETRY_WAIT`·`next_retry_at`을 저장하고 heartbeat를 유지합니다. 재시도 대상이 종결될 때까지 신규 Job을 받지 않습니다.
+- 일반 오류와 429는 `RETRY_WAIT`·DB 기준 `next_retry_at` 또는 `FAILED`를 기록하고 Worker·lease를 해제한 뒤 슬롯을 반환합니다. 선형 backoff에 ±20% 지터를 적용하고 유효한 `Retry-After`를 하한으로 존중합니다. 다음 claim은 같은 Job을 새 실행으로 처리합니다.
 - 삭제된 문서의 청크는 `DELETE` Job 실행 시 삭제합니다.
 
 ```mermaid
@@ -54,10 +55,10 @@ stateDiagram-v2
     [*] --> PENDING
     PENDING --> PROCESSING: claim / epoch 증가
     PROCESSING --> RETRY_WAIT: 일시 실패
-    RETRY_WAIT --> PROCESSING: 대기 만료 / 같은 실행
+    RETRY_WAIT --> PROCESSING: due 이후 새 claim / 횟수·epoch 증가
     PROCESSING --> COMPLETED: 원자적 결과 저장
     PROCESSING --> FAILED: 영구 실패 또는 한도 초과
-    PROCESSING --> PENDING: lease 회수 / epoch 증가
+    PROCESSING --> RETRY_WAIT: lease 만료 / 잔여 횟수 있음
 ```
 
 회수된 재시도 Job은 저장된 대기 시각을 유지합니다. 소유권을 잃거나 Worker가 종료되면
@@ -113,11 +114,12 @@ set +a
 | `INDEXING_EMBEDDING_MAX_TOKENS_PER_REQUEST` | `300000` |
 | `INDEXING_STORAGE_ENDPOINT`, `INDEXING_STORAGE_REGION` | 빈 값, `us-east-1` |
 | `INDEXING_STORAGE_DOWNLOAD_TIMEOUT` | `PT30S` |
+| `INDEXING_JOB_AFTER_UPLOAD_CONFIRMED` | `false`; Core의 업로드 성공 후 Job 등록 계약 확인 시 `true`, 명시적 `NoSuchKey`를 영구 오류로 분류 |
 | `FAULT_INJECTION_ENABLED`, `FAULT_INJECTION_PHASE` | `false`, `EMBEDDING` |
 
 전체 구성은 [application.yml](src/main/resources/application.yml)에 있습니다.
-활성 수 제한과 재시도 요청 직렬화는 Worker 단위입니다. DB에 저장된 재시도 시각과
-신규 claim 제한은 다른 Worker도 확인합니다. 전체 Worker를 묶는 외부 요청 동시성 제한은 없습니다.
+활성 수 제한은 Worker 단위입니다. claim은 `enqueue_seq` 순서와 문서별 선행 미종결 Job을 확인합니다.
+미래의 선행 재시도는 같은 문서 후속 Job을 막지만 다른 문서는 막지 않습니다. 전체 Worker를 묶는 외부 요청 동시성 제한은 없습니다.
 
 ```bash
 ./gradlew bootJar
@@ -152,7 +154,7 @@ DB 이름에 `test` 또는 `integration`이 포함되어야 하며 `.env.example
 
 ```text
 src/main/kotlin/com/osscontest/worker/indexing
-├── queue/         # DB claim, 실행권, DB 대기, heartbeat, API backoff
+├── queue/         # DB claim, 실행권, DB 대기, heartbeat, 외부 호출 경계
 ├── retrieval/     # S3 호환 원문 다운로드
 ├── parsing/       # MIME별 parser와 timeout guard
 ├── chunking/      # 청킹 전략과 토큰 한도

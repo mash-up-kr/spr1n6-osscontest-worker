@@ -22,7 +22,7 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
     @Transactional
     @Query(value = """
         UPDATE indexing_job SET status = 'COMPLETED', completed_at = clock_timestamp(),
-            next_retry_at = NULL, updated_at = clock_timestamp()
+            next_retry_at = NULL, lease_until = NULL, updated_at = clock_timestamp()
         WHERE id = :jobId AND worker_id = :workerId AND execution_epoch = :epoch
           AND status = 'PROCESSING' AND lease_until > clock_timestamp()
     """, nativeQuery = true)
@@ -37,6 +37,20 @@ interface IndexingJobRepository : JpaRepository<IndexingJobEntity, Long> {
     """, nativeQuery = true)
     fun updatePhase(@Param("jobId") jobId: Long, @Param("phase") phase: String,
                     @Param("workerId") workerId: String, @Param("epoch") epoch: Long): Int
+
+    @Modifying(clearAutomatically = true)
+    @Query(value = """
+        UPDATE indexing_job SET status = :status, last_error_code = :errorCode,
+            last_error_message = :errorMessage, next_retry_at = :retryAt,
+            completed_at = CASE WHEN :status = 'FAILED' THEN clock_timestamp() ELSE NULL END,
+            worker_id = NULL, lease_until = NULL, updated_at = clock_timestamp()
+        WHERE id = :jobId AND worker_id = :workerId AND execution_epoch = :epoch
+          AND status = 'PROCESSING' AND lease_until > clock_timestamp()
+    """, nativeQuery = true)
+    fun fail(@Param("jobId") jobId: Long, @Param("workerId") workerId: String,
+             @Param("epoch") epoch: Long, @Param("status") status: String,
+             @Param("retryAt") retryAt: Instant?, @Param("errorCode") errorCode: String,
+             @Param("errorMessage") errorMessage: String): Int
 
     @Query(value = "SELECT clock_timestamp()", nativeQuery = true)
     fun currentDbTimestamp(): Instant
