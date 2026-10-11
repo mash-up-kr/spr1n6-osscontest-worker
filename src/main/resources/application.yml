@@ -34,6 +34,12 @@ indexing:
     poll-interval: ${INDEXING_QUEUE_POLL_INTERVAL:PT1S}
     lease-duration: ${INDEXING_LEASE_DURATION:PT60S}
     heartbeat-interval: ${INDEXING_HEARTBEAT_INTERVAL:PT10S}
+  circuit-breaker:
+    name: embedding-api
+    # 연속 일시 실패가 이 횟수에 도달하면 breaker를 연다.
+    failure-threshold: ${INDEXING_CIRCUIT_BREAKER_FAILURE_THRESHOLD:5}
+    # 열린 뒤 이 시간이 지나면 한 Worker가 시험 호출을 한다.
+    open-duration: ${INDEXING_CIRCUIT_BREAKER_OPEN_DURATION:PT60S}
   database:
     check-interval: ${INDEXING_DB_CHECK_INTERVAL:PT5S}
     query-timeout: ${INDEXING_DB_QUERY_TIMEOUT:PT3S}

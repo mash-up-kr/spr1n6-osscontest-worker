@@ -75,7 +75,16 @@ next_retry_at = database time + base-delay × max(attempt_count, 1) × U(0.8, 1.
 A valid Retry-After in seconds or HTTP-date form is a minimum: the later of it and linear jitter is persisted.
 Retries retain Job identity, source_event_id, and enqueue_seq. A future retry predecessor blocks later Jobs
 for the same document, while other documents can run. Successful batches in memory are not retained across claims.
-There is no external API circuit breaker.
+
+### Embedding API circuit breaker
+
+When 5 consecutive transient embedding failures (5xx, timeout, connection error) accumulate, OPEN is recorded in the DB
+(`external_circuit_breaker`) and shared by all Workers. 429 uses the durable retry path above and is not counted, except
+quota exhaustion (429 `insufficient_quota`), which keeps failing until credit is added and is therefore counted.
+While OPEN, the embedding API is not called and callers wait, so Job attempts are not consumed. New claims are limited
+to DELETE Jobs, which do not call the embedding API; INDEX claims stop.
+After 60 seconds a single Worker makes a probe call: success closes the breaker, failure reopens it.
+While a probe Job is needed, each poll claims at most one Job.
 
 Expired PROCESSING recovery uses the same attempt budget and jittered linear backoff. It selects RETRY_WAIT
 with attempts remaining and FAILED otherwise. Existing RETRY_WAIT deadlines are preserved; recovery does not
@@ -119,6 +128,8 @@ mismatches and stale-version INDEX Jobs during recovery as `FAILED` / `DOCUMENT_
 | DELETE replay or stale INDEX publication | Idempotent completion and ownership rejection |
 | Deleted document detected during indexing (pre-run or at publication) | COMPLETED + SKIPPED_DOCUMENT_DELETED, no chunks written |
 | Expired INDEX Job recovered for a deleted document | COMPLETED + SKIPPED regardless of attempt count, never FAILED |
+| INDEX and DELETE waiting while the breaker is OPEN | Claim DELETE only; INDEX waits |
+| Quota exhaustion (429 insufficient_quota) | Counted as a breaker failure, not a rate-limit retry; once open, wait without consuming attempts |
 
 Unit and PostgreSQL integration tests are distinct. Validate SQL races and rollbacks against a dedicated
 database with the shared schema and [queue contract](sql/DB_JOB_QUEUE_CONTRACT.sql) applied.

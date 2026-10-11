@@ -76,7 +76,17 @@ SDK 자동 재시도는 비활성화합니다. 일반 오류와 429는 runner의
 `next_retry_at = DB 시각 + base-delay × max(attempt_count, 1) × U(0.8, 1.2)`입니다.
 429는 `Retry-After` 초 또는 HTTP 날짜가 유효하면 이 시각과 선형 지터 deadline 중 더 늦은 값을 저장합니다.
 재시도는 같은 Job·`source_event_id`·`enqueue_seq`를 유지합니다. 미래의 선행 재시도는 같은 문서의 후속 Job을 막지만 다른 문서는 막지 않습니다.
-성공한 임베딩 배치의 메모리 결과는 다음 실행으로 전달하지 않습니다. 외부 API circuit breaker는 없습니다.
+성공한 임베딩 배치의 메모리 결과는 다음 실행으로 전달하지 않습니다.
+
+### 임베딩 API circuit breaker
+
+임베딩 호출의 일시 실패(5xx, 타임아웃, 연결 오류)가 연속 5회 쌓이면 DB(`external_circuit_breaker`)에 OPEN을 기록해
+모든 Worker가 공유합니다. 429는 위의 DB 예약 재시도 경로를 쓰며 횟수에 넣지 않습니다. 단, 결제 한도 초과
+(429 `insufficient_quota`)는 충전 전까지 계속 실패하므로 일시 실패로 세어 breaker로 대기합니다.
+OPEN 동안에는 임베딩을 호출하지 않고 대기하므로 Job의 시도 횟수가 소비되지 않습니다. 신규 claim은 임베딩을 쓰지 않는
+DELETE Job만 허용하고 INDEX Job은 멈춥니다.
+60초 뒤 한 Worker만 시험 호출을 하며 성공하면 닫고 실패하면 다시 엽니다.
+시험 호출을 할 Job이 필요한 시점에는 poll마다 Job을 1건만 claim합니다.
 
 만료 복구 함수도 같은 시도 한도·선형 지터 설정을 사용합니다. 만료 `PROCESSING`은 잔여 횟수가 있으면
 `RETRY_WAIT`, 소진이면 `FAILED`가 됩니다. 기존 `RETRY_WAIT`의 deadline은 보존하며 시도 횟수·epoch는 증가시키지 않습니다.
@@ -120,6 +130,8 @@ Server의 과거 버전 재시도 제한은 외부 의존성이며, Worker는 �
 | DELETE 완료 재호출·오래된 INDEX 저장 | 멱등 완료 및 실행권 거절 |
 | 임베딩 중 문서 삭제 감지 (실행 전·저장 시점) | COMPLETED + SKIPPED_DOCUMENT_DELETED, 청크 저장 없음 |
 | lease 만료 회수 시 삭제된 문서 INDEX Job | 시도 횟수 무관하게 FAILED 아닌 COMPLETED + SKIPPED |
+| breaker OPEN 중 INDEX·DELETE 대기 | DELETE만 claim, INDEX는 대기 |
+| 결제 한도 초과(429 `insufficient_quota`) | rate limit 재시도가 아닌 breaker 실패로 계산, 열리면 시도 횟수 소비 없이 대기 |
 
 일반 테스트와 실제 PostgreSQL 통합 테스트를 구분합니다. SQL 경쟁·롤백 검증은
 전용 DB에 공용 스키마와 [큐 계약](sql/DB_JOB_QUEUE_CONTRACT.sql)을 적용한 뒤 실행해야 합니다.

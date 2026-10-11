@@ -47,7 +47,7 @@ DB 스케줄러도 `recover_expired_indexing_jobs(max_attempts, base_delay_ms)`�
 - 장애 감지 이후 신규 claim과 다음 외부 호출을 보류합니다. 이미 진행 중인 외부 호출은 완료될 수 있습니다.
 - 복구 후 같은 실행권이면 중단한 위치에서 재개합니다. 만료 lease는 동일 소유권 조건으로 갱신을 시도하고, 회수 절차가 먼저 이기면 현재 실행을 종료합니다.
 - 청크 UPSERT·버전 완료·검색 포인터 승격·Job 완료를 한 트랜잭션에서 저장합니다. 커밋 응답 유실 시 같은 실행의 완료 상태를 확인해 중복 저장을 건너뜁니다.
-- 일반 오류와 429는 `RETRY_WAIT`·DB 기준 `next_retry_at` 또는 `FAILED`를 기록하고 Worker·lease를 해제한 뒤 슬롯을 반환합니다. 선형 backoff에 ±20% 지터를 적용하고 유효한 `Retry-After`를 하한으로 존중합니다. 다음 claim은 같은 Job을 새 실행으로 처리합니다.
+- 일반 오류와 429는 `RETRY_WAIT`·DB 기준 `next_retry_at` 또는 `FAILED`를 기록하고 Worker·lease를 해제한 뒤 슬롯을 반환합니다. 선형 backoff에 ±20% 지터를 적용하고 유효한 `Retry-After`를 하한으로 존중합니다. 다음 claim은 같은 Job을 새 실행으로 처리합니다. 결제 한도 초과(429 `insufficient_quota`)는 예외로 circuit breaker 실패로 셉니다.
 - 삭제된 문서의 청크는 `DELETE` Job 실행 시 삭제합니다.
 
 ```mermaid
@@ -107,6 +107,7 @@ set +a
 | `INDEXING_DB_CONNECT_TIMEOUT_SECONDS` | `3`; PostgreSQL 연결 제한 |
 | `INDEXING_DB_SOCKET_TIMEOUT_SECONDS` | `15`; PostgreSQL 소켓 읽기 제한 |
 | `INDEXING_MAX_ATTEMPTS`, `INDEXING_RETRY_BASE_DELAY` | `5`, `PT30S` |
+| `INDEXING_CIRCUIT_BREAKER_FAILURE_THRESHOLD`, `INDEXING_CIRCUIT_BREAKER_OPEN_DURATION` | `5`, `PT60S`; 임베딩 API circuit breaker |
 | `INDEXING_CHUNKING_STRATEGY` | `FIXED_TOKEN` |
 | `INDEXING_MAX_TOKENS_PER_CHUNK`, `INDEXING_OVERLAP_TOKENS` | `512`, `64` |
 | `INDEXING_MAX_CHUNKS`, `INDEXING_MAX_TOTAL_TOKENS` | `5000`, `2000000` |

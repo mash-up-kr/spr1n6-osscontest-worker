@@ -73,8 +73,10 @@ backoff is used. Missing or invalid headers use linear backoff alone. Permanent 
 The failure write checks PROCESSING, worker, epoch, and a future lease. State changes and clearing the
 worker/lease are atomic. Job identity, source_event_id, and enqueue_seq remain unchanged.
 The execution exits and releases its slot so other documents can run. next_retry_at is the earliest
-claim eligibility time, not a guaranteed execution time. There is no global retry admission block,
-retry request serialization, or external API circuit breaker.
+claim eligibility time, not a guaranteed execution time. There is no global retry admission block or
+retry request serialization. Consecutive transient embedding failures are handled by a DB-shared circuit breaker:
+while it is open, INDEX claims and embedding calls stop and DELETE Jobs are still claimed ([Failure Handling](FAILURE_HANDLING_EN.md)).
+Quota exhaustion (429 insufficient_quota) counts as a breaker failure instead of using the 429 retry above.
 
 ## DELETE processing
 

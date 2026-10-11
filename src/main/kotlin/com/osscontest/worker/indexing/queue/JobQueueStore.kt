@@ -25,14 +25,17 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
         )
     }
 
+    /** [onlyType]을 주면 그 종류의 Job만 후보로 본다. 같은 문서의 선행 Job 순서 조건은 그대로 지킨다. */
     @Transactional
-    fun claim(maxAttempts: Int, prepared: (ExecutionToken) -> Unit): ClaimedJob? =
-        claimForWorker(properties.workerId, properties.leaseDuration.toMillis(), maxAttempts, prepared)
+    fun claim(maxAttempts: Int, onlyType: JobType? = null, prepared: (ExecutionToken) -> Unit): ClaimedJob? =
+        claimForWorker(properties.workerId, properties.leaseDuration.toMillis(), maxAttempts, onlyType, prepared)
 
     @Transactional
-    fun claimForWorker(workerId: String, leaseMillis: Long, maxAttempts: Int,
+    fun claimForWorker(workerId: String, leaseMillis: Long, maxAttempts: Int, onlyType: JobType? = null,
                        prepared: (ExecutionToken) -> Unit = {}): ClaimedJob? {
         require(leaseMillis > 0 && maxAttempts > 0)
+        // 종류 값은 enum 이름이라 문자열 보간이 안전하다.
+        val typeFilter = onlyType?.let { "AND j.job_type = '${it.name}'" }.orEmpty()
         val candidates = jdbc.query(
             """
             SELECT j.id, d.execution_epoch FROM indexing_job j
@@ -40,6 +43,7 @@ class JobQueueStore(private val jdbc: NamedParameterJdbcTemplate, private val pr
             WHERE j.worker_id IS NULL AND j.lease_until IS NULL
               AND j.attempt_count < :maxAttempts
               AND (j.status = 'PENDING' OR (j.status = 'RETRY_WAIT' AND j.next_retry_at <= $UTC_NOW))
+              $typeFilter
               AND NOT EXISTS (
                   SELECT 1 FROM indexing_job predecessor
                   WHERE predecessor.document_id = j.document_id AND predecessor.enqueue_seq < j.enqueue_seq

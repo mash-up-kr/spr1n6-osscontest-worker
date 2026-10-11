@@ -74,6 +74,8 @@ Server 생산자는 문서 변경 트랜잭션에서 문서 행을 잠그고 Job
 원자적 결과 저장, DB 장애 위치의 대기·재개를 제공합니다.
 프로세스 종료 시 메모리의 파일·청크·임베딩은 복구되지 않으며 새 실행이 다시 계산합니다.
 활성 Job 수는 Worker별 제한입니다. 재시도 대기는 슬롯을 점유하지 않습니다. 전체 Worker의 외부 요청 수를
-묶는 limiter나 외부 API circuit breaker는 구현 범위에 포함하지 않습니다.
+묶는 limiter는 구현 범위에 포함하지 않습니다. 임베딩 API의 연속 일시 실패는 DB에 공유하는
+circuit breaker로 다루며, 열려 있는 동안은 호출과 신규 INDEX claim을 멈추고 시도 횟수를 소비하지 않습니다.
+임베딩을 쓰지 않는 DELETE Job은 계속 claim합니다.
 
 [처리 모델](PROCESSING_MODEL.md) · [장애 대응](FAILURE_HANDLING.md) · [README](../README.md)
