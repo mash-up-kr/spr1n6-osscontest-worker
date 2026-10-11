@@ -24,12 +24,12 @@ class DbJobWorkerTest {
         val started = CountDownLatch(2)
         val hold = CountDownLatch(1)
         val count = AtomicInteger()
-        whenever(store.claim(any(), any(), any())).thenAnswer {
+        whenever(store.claim(any(), any())).thenAnswer {
             ClaimedJob(testToken.copy(jobId = count.incrementAndGet().toLong()), JobType.INDEX, UUID.randomUUID(), 2, 3, null)
         }
         doAnswer { started.countDown(); hold.await(3, TimeUnit.SECONDS); null }.whenever(runner).run(any<ClaimedJob>())
         val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = 2, pollInterval = Duration.ofDays(1)),
-            directDatabase(), store, mock(), runner, 5)
+            directDatabase(), store, runner, 5, Duration.ofSeconds(30))
         try {
             worker.start()
             check(started.await(3, TimeUnit.SECONDS))
@@ -48,8 +48,8 @@ class DbJobWorkerTest {
         val started = CountDownLatch(1)
         val hold = CountDownLatch(1)
         val job = ClaimedJob(testToken, JobType.INDEX, UUID.randomUUID(), 2, 3, null)
-        whenever(store.claim(any(), any(), any())).thenAnswer {
-            it.getArgument<(ExecutionToken) -> Unit>(2)(testToken)
+        whenever(store.claim(any(), any())).thenAnswer {
+            it.getArgument<(ExecutionToken) -> Unit>(1)(testToken)
             throw DataAccessResourceFailureException("commit response lost")
         }
         whenever(store.resolveClaim(testToken)).thenReturn(job)
@@ -57,11 +57,11 @@ class DbJobWorkerTest {
         val db = DatabaseOperations(JdbcTemplate(DriverManagerDataSource("jdbc:h2:mem:claim-loss", "sa", "")),
             RetryWaiter {}, DatabaseWaitProperties(Duration.ofMillis(1), Duration.ofSeconds(1)), SimpleMeterRegistry())
         val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = 1, pollInterval = Duration.ofDays(1)),
-            db, store, mock(), runner, 5)
+            db, store, runner, 5, Duration.ofSeconds(30))
         try {
             worker.start()
             check(started.await(3, TimeUnit.SECONDS))
-            verify(store).claim(any(), any(), any())
+            verify(store).claim(any(), any())
             verify(store).resolveClaim(testToken)
             verify(runner).run(job)
         } finally {
@@ -69,4 +69,63 @@ class DbJobWorkerTest {
             hold.countDown()
         }
     }
+    @Test
+    fun `실패 실행 종료 후 슬롯을 반환해 다음 문서를 처리한다`() {
+        val store: JobQueueStore = mock()
+        val runner: IndexingPipelineRunner = mock()
+        val firstDone = CountDownLatch(1)
+        val nextStarted = CountDownLatch(1)
+        val hold = CountDownLatch(1)
+        val first = ClaimedJob(testToken, JobType.INDEX, UUID.randomUUID(), 2, 3, null)
+        val next = first.copy(token = testToken.copy(jobId = 2), documentId = 4)
+        whenever(store.claim(any(), any())).thenReturn(first, next, null)
+        doAnswer { firstDone.countDown(); null }.whenever(runner).run(first)
+        doAnswer { nextStarted.countDown(); hold.await(3, TimeUnit.SECONDS); null }.whenever(runner).run(next)
+        val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = 1,
+            pollInterval = Duration.ofDays(1)), directDatabase(), store, runner, 5, Duration.ofSeconds(30))
+        try {
+            worker.start()
+            check(firstDone.await(3, TimeUnit.SECONDS))
+            val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            while (nextStarted.count > 0 && System.nanoTime() < until) {
+                worker.poll()
+                nextStarted.await(10, TimeUnit.MILLISECONDS)
+            }
+            assertThat(nextStarted.count).isZero()
+            verify(runner).run(first)
+            verify(runner).run(next)
+        } finally { worker.stop(); hold.countDown() }
+    }
+
+    @Test
+    fun `실패로 자발적 해제된 실행은 heartbeat가 정리 중인 스레드를 중단하지 않는다`() {
+        val store: JobQueueStore = mock()
+        val runner: IndexingPipelineRunner = mock()
+        val released = CountDownLatch(1)
+        val finish = CountDownLatch(1)
+        val cleaned = CountDownLatch(1)
+        val interrupted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val job = ClaimedJob(testToken, JobType.INDEX, UUID.randomUUID(), 2, 3, null)
+        whenever(store.claim(any(), any())).thenReturn(job, null)
+        whenever(store.snapshot(testToken)).thenReturn(JobSnapshot(null, testToken.epoch,
+            com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.RETRY_WAIT, null, testNow.plusSeconds(30), testNow))
+        doAnswer {
+            released.countDown()
+            try { finish.await(3, TimeUnit.SECONDS) }
+            catch (_: InterruptedException) { interrupted.set(true) }
+            finally { cleaned.countDown() }
+            null
+        }.whenever(runner).run(job)
+        val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = 1,
+            pollInterval = Duration.ofDays(1)), directDatabase(), store, runner, 5, Duration.ofSeconds(30))
+        try {
+            worker.start()
+            check(released.await(3, TimeUnit.SECONDS))
+            worker.heartbeat()
+            finish.countDown()
+            check(cleaned.await(3, TimeUnit.SECONDS))
+            assertThat(interrupted.get()).isFalse()
+        } finally { finish.countDown(); worker.stop() }
+    }
+
 }

@@ -34,7 +34,7 @@ class IndexingPipelineRunnerTest {
     private val store: JobQueueStore = mock()
     private val runner get() = createRunner(execution)
     private fun createRunner(operation: ExecutionOperations) = IndexingPipelineRunner(jobs, documents, versions, download, parsers, parse,
-        chunker, mock(), processor, failures, mock(), operation, store, deletion, 5, java.time.Duration.ofMillis(1), 10000,
+        chunker, mock(), processor, failures, mock(), operation, deletion, 5, java.time.Duration.ofMillis(1), 10000,
         ChunkingStrategy.FIXED_TOKEN, SimpleMeterRegistry())
     private val job = ClaimedJob(testToken, JobType.INDEX, UUID.randomUUID(), 2, 3, null)
 
@@ -96,15 +96,14 @@ class IndexingPipelineRunnerTest {
     }
 
     @Test
-    fun `일반 처리 실패만 attempt 전체를 재시도한다`() {
+    fun `일반 실패는 재시도를 기록하고 같은 실행에서 반복하지 않는다`() {
         setup()
         processor.failuresBeforeSuccess = 2
         whenever(failures.recordFailure(any(), any(), any(), any(), any(), any(), anyOrNull()))
             .thenReturn(IndexingJobStatus.RETRY_WAIT)
         runner.run(job)
-        assertThat(processor.calls).hasSize(3)
-        verify(execution, times(2)).awaitRetry(testToken)
-        verify(download, times(3)).download("key")
+        assertThat(processor.calls).hasSize(1)
+        verify(download).download("key")
     }
 
     @Test
@@ -179,12 +178,25 @@ class IndexingPipelineRunnerTest {
         val db = DatabaseOperations(org.springframework.jdbc.core.JdbcTemplate(
             org.springframework.jdbc.datasource.DriverManagerDataSource("jdbc:h2:mem:phase-resume", "sa", "")),
             waiter, DatabaseWaitProperties(java.time.Duration.ofMillis(1), java.time.Duration.ofSeconds(1)), SimpleMeterRegistry())
-        createRunner(ExecutionOperations(db, store, waiter, DatabaseWaitProperties(), 5)).run(job)
+        createRunner(ExecutionOperations(db, store)).run(job)
         assertThat(waits).isEqualTo(1)
         verify(download).download("key")
         assertThat(processor.calls).hasSize(1)
         verifyNoInteractions(failures)
         assertThat(Files.exists(checkNotNull(downloaded))).isFalse()
+    }
+
+    @Test
+    fun `429는 실패 예약을 한 번 기록하고 전체 시도를 종료한다`() {
+        setup()
+        processor.throwOnNextCall = com.osscontest.worker.indexing.embedding.service.EmbeddingRateLimitedException(
+            "120", RuntimeException("429"))
+        whenever(failures.recordFailure(any(), any(), any(), any(), any(), any(), anyOrNull()))
+            .thenReturn(IndexingJobStatus.RETRY_WAIT)
+        runner.run(job)
+        verify(failures).recordFailure(eq(testToken), eq("RATE_LIMITED"), any(), eq(false), eq(5), any(), eq("120"))
+        assertThat(processor.calls).hasSize(1)
+        verify(download).download("key")
     }
 
 }

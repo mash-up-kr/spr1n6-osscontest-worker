@@ -10,7 +10,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 
 @TestConfiguration
-@Import(JobOwnershipGuard::class, JobQueueStore::class)
+@Import(JobOwnershipGuard::class, JobQueueStore::class, com.osscontest.worker.indexing.pipeline.service.RetryPolicy::class, com.osscontest.worker.indexing.pipeline.service.RandomRetryJitter::class)
 class QueueIntegrationConfiguration {
     @Bean
     fun queueProperties() = QueueProperties(workerId = "integration-worker")

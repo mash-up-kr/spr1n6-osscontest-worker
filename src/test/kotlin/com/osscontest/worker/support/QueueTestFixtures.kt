@@ -27,5 +27,6 @@ fun directDatabase(): DatabaseOperations = mock<DatabaseOperations>().apply {
 }
 
 fun directExecution(): ExecutionOperations = mock<ExecutionOperations>().apply {
+    whenever(failure<Any?>(any(), any())).thenAnswer { it.getArgument<() -> Any?>(1)() }
     whenever(database<Any?>(any(), any(), any())).thenAnswer { it.getArgument<() -> Any?>(2)() }
 }

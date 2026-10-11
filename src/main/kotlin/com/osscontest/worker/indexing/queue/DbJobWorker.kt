@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.SmartLifecycle
 import org.springframework.stereotype.Component
+import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
@@ -21,10 +22,12 @@ class DbJobWorker(
     private val properties: QueueProperties,
     private val database: DatabaseOperations,
     private val store: JobQueueStore,
-    private val external: ExternalApiOperations,
     private val runner: IndexingPipelineRunner,
     @Value("\${indexing.retry.max-attempts:5}") private val maxAttempts: Int,
+    @Value("\${indexing.retry.base-delay:PT30S}") private val baseDelay: Duration,
 ) : SmartLifecycle {
+    init { require(maxAttempts > 0 && baseDelay.toMillis() > 0) }
+
     private val running = AtomicBoolean(false)
     private val slots = Semaphore(properties.concurrency)
     private class RunningExecution(private val thread: Thread) {
@@ -56,15 +59,14 @@ class DbJobWorker(
     }
 
     internal fun poll() {
-        database.execute { store.recover(maxAttempts) }
-        external.refreshTargets()
+        database.execute { store.recover(maxAttempts, baseDelay) }
         while (running.get() && slots.tryAcquire()) {
             val prepared = AtomicReference<ExecutionToken?>()
             val job = try {
                 database.execute {
                     val previous = prepared.get()
                     if (previous != null) store.resolveClaim(previous)
-                    else store.claim(external.retryOnly(), maxAttempts) { prepared.set(it) }
+                    else store.claim(maxAttempts) { prepared.set(it) }
                 }
             } catch (error: Exception) {
                 slots.release()
@@ -103,7 +105,8 @@ class DbJobWorker(
             if (renewed == 0) {
                 val snapshot = database.execute { store.snapshot(token) }
                 if (active.remove(token, handle) &&
-                    (snapshot == null || !snapshot.matches(token) || snapshot.status != IndexingJobStatus.COMPLETED)) {
+                    (snapshot == null || !snapshot.matches(token) || snapshot.status != IndexingJobStatus.COMPLETED) &&
+                    snapshot?.isReleasedFailure(token) != true) {
                     handle.revoke()
                 }
             }

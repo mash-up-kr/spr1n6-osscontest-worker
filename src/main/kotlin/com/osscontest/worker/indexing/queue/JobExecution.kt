@@ -16,6 +16,7 @@ data class ClaimedJob(
     val documentId: Long,
     val documentVersionId: Long?,
     val traceId: String?,
+    val attemptCount: Int = 0,
 )
 
 data class JobSnapshot(
@@ -33,4 +34,7 @@ class ExecutionLostException(val token: ExecutionToken) : RuntimeException("Exec
 class ExecutionCompletedException(val token: ExecutionToken) : RuntimeException("Execution already completed: $token")
 class LeaseExpiredException : RuntimeException("Execution lease expired")
 
-internal val ownedStatuses = setOf(IndexingJobStatus.PROCESSING, IndexingJobStatus.RETRY_WAIT)
+internal val ownedStatuses = setOf(IndexingJobStatus.PROCESSING)
+
+fun JobSnapshot.isReleasedFailure(token: ExecutionToken) = epoch == token.epoch && workerId == null &&
+    leaseUntil == null && status in setOf(IndexingJobStatus.RETRY_WAIT, IndexingJobStatus.FAILED)

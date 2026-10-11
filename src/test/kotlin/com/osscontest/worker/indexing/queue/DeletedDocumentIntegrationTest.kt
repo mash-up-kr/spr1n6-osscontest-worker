@@ -67,7 +67,7 @@ class DeletedDocumentIntegrationTest(
 
     private fun claimIndex(versionId: Long = oldVersionId): ClaimedJob {
         queue.enqueue(UUID.randomUUID(), documentId, versionId, JobType.INDEX, null)
-        return checkNotNull(queue.claim(false, 5) {})
+        return checkNotNull(queue.claim(5) {})
     }
 
     private fun enqueueIndexWithoutClaim(versionId: Long = oldVersionId): Long {
@@ -142,7 +142,7 @@ class DeletedDocumentIntegrationTest(
     fun `DELETE Job 완료는 outcome DELETED를 기록한다`() {
         deleteDocument()
         queue.enqueue(UUID.randomUUID(), documentId, null, JobType.DELETE, null)
-        val job = checkNotNull(queue.claim(false, 5) {})
+        val job = checkNotNull(queue.claim(5) {})
 
         deletion.delete(job)
 
@@ -155,13 +155,13 @@ class DeletedDocumentIntegrationTest(
         deleteDocument()
         queue.enqueue(UUID.randomUUID(), documentId, null, JobType.DELETE, null)
         // 선행 INDEX가 미종결이라 DELETE는 아직 claim되지 않는다.
-        assertThat(queue.claim(false, 5) {}).isNull()
+        assertThat(queue.claim(5) {}).isNull()
 
-        queue.recover(5)
+        queue.recover(5, java.time.Duration.ofSeconds(30))
 
         assertThat(row(job.token.jobId)["status"]).isEqualTo("COMPLETED")
         assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.SKIPPED_DOCUMENT_DELETED)
-        assertThat(checkNotNull(queue.claim(false, 5) {}).type).isEqualTo(JobType.DELETE)
+        assertThat(checkNotNull(queue.claim(5) {}).type).isEqualTo(JobType.DELETE)
     }
 
     @Test
@@ -170,7 +170,7 @@ class DeletedDocumentIntegrationTest(
         jdbc.update("UPDATE indexing_job SET attempt_count = 5 WHERE id = ?", jobId)
         deleteDocument()
 
-        queue.recover(5)
+        queue.recover(5, java.time.Duration.ofSeconds(30))
 
         assertThat(row(jobId)["status"]).isEqualTo("COMPLETED")
         assertThat(row(jobId)["outcome"]).isEqualTo(JobOutcome.SKIPPED_DOCUMENT_DELETED)
@@ -181,7 +181,7 @@ class DeletedDocumentIntegrationTest(
         jdbc.update("UPDATE document SET searchable_version_id = ? WHERE id = ?", newVersionId, documentId)
         val jobId = enqueueIndexWithoutClaim(oldVersionId)
 
-        queue.recover(5)
+        queue.recover(5, java.time.Duration.ofSeconds(30))
 
         assertThat(row(jobId)["status"]).isEqualTo("FAILED")
         assertThat(row(jobId)["last_error_code"]).isEqualTo("DOCUMENT_INELIGIBLE")
