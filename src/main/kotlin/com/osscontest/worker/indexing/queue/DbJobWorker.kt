@@ -22,6 +22,7 @@ class DbJobWorker(
     private val properties: QueueProperties,
     private val database: DatabaseOperations,
     private val store: JobQueueStore,
+    private val breaker: CircuitBreaker,
     private val runner: IndexingPipelineRunner,
     @Value("\${indexing.retry.max-attempts:5}") private val maxAttempts: Int,
     @Value("\${indexing.retry.base-delay:PT30S}") private val baseDelay: Duration,
@@ -61,12 +62,20 @@ class DbJobWorker(
     internal fun poll() {
         database.execute { store.recover(maxAttempts, baseDelay) }
         while (running.get() && slots.tryAcquire()) {
+            val admission = try {
+                database.execute { breaker.admission() }
+            } catch (error: Exception) {
+                slots.release()
+                throw error
+            }
+            // breaker는 임베딩 API 장애만 다룬다. 임베딩을 쓰지 않는 DELETE Job은 열려 있는 동안에도 처리한다.
+            val onlyType = if (admission == ClaimAdmission.BLOCKED) JobType.DELETE else null
             val prepared = AtomicReference<ExecutionToken?>()
             val job = try {
                 database.execute {
                     val previous = prepared.get()
                     if (previous != null) store.resolveClaim(previous)
-                    else store.claim(maxAttempts) { prepared.set(it) }
+                    else store.claim(maxAttempts, onlyType) { prepared.set(it) }
                 }
             } catch (error: Exception) {
                 slots.release()
@@ -96,6 +105,8 @@ class DbJobWorker(
                 slots.release()
                 throw error
             }
+            // 시험 호출을 할 Job이 필요한 것이므로 한 건만 claim하고 다음 poll을 기다린다.
+            if (admission == ClaimAdmission.LIMITED) break
         }
     }
 

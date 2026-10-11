@@ -72,6 +72,21 @@ class DbJobQueueIntegrationTest(
     }
 
     @Test
+    fun `종류를 지정한 claim은 먼저 등록된 다른 종류를 건너뛰고 그 종류만 가져간다`() {
+        queue.enqueue(UUID.randomUUID(), 800001, 800001, JobType.INDEX, null)
+        jdbc.update("UPDATE document SET deleted_at = clock_timestamp() WHERE id = 800002")
+        queue.enqueue(UUID.randomUUID(), 800002, null, JobType.DELETE, null)
+
+        val job = checkNotNull(queue.claim(5, JobType.DELETE) {})
+
+        assertThat(job.type).isEqualTo(JobType.DELETE)
+        assertThat(job.documentId).isEqualTo(800002)
+        assertThat(queue.claim(5, JobType.DELETE) {}).isNull()
+        assertThat(jdbc.queryForObject("SELECT status FROM indexing_job WHERE document_id = 800001", String::class.java))
+            .isEqualTo("PENDING")
+    }
+
+    @Test
     fun `연장이 행 잠금을 먼저 얻으면 대기 중 회수의 만료 조건이 다시 평가된다`() {
         race(renewFirst = true)
     }
