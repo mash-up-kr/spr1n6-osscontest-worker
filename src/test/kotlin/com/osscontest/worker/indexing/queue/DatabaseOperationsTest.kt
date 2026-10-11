@@ -5,6 +5,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Tag
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DataSourceTransactionManager
 import org.springframework.jdbc.datasource.DriverManagerDataSource
@@ -20,6 +21,46 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class DatabaseOperationsTest {
     private val source = DriverManagerDataSource("jdbc:h2:mem:wait-test;DB_CLOSE_DELAY=-1", "sa", "")
+
+    @Tag("integration")
+    @Test
+    fun `DB 장애 대기 구간에는 실패 트랜잭션의 커넥션이 반환돼 있다`() {
+        val openConnections = AtomicInteger()
+        val tracked = object : DriverManagerDataSource("jdbc:h2:mem:connection-release", "sa", "") {
+            override fun getConnection(): java.sql.Connection {
+                val connection = super.getConnection()
+                val closed = java.util.concurrent.atomic.AtomicBoolean()
+                openConnections.incrementAndGet()
+                return java.lang.reflect.Proxy.newProxyInstance(java.sql.Connection::class.java.classLoader,
+                    arrayOf(java.sql.Connection::class.java)) { _, method, arguments ->
+                    if (method.name == "close") {
+                        try { method.invoke(connection, *(arguments ?: emptyArray())) }
+                        finally { if (closed.compareAndSet(false, true)) openConnections.decrementAndGet() }
+                    } else method.invoke(connection, *(arguments ?: emptyArray()))
+                } as java.sql.Connection
+            }
+        }
+        val jdbc = JdbcTemplate(tracked)
+        val transaction = TransactionTemplate(DataSourceTransactionManager(tracked))
+        val waits = AtomicInteger()
+        val database = DatabaseOperations(jdbc, RetryWaiter {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse()
+            assertThat(openConnections.get()).isZero()
+            waits.incrementAndGet()
+        }, properties(), SimpleMeterRegistry())
+        var attempts = 0
+        val result = database.execute {
+            transaction.execute {
+                assertThat(jdbc.queryForObject("SELECT 1", Int::class.java)).isEqualTo(1)
+                assertThat(openConnections.get()).isEqualTo(1)
+                if (++attempts == 1) throw SQLException("Connection lost", "08006")
+                42
+            }
+        }
+        assertThat(result).isEqualTo(42)
+        assertThat(waits.get()).isEqualTo(1)
+        assertThat(openConnections.get()).isZero()
+    }
 
     @Test
     fun `실패한 트랜잭션이 롤백되고 끝난 뒤 현재 DB 작업만 재호출한다`() {

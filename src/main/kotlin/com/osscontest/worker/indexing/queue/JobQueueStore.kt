@@ -7,7 +7,6 @@ import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.transaction.annotation.Isolation
 import org.springframework.transaction.support.TransactionSynchronizationManager
-import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 
@@ -79,41 +78,6 @@ class JobQueueStore(
 
     fun dbNow(): Instant = checkNotNull(jdbc.queryForObject("SELECT clock_timestamp()", emptyMap<String, Any>(),
         RowMapper { rs, _ -> rs.getTimestamp(1).toInstant() }))
-
-    @Transactional
-    fun recover(maxAttempts: Int, baseDelay: Duration): Long {
-        require(maxAttempts > 0 && baseDelay.toMillis() > 0)
-        val recovered = checkNotNull(jdbc.queryForObject("SELECT recover_expired_indexing_jobs(:maxAttempts, :baseMillis)",
-            mapOf("maxAttempts" to maxAttempts, "baseMillis" to baseDelay.toMillis()), Long::class.java))
-        jdbc.update(
-            """
-            UPDATE indexing_job j SET status = 'FAILED', completed_at = $UTC_NOW, updated_at = $UTC_NOW,
-                last_error_code = 'MAX_ATTEMPTS_EXCEEDED', next_retry_at = NULL,
-                worker_id = NULL, lease_until = NULL
-            WHERE worker_id IS NULL AND status IN ('PENDING', 'RETRY_WAIT') AND attempt_count >= :maxAttempts
-            """.trimIndent(), mapOf("maxAttempts" to maxAttempts),
-        )
-        // Reject deleted documents and late historical retries before they can block successors.
-        jdbc.update(
-            """
-            UPDATE indexing_job j SET status = 'FAILED', completed_at = $UTC_NOW, updated_at = $UTC_NOW,
-                last_error_code = 'DOCUMENT_INELIGIBLE', next_retry_at = NULL,
-                worker_id = NULL, lease_until = NULL
-            WHERE j.job_type = 'INDEX' AND j.status IN ('PENDING','PROCESSING','RETRY_WAIT')
-              AND EXISTS (
-                SELECT 1 FROM document d JOIN document_version candidate ON candidate.id = j.document_version_id
-                WHERE d.id = j.document_id AND (
-                    d.deleted_at IS NOT NULL OR candidate.document_id <> d.id OR
-                    EXISTS (SELECT 1 FROM document_version searchable
-                            WHERE searchable.id = d.searchable_version_id AND searchable.version_no > candidate.version_no) OR
-                    EXISTS (SELECT 1 FROM indexing_job prior JOIN document_version v ON v.id = prior.document_version_id
-                            WHERE prior.document_id = j.document_id AND prior.enqueue_seq < j.enqueue_seq AND v.version_no > candidate.version_no)
-                )
-              )
-            """.trimIndent(), emptyMap<String, Any>(),
-        )
-        return recovered
-    }
 
     /** 문서 행을 잠그고 source_event_id가 중복되지 않는 Job을 등록한다. */
     @Transactional

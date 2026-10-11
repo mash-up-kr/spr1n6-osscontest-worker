@@ -8,13 +8,15 @@ import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.SmartLifecycle
 import org.springframework.stereotype.Component
-import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.Semaphore
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
 
 @Component
 @ConditionalOnProperty(prefix = "indexing.queue", name = ["enabled"], havingValue = "true", matchIfMissing = true)
@@ -22,106 +24,163 @@ class DbJobWorker(
     private val properties: QueueProperties,
     private val database: DatabaseOperations,
     private val store: JobQueueStore,
-    private val breaker: CircuitBreaker,
     private val runner: IndexingPipelineRunner,
+    private val waiter: QueueLoopWaiter,
     @Value("\${indexing.retry.max-attempts:5}") private val maxAttempts: Int,
-    @Value("\${indexing.retry.base-delay:PT30S}") private val baseDelay: Duration,
 ) : SmartLifecycle {
-    init { require(maxAttempts > 0 && baseDelay.toMillis() > 0) }
+    init { require(maxAttempts > 0) }
 
-    private val running = AtomicBoolean(false)
+    private val lifecycle = Any()
+    @Volatile private var current: Generation? = null
+    // Reservations include claim/DB waits and survive stop/start until old loops actually exit.
     private val slots = Semaphore(properties.concurrency)
     private class RunningExecution(private val thread: Thread) {
         private var closed = false
         @Synchronized fun close() { closed = true }
         @Synchronized fun revoke() { if (!closed) thread.interrupt() }
     }
-    private val active = ConcurrentHashMap<ExecutionToken, RunningExecution>()
-    private val workers = Executors.newFixedThreadPool(properties.concurrency)
-    private val claims = Executors.newSingleThreadScheduledExecutor { Thread(it, "job-claim") }
-    private val heartbeats = Executors.newSingleThreadScheduledExecutor { Thread(it, "job-heartbeat") }
+    private class Generation(properties: QueueProperties) {
+        val running = AtomicBoolean(true)
+        val active = ConcurrentHashMap<ExecutionToken, RunningExecution>()
+        private val threadIds = AtomicInteger()
+        val workers = ThreadPoolExecutor(0, properties.concurrency, properties.workerIdleTimeout.toMillis(),
+            TimeUnit.MILLISECONDS, SynchronousQueue<Runnable>(),
+            { task -> Thread(task, "job-worker-${threadIds.incrementAndGet()}") })
+        val probes = Executors.newSingleThreadScheduledExecutor { Thread(it, "job-probe") }
+        val heartbeats = Executors.newSingleThreadScheduledExecutor { Thread(it, "job-heartbeat") }
+    }
     private val log = LoggerFactory.getLogger(javaClass)
 
-    override fun isRunning() = running.get()
+    override fun isRunning() = current?.running?.get() == true
 
-    override fun start() {
-        if (!running.compareAndSet(false, true)) return
-        claims.scheduleWithFixedDelay({ guarded { poll() } }, 0, properties.pollInterval.toMillis(), TimeUnit.MILLISECONDS)
-        heartbeats.scheduleWithFixedDelay({ guarded { heartbeat() } }, properties.heartbeatInterval.toMillis(),
-            properties.heartbeatInterval.toMillis(), TimeUnit.MILLISECONDS)
-        log.info("WORKER_STARTED workerId={} concurrency={}", properties.workerId, properties.concurrency)
+    override fun start() = synchronized(lifecycle) {
+        if (isRunning()) return@synchronized
+        val generation = Generation(properties)
+        current = generation
+        generation.probes.scheduleWithFixedDelay({ guarded { activate(generation) } }, 0,
+            properties.pollInterval.toMillis(), TimeUnit.MILLISECONDS)
+        generation.heartbeats.scheduleWithFixedDelay({ guarded { heartbeat(generation) } },
+            properties.heartbeatInterval.toMillis(), properties.heartbeatInterval.toMillis(), TimeUnit.MILLISECONDS)
+        log.info("WORKER_STARTED workerId={} maxConcurrency={}", properties.workerId, properties.concurrency)
     }
 
-    override fun stop() {
-        running.set(false)
-        claims.shutdownNow()
-        heartbeats.shutdownNow()
-        workers.shutdownNow()
+    override fun stop(): Unit = synchronized(lifecycle) {
+        val generation = current ?: return@synchronized
+        current = null
+        generation.running.set(false)
+        generation.probes.shutdownNow()
+        generation.heartbeats.shutdownNow()
+        generation.workers.shutdownNow()
     }
 
-    internal fun poll() {
-        database.execute { store.recover(maxAttempts, baseDelay) }
-        while (running.get() && slots.tryAcquire()) {
-            val admission = try {
-                database.execute { breaker.admission() }
-            } catch (error: Exception) {
-                slots.release()
-                throw error
-            }
-            // breaker는 임베딩 API 장애만 다룬다. 임베딩을 쓰지 않는 DELETE Job은 열려 있는 동안에도 처리한다.
-            val onlyType = if (admission == ClaimAdmission.BLOCKED) JobType.DELETE else null
-            val prepared = AtomicReference<ExecutionToken?>()
-            val job = try {
-                database.execute {
-                    val previous = prepared.get()
-                    if (previous != null) store.resolveClaim(previous)
-                    else store.claim(maxAttempts, onlyType) { prepared.set(it) }
-                }
-            } catch (error: Exception) {
-                slots.release()
-                throw error
-            }
-            if (job == null) {
-                slots.release()
-                break
-            }
-            try {
-                workers.execute {
-                    val handle = RunningExecution(Thread.currentThread())
-                    active[job.token] = handle
-                    MDC.put("traceId", job.traceId ?: "-")
-                    try {
-                        runner.run(job)
-                    } catch (error: Exception) {
-                        log.error("Job execution exited unexpectedly: {}", job.token, error)
-                    } finally {
-                        MDC.remove("traceId")
-                        handle.close()
-                        active.remove(job.token, handle)
-                        slots.release()
-                    }
-                }
-            } catch (error: Exception) {
-                slots.release()
-                throw error
-            }
-            // 시험 호출을 할 Job이 필요한 것이므로 한 건만 claim하고 다음 poll을 기다린다.
-            if (admission == ClaimAdmission.LIMITED) break
+    /** Wake at most one loop. Claiming happens only after the pool accepts and starts it. */
+    internal fun probe(): Boolean = current?.let { activate(it) } ?: false
+
+    private fun activate(generation: Generation): Boolean = synchronized(lifecycle) {
+        if (current !== generation || !generation.running.get() || !slots.tryAcquire()) return@synchronized false
+        try {
+            generation.workers.execute { runLoop(generation) }
+            true
+        } catch (_: RejectedExecutionException) {
+            // A retiring pool thread can still be returning after its reservation was released.
+            slots.release()
+            false
+        } catch (error: Exception) {
+            slots.release()
+            throw error
         }
     }
 
-    internal fun heartbeat() {
-        active.forEach { (token, handle) ->
-            val renewed = database.execute { store.renew(token) }
+    private fun runLoop(generation: Generation) {
+        try {
+            while (generation.running.get()) {
+                DatabaseOperations.checkInterrupted()
+                val job = try {
+                    claim(generation)
+                } catch (error: Exception) {
+                    if (error is InterruptedException) throw error
+                    if (!generation.running.get()) return
+                    log.error("Job claim failed", error)
+                    waiter.waitFor(properties.pollInterval)
+                    continue
+                } ?: return // Return this thread to the pool; the probe timer discovers new work.
+                runJob(generation, job)
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } finally {
+            slots.release()
+        }
+    }
+
+    private fun claim(generation: Generation): ClaimedJob? {
+        var prepared: ExecutionToken? = null
+        return database.execute {
+            if (!generation.running.get()) throw InterruptedException("Worker stopping")
+            val previous = prepared
+            if (previous != null) store.resolveClaim(previous)
+            else store.claim(maxAttempts) { prepared = it }
+        }
+    }
+
+    private fun runJob(generation: Generation, job: ClaimedJob) {
+        val handle = RunningExecution(Thread.currentThread())
+        synchronized(lifecycle) {
+            if (current !== generation || !generation.running.get()) return
+            generation.active[job.token] = handle
+        }
+        MDC.put("traceId", job.traceId ?: "-")
+        try {
+            if (!generation.running.get()) return
+            DatabaseOperations.checkInterrupted()
+            // More work may exist. Expand up to N while this loop processes its committed claim.
+            try {
+                activate(generation)
+            } catch (error: Exception) {
+                log.error("Could not activate another Job loop", error)
+            }
+            if (generation.running.get()) {
+                DatabaseOperations.checkInterrupted()
+                runner.run(job)
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } catch (_: ExecutionLostException) {
+            log.info("Job execution lost: {}", job.token)
+        } catch (_: ExecutionCompletedException) {
+            log.info("Job already completed: {}", job.token)
+        } catch (error: Exception) {
+            log.error("Job execution exited unexpectedly: {}", job.token, error)
+        } finally {
+            handle.close()
+            generation.active.remove(job.token, handle)
+            MDC.remove("traceId")
+            // Job cancellation must not poison the next claim. A stopped generation never resumes.
+            if (generation.running.get()) Thread.interrupted()
+        }
+    }
+
+    internal fun heartbeat() { current?.let { heartbeat(it) } }
+
+    private fun heartbeat(generation: Generation) {
+        generation.active.forEach { (token, handle) -> guarded {
+            if (!generation.running.get()) return@guarded
+            val renewed = database.execute {
+                if (!generation.running.get()) throw InterruptedException("Worker stopping")
+                store.renew(token)
+            }
             if (renewed == 0) {
-                val snapshot = database.execute { store.snapshot(token) }
-                if (active.remove(token, handle) &&
+                val snapshot = database.execute {
+                    if (!generation.running.get()) throw InterruptedException("Worker stopping")
+                    store.snapshot(token)
+                }
+                if (generation.active.remove(token, handle) &&
                     (snapshot == null || !snapshot.matches(token) || snapshot.status != IndexingJobStatus.COMPLETED) &&
                     snapshot?.isReleasedFailure(token) != true) {
                     handle.revoke()
                 }
             }
-        }
+        } }
     }
 
     private fun guarded(action: () -> Unit) {

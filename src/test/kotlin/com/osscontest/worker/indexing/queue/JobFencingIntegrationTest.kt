@@ -1,6 +1,8 @@
 package com.osscontest.worker.indexing.queue
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
+import com.osscontest.worker.indexing.pipeline.service.IndexingPipelineRunner
+import com.osscontest.worker.indexing.pipeline.service.ThreadSleepRetryWaiter
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
 import com.osscontest.worker.indexing.publication.repository.IndexingJobWritesImpl
 import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
@@ -24,7 +26,11 @@ import org.springframework.orm.jpa.vendor.HibernateJpaVendorAdapter
 import jakarta.persistence.EntityManagerFactory
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean
 import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.any
+import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -148,6 +154,45 @@ class JobFencingIntegrationTest(
             assertThat(row(first)["attempt_count"]).isEqualTo(1)
             assertThat(jdbc.queryForObject("SELECT execution_epoch FROM document WHERE id=1", Long::class.java)).isEqualTo(1)
         } finally { pool.shutdownNow() }
+    }
+
+    @Test fun `동적 Worker는 프로시저 없는 DB에서 N건만 claim하고 처리 반환 후 남은 Job을 획득한다`() {
+        val ids = listOf(enqueue(), enqueue(2), enqueue(3))
+        val started = CountDownLatch(2)
+        val finish = CountDownLatch(1)
+        val completed = CountDownLatch(3)
+        val claimed = java.util.concurrent.ConcurrentLinkedQueue<ClaimedJob>()
+        val threads = java.util.concurrent.ConcurrentHashMap.newKeySet<Thread>()
+        val runner: IndexingPipelineRunner = mock()
+        doAnswer {
+            val job = it.getArgument<ClaimedJob>(0)
+            threads.add(Thread.currentThread())
+            claimed.add(job)
+            started.countDown()
+            check(finish.await(5, TimeUnit.SECONDS))
+            check(writes.complete(job.token.jobId, job.token.workerId, job.token.epoch) == 1)
+            completed.countDown()
+            null
+        }.whenever(runner).run(any<ClaimedJob>())
+        val database = DatabaseOperations(jdbc, ThreadSleepRetryWaiter(), DatabaseWaitProperties(), SimpleMeterRegistry())
+        val worker = DbJobWorker(QueueProperties(workerId = "c1-worker", concurrency = 2,
+            pollInterval = Duration.ofDays(1)), database, queue, runner, ThreadSleepQueueLoopWaiter(), 5)
+        worker.start()
+        try {
+            check(started.await(5, TimeUnit.SECONDS))
+            assertThat(worker.probe()).isFalse()
+            assertThat(claimed).hasSize(2)
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM indexing_job WHERE status='PROCESSING'", Int::class.java)).isEqualTo(2)
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM indexing_job WHERE status='PENDING'", Int::class.java)).isEqualTo(1)
+            finish.countDown()
+            check(completed.await(5, TimeUnit.SECONDS))
+            assertThat(claimed.map { it.token.jobId }).containsExactlyInAnyOrderElementsOf(ids)
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM indexing_job WHERE status='COMPLETED'", Int::class.java)).isEqualTo(3)
+        } finally {
+            finish.countDown()
+            worker.stop()
+            threads.forEach { it.join(5000) }
+        }
     }
 
     @Test fun `미래 선행 재시도는 후속을 막고 다른 문서는 처리하며 due 뒤 같은 Job을 재claim한다`() {

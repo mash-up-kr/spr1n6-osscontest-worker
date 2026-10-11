@@ -1,8 +1,8 @@
 package com.osscontest.worker.indexing.publication.repository
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
-import com.osscontest.worker.indexing.publication.entity.IndexingJobEntity
 import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
+import com.osscontest.worker.support.seedReleasedExecution
 import jakarta.persistence.EntityManager
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
@@ -16,9 +16,6 @@ import com.osscontest.worker.indexing.queue.JobQueueStore
 import com.osscontest.worker.indexing.queue.JobType
 import com.osscontest.worker.support.QueueIntegrationConfiguration
 import org.springframework.context.annotation.Import
-import java.time.Duration
-import java.time.LocalDateTime
-import java.time.ZoneId
 import java.util.UUID
 
 @Tag("integration")
@@ -82,21 +79,24 @@ class IndexingJobRepositoryIntegrationTest(
     }
 
     @Test
-    fun `회수 전에 만료 lease를 연장하면 복구 함수가 회수하지 않는다`() {
+    fun `미회수 동일 실행의 만료 lease는 횟수와 epoch 변경 없이 갱신한다`() {
         queue.enqueue(UUID.randomUUID(), 1, 1, JobType.INDEX, null)
         val job = checkNotNull(queue.claim(5) {})
         jdbcTemplate.update("UPDATE indexing_job SET lease_until = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
         assertThat(queue.renew(job.token)).isEqualTo(1)
-        assertThat(queue.recover(5, Duration.ofSeconds(30))).isZero()
-        assertThat(queue.snapshot(job.token)!!.matches(job.token)).isTrue()
+        val snapshot = checkNotNull(queue.snapshot(job.token))
+        assertThat(snapshot.ownsProcessing(job.token)).isTrue()
+        assertThat(snapshot.leaseUntil).isAfter(snapshot.now)
+        assertThat(snapshot.epoch).isEqualTo(job.token.epoch)
+        assertThat(jdbcTemplate.queryForObject("SELECT attempt_count FROM indexing_job WHERE id = ?",
+            Int::class.java, job.token.jobId)).isEqualTo(job.attemptCount)
     }
 
     @Test
     fun `회수와 새 claim 이후 이전 epoch로 연장 phase 완료할 수 없다`() {
         queue.enqueue(UUID.randomUUID(), 1, 1, JobType.INDEX, null)
         val job = checkNotNull(queue.claim(5) {})
-        jdbcTemplate.update("UPDATE indexing_job SET lease_until = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
-        assertThat(queue.recover(5, Duration.ofSeconds(30))).isEqualTo(1)
+        seedReleasedExecution(jdbcTemplate, job.token, IndexingJobStatus.RETRY_WAIT, queue.dbNow().plusSeconds(60))
         assertThat(queue.claim(5) {}).isNull()
         jdbcTemplate.update("UPDATE indexing_job SET next_retry_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
         val next = checkNotNull(queue.claim(5) {})
@@ -107,15 +107,13 @@ class IndexingJobRepositoryIntegrationTest(
     }
 
     @Test
-    fun `재시도 대기 회수는 deadline을 보존하고 due 전 claim하지 않는다`() {
+    fun `재시도 대기는 due 전 claim하지 않고 deadline을 보존한다`() {
         queue.enqueue(UUID.randomUUID(), 1, 1, JobType.INDEX, null)
         val job = checkNotNull(queue.claim(5) {})
-        jdbcTemplate.update("UPDATE indexing_job SET status = 'RETRY_WAIT', next_retry_at = clock_timestamp() + INTERVAL '1 minute', " +
-            "lease_until = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
+        seedReleasedExecution(jdbcTemplate, job.token, IndexingJobStatus.RETRY_WAIT, queue.dbNow().plusSeconds(60))
         val deadline = queue.snapshot(job.token)!!.retryAt
-        queue.recover(5, Duration.ofSeconds(30))
-        assertThat(queue.snapshot(job.token)!!.retryAt).isEqualTo(deadline)
         assertThat(queue.claim(5) {}).isNull()
+        assertThat(queue.snapshot(job.token)!!.retryAt).isEqualTo(deadline)
         jdbcTemplate.update("UPDATE indexing_job SET next_retry_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
         val next = checkNotNull(queue.claim(5) {})
         assertThat(queue.snapshot(next.token)!!.retryAt).isNull()
