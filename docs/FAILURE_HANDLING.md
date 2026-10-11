@@ -81,7 +81,7 @@ SDK 자동 재시도는 비활성화합니다. 일반 오류와 429는 runner의
 ### 임베딩 API circuit breaker
 
 임베딩 호출의 일시 실패(5xx, 타임아웃, 연결 오류)가 연속 5회 쌓이면 DB(`external_circuit_breaker`)에 OPEN을 기록해
-모든 Worker가 공유합니다. 429는 별도 쿨다운 경로를 쓰며 횟수에 넣지 않습니다. 단, 결제 한도 초과
+모든 Worker가 공유합니다. 429는 위의 DB 예약 재시도 경로를 쓰며 횟수에 넣지 않습니다. 단, 결제 한도 초과
 (429 `insufficient_quota`)는 충전 전까지 계속 실패하므로 일시 실패로 세어 breaker로 대기합니다.
 OPEN 동안에는 임베딩을 호출하지 않고 대기하므로 Job의 시도 횟수가 소비되지 않습니다. 신규 claim은 임베딩을 쓰지 않는
 DELETE Job만 허용하고 INDEX Job은 멈춥니다.

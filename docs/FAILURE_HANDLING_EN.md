@@ -79,7 +79,7 @@ for the same document, while other documents can run. Successful batches in memo
 ### Embedding API circuit breaker
 
 When 5 consecutive transient embedding failures (5xx, timeout, connection error) accumulate, OPEN is recorded in the DB
-(`external_circuit_breaker`) and shared by all Workers. 429 uses its own cooldown path and is not counted, except
+(`external_circuit_breaker`) and shared by all Workers. 429 uses the durable retry path above and is not counted, except
 quota exhaustion (429 `insufficient_quota`), which keeps failing until credit is added and is therefore counted.
 While OPEN, the embedding API is not called and callers wait, so Job attempts are not consumed. New claims are limited
 to DELETE Jobs, which do not call the embedding API; INDEX claims stop.
