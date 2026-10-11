@@ -44,7 +44,7 @@ fun retryingDatabase(): DatabaseOperations = mock<DatabaseOperations>().apply {
 fun directExecution(): ExecutionOperations = mock<ExecutionOperations>().apply {
     whenever(completion<Any?>(any(), any(), any(), any())).thenAnswer { it.getArgument<() -> Any?>(3)() }
     whenever(failure<Any?>(any(), any())).thenAnswer { it.getArgument<() -> Any?>(1)() }
-    whenever(database<Any?>(any(), any(), any())).thenAnswer { it.getArgument<() -> Any?>(2)() }
+    whenever(database<Any?>(any(), any())).thenAnswer { it.getArgument<() -> Any?>(1)() }
 }
 
 fun lockedJob(job: IndexingJobEntity = processingJob(), documentEpoch: Long = job.executionEpoch) =

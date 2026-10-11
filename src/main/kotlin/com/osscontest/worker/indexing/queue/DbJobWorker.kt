@@ -1,9 +1,11 @@
 package com.osscontest.worker.indexing.queue
 
+import com.osscontest.worker.indexing.concurrent.ManagedTask
 import com.osscontest.worker.indexing.pipeline.service.IndexingPipelineRunner
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.Semaphore
 import java.util.concurrent.SynchronousQueue
@@ -36,12 +38,21 @@ class DbJobWorker(
     @Volatile private var current: Generation? = null
     // Reservations include claim/DB waits and survive stop/start until old loops actually exit.
     private val slots = Semaphore(properties.concurrency)
+    private val heartbeatSlots = Semaphore(properties.concurrency)
     // A configured instance label may survive a restart; the boot ID must not.
     private val instanceId = "${properties.workerId}.${UUID.randomUUID()}"
     private val claimIds = AtomicLong()
     private class RunningExecution(private val thread: Thread, val job: ClaimedJob) {
         private var closed = false
-        @Synchronized fun close() { closed = true }
+        private var heartbeat: ManagedTask<Unit>? = null
+        @Synchronized fun close() { closed = true; heartbeat?.cancel(true) }
+        @Synchronized fun isOpen() = !closed
+        @Synchronized fun install(task: ManagedTask<Unit>): Boolean {
+            if (closed || heartbeat != null) return false
+            heartbeat = task
+            return true
+        }
+        @Synchronized fun heartbeatFinished(task: ManagedTask<Unit>) { if (heartbeat === task) heartbeat = null }
         @Synchronized fun revoke() { if (!closed) thread.interrupt() }
     }
     private class Generation(properties: QueueProperties) {
@@ -52,7 +63,11 @@ class DbJobWorker(
             TimeUnit.MILLISECONDS, SynchronousQueue<Runnable>(),
             { task -> Thread(task, "job-worker-${threadIds.incrementAndGet()}") })
         val probes = Executors.newSingleThreadScheduledExecutor { Thread(it, "job-probe") }
-        val heartbeats = Executors.newSingleThreadScheduledExecutor { Thread(it, "job-heartbeat") }
+        val heartbeats = Executors.newSingleThreadScheduledExecutor { Thread(it, "job-heartbeat-timer") }
+        private val heartbeatIds = AtomicInteger()
+        val heartbeatWorkers = ThreadPoolExecutor(0, properties.concurrency, properties.workerIdleTimeout.toMillis(),
+            TimeUnit.MILLISECONDS, SynchronousQueue<Runnable>(),
+            { task -> Thread(task, "job-heartbeat-${heartbeatIds.incrementAndGet()}") })
     }
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -75,6 +90,8 @@ class DbJobWorker(
         generation.running.set(false)
         generation.probes.shutdownNow()
         generation.heartbeats.shutdownNow()
+        generation.active.values.forEach { it.close() }
+        generation.heartbeatWorkers.shutdownNow()
         generation.workers.shutdownNow()
     }
 
@@ -167,27 +184,45 @@ class DbJobWorker(
         }
     }
 
-    internal fun heartbeat() { current?.let { heartbeat(it) } }
+    internal fun heartbeat(): List<Future<Unit>> = current?.let { heartbeat(it) } ?: emptyList()
 
-    private fun heartbeat(generation: Generation) {
-        generation.active.forEach { (token, handle) -> guarded {
-            if (!generation.running.get()) return@guarded
-            val renewed = database.execute {
-                if (!generation.running.get()) throw InterruptedException("Worker stopping")
-                store.renew(token)
+    private fun heartbeat(generation: Generation): List<Future<Unit>> = buildList {
+        generation.active.forEach { (token, handle) ->
+            if (!generation.running.get() || !heartbeatSlots.tryAcquire()) return@forEach
+            lateinit var task: ManagedTask<Unit>
+            task = ManagedTask({
+                try { guarded { renew(generation, token, handle) } }
+                finally { if (generation.running.get()) Thread.interrupted() }
+            }, { handle.heartbeatFinished(task); heartbeatSlots.release() })
+            if (!handle.install(task)) task.cancel(true)
+            else try { generation.heartbeatWorkers.execute(task); add(task) }
+            catch (_: RejectedExecutionException) { task.cancel(true) }
+            catch (error: Exception) { task.cancel(true); throw error }
+        }
+    }
+
+    private fun renew(generation: Generation, token: ExecutionToken, handle: RunningExecution) {
+        fun checkActive() {
+            if (current !== generation || !generation.running.get() || !handle.isOpen() ||
+                generation.active[token] !== handle) throw InterruptedException("Execution closed")
+            DatabaseOperations.checkInterrupted()
+        }
+        checkActive()
+        val renewed = database.execute {
+            checkActive()
+            store.renew(token)
+        }
+        if (renewed == 0) {
+            val snapshot = database.execute {
+                checkActive()
+                store.snapshot(token)
             }
-            if (renewed == 0) {
-                val snapshot = database.execute {
-                    if (!generation.running.get()) throw InterruptedException("Worker stopping")
-                    store.snapshot(token)
-                }
-                if (generation.active.remove(token, handle) &&
-                    (snapshot == null || !snapshot.completed(token) || !snapshot.identifies(handle.job)) &&
-                    (snapshot == null || !results.isOwnFailure(snapshot, token))) {
-                    handle.revoke()
-                }
+            if (generation.active.remove(token, handle) &&
+                (snapshot == null || !snapshot.completed(token) || !snapshot.identifies(handle.job)) &&
+                (snapshot == null || !results.isOwnFailure(snapshot, token))) {
+                handle.revoke()
             }
-        } }
+        }
     }
 
     private fun guarded(action: () -> Unit) {

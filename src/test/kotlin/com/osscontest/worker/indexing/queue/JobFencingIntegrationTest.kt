@@ -224,6 +224,47 @@ class JobFencingIntegrationTest(
         assertThat(retry.sourceEventId).isEqualTo(job.sourceEventId)
     }
 
+    @Test fun `한 문서 heartbeat의 실제 잠금 대기가 다른 문서 갱신을 막지 않는다`() {
+        enqueue(); enqueue(2)
+        val active = java.util.concurrent.ConcurrentLinkedQueue<ClaimedJob>()
+        val started = CountDownLatch(2); val finish = CountDownLatch(1)
+        val threads = java.util.concurrent.ConcurrentHashMap.newKeySet<Thread>()
+        val runner: IndexingPipelineRunner = mock()
+        doAnswer {
+            active.add(it.getArgument(0)); threads.add(Thread.currentThread()); started.countDown()
+            finish.await(); null
+        }.whenever(runner).run(any<ClaimedJob>())
+        val database = DatabaseOperations(jdbc, ThreadSleepRetryWaiter(), DatabaseWaitProperties(), SimpleMeterRegistry())
+        val worker = DbJobWorker(QueueProperties(concurrency = 2, pollInterval = Duration.ofDays(1)),
+            database, queue, runner, ThreadSleepQueueLoopWaiter(), 5, ExecutionResults())
+        worker.start()
+        try {
+            check(started.await(5, TimeUnit.SECONDS))
+            val other = active.single { it.documentId == 2L }
+            val before = checkNotNull(queue.snapshot(other.token)?.leaseUntil)
+            val tasks = withLock("SELECT id FROM document WHERE id=1 FOR UPDATE") {
+                val pending = worker.heartbeat()
+                waitForLock()
+                waitUntil { checkNotNull(queue.snapshot(other.token)?.leaseUntil) > before }
+                assertThat(pending.any { !it.isDone }).isTrue()
+                pending
+            }
+            tasks.forEach { it.get(5, TimeUnit.SECONDS) }
+            assertThat(queue.snapshot(other.token)!!.ownsProcessing(other.token)).isTrue()
+        } finally { finish.countDown(); worker.stop(); threads.forEach { it.join(5000) } }
+    }
+
+    @Test fun `활성 실패 API는 잘못된 상태 deadline 조합에서 행을 변경하지 않는다`() {
+        val job = claim(); val before = row(job.token.jobId)
+        for ((status, deadline) in listOf("COMPLETED" to null, "RETRY_WAIT" to null,
+                "FAILED" to queue.dbNow().plusSeconds(30))) {
+            assertThatThrownBy {
+                writes.fail(job.token.jobId, job.token.workerId, job.token.epoch, status, deadline, "ERROR", "test")
+            }.isInstanceOf(IllegalArgumentException::class.java)
+            assertThat(row(job.token.jobId)).isEqualTo(before)
+        }
+    }
+
     @Test fun `잠긴 선행 Job만 건너뛰고 같은 문서 후속 대신 다른 문서를 claim한다`() {
         val first = enqueue(); val successor = enqueue(); val other = enqueue(2)
         withLock("SELECT id FROM indexing_job WHERE id=$first FOR UPDATE") {

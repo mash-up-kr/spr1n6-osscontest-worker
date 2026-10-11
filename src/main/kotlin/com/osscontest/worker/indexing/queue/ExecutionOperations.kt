@@ -44,13 +44,13 @@ class ExecutionOperations(
         }
     }
 
-    fun <T> database(token: ExecutionToken, allowCompleted: Boolean = false, action: () -> T): T {
+    fun <T> database(token: ExecutionToken, action: () -> T): T {
         while (true) {
             try {
-                return database.execute(afterRecovery = { checkpoint(token, allowCompleted) }, action = action)
+                return database.execute(afterRecovery = { checkpoint(token) }, action = action)
             } catch (_: LeaseExpiredException) {
                 // The failed transaction has unwound before renewing and recalling it.
-                checkpoint(token, allowCompleted)
+                checkpoint(token)
             }
         }
     }

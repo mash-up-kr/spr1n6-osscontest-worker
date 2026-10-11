@@ -47,5 +47,3 @@ data class JobSnapshot(
 class ExecutionLostException(val token: ExecutionToken) : RuntimeException("Execution no longer owned: $token")
 class ExecutionCompletedException(val token: ExecutionToken) : RuntimeException("Execution already completed: $token")
 class LeaseExpiredException : RuntimeException("Execution lease expired")
-
-internal val ownedStatuses = setOf(IndexingJobStatus.PROCESSING)

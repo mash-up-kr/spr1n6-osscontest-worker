@@ -107,6 +107,7 @@ class ExecutionOperationsTest {
         assertThat(calls).isEqualTo(2)
     }
     @Test
+    @org.junit.jupiter.api.Tag("database")
     fun `실패 커밋 응답 유실 후 해제된 실행은 일반 checkpoint 없이 실패 결과를 확인한다`() {
         val database = DatabaseOperations(org.springframework.jdbc.core.JdbcTemplate(
             org.springframework.jdbc.datasource.DriverManagerDataSource("jdbc:h2:mem:failure-loss", "sa", "")),

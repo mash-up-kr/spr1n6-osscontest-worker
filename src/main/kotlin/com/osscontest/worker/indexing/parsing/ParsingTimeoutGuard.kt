@@ -1,19 +1,23 @@
 package com.osscontest.worker.indexing.parsing
 
+import com.osscontest.worker.indexing.concurrent.ManagedTask
 import com.osscontest.worker.indexing.parsing.domain.ParsedBlock
+import com.osscontest.worker.indexing.retrieval.TemporaryDocumentFile
 import io.micrometer.core.instrument.MeterRegistry
 import jakarta.annotation.PreDestroy
-import org.springframework.beans.factory.annotation.Value
-import org.springframework.stereotype.Component
 import java.io.IOException
 import java.nio.file.Files
-import java.nio.file.Path
 import java.time.Duration
-import java.util.concurrent.Callable
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.CancellationException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
-import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import org.springframework.beans.factory.annotation.Value
+import org.springframework.stereotype.Component
 
 /** 파싱을 전용 스레드풀에서 제한 시간 안에 실행하고 손상 파일의 I/O 실패를 영구 오류로 변환한다. */
 @Component
@@ -24,30 +28,51 @@ class ParsingTimeoutGuard(
     concurrency: Int,
     private val meterRegistry: MeterRegistry,
 ) {
-    // 파싱을 별도 executor에서 수행해 호출 스레드에서 제한 시간과 취소를 관리한다.
-    private val parseExecutor = Executors.newFixedThreadPool(concurrency)
+    init { require(concurrency > 0 && parseTimeout.toMillis() > 0) }
+    private val lifecycle = Any()
+    private val tasks = ConcurrentHashMap.newKeySet<ManagedTask<List<ParsedBlock>>>()
+    private val parseExecutor = ThreadPoolExecutor(concurrency, concurrency, 0, TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(concurrency))
 
     fun parse(
         parser: DocumentParser,
-        path: Path,
+        file: TemporaryDocumentFile,
         mimeType: String,
     ): List<ParsedBlock> {
-        val future =
-            parseExecutor.submit(
-                Callable {
-                    try {
-                        Files.newInputStream(path).use { parser.parse(it).toList() }
-                    } catch (e: IOException) {
-                        throw CorruptedFileException(mimeType, e)
-                    }
-                },
-            )
+        val use = file.retain()
+        lateinit var future: ManagedTask<List<ParsedBlock>>
+        future = ManagedTask({
+            try {
+                Files.newInputStream(file.path).use { parser.parse(it).toList() }
+            } catch (e: IOException) {
+                throw CorruptedFileException(mimeType, e)
+            }
+        }, { try { use.close() } finally { tasks.remove(future); parseExecutor.remove(future) } })
+        synchronized(lifecycle) {
+            if (parseExecutor.isShutdown) {
+                future.cancel(true)
+                throw InterruptedException("Parser shutting down")
+            }
+            tasks.add(future)
+            try { parseExecutor.execute(future) }
+            catch (error: RejectedExecutionException) {
+                future.cancel(true)
+                throw ParseCapacityException(error)
+            }
+        }
         return try {
             future.get(parseTimeout.toMillis(), TimeUnit.MILLISECONDS)
         } catch (e: TimeoutException) {
             future.cancel(true)
             meterRegistry.counter("parse_timeout_total").increment()
             throw ParseTimeoutException(mimeType, parseTimeout)
+        } catch (e: InterruptedException) {
+            future.cancel(true)
+            Thread.currentThread().interrupt()
+            throw e
+        } catch (_: CancellationException) {
+            Thread.currentThread().interrupt()
+            throw InterruptedException("Parsing cancelled")
         } catch (e: ExecutionException) {
             val cause = e.cause
             if (cause is Error) throw cause
@@ -57,6 +82,11 @@ class ParsingTimeoutGuard(
 
     @PreDestroy
     fun shutdown() {
-        parseExecutor.shutdownNow()
+        synchronized(lifecycle) {
+            tasks.forEach { it.cancel(true) }
+            parseExecutor.shutdownNow()
+        }
     }
 }
+
+class ParseCapacityException(cause: Throwable) : RuntimeException("Parser capacity exhausted", cause)

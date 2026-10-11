@@ -373,6 +373,81 @@ class DbJobWorkerTest {
     }
 
     @Test
+    fun `느린 heartbeat는 다른 Job 갱신과 다음 tick을 막지 않고 중복 제출하지 않는다`() {
+        Harness(concurrency = 2, heartbeatInterval = Duration.ofMillis(20)).use { h ->
+            val started = CountDownLatch(2); val blocked = CountDownLatch(1); val other = CountDownLatch(3)
+            val finish = CountDownLatch(1); val release = CountDownLatch(1)
+            whenever(h.store.claim(any(), any(), any())).thenReturn(job(), job(2), null)
+            whenever(h.store.renew(job().token)).thenAnswer { blocked.countDown(); release.await(); 1 }
+            whenever(h.store.renew(job(2).token)).thenAnswer { other.countDown(); 1 }
+            doAnswer { started.countDown(); finish.await(); null }.whenever(h.runner).run(any<ClaimedJob>())
+            h.worker.start()
+            try {
+                await(started); await(blocked); await(other)
+                verify(h.store, times(1)).renew(job().token)
+                assertThat(h.worker.probe()).isFalse()
+            } finally { release.countDown(); finish.countDown() }
+        }
+    }
+
+    @Test
+    fun `restart는 취소를 무시하는 이전 heartbeat가 끝날 때까지 예약을 유지한다`() {
+        Harness().use { h ->
+            val first = CountDownLatch(1); val next = CountDownLatch(1); val renewing = CountDownLatch(1)
+            val release = CountDownLatch(1); val renewedNext = CountDownLatch(1); val finish = CountDownLatch(1)
+            whenever(h.store.claim(any(), any(), any())).thenReturn(job(), job(2), null)
+            whenever(h.store.renew(job().token)).thenAnswer { renewing.countDown(); awaitIgnoringInterrupt(release); 0 }
+            whenever(h.store.renew(job(2).token)).thenAnswer { renewedNext.countDown(); 1 }
+            doAnswer {
+                first.countDown()
+                try { CountDownLatch(1).await() } catch (_: InterruptedException) { }
+                null
+            }.whenever(h.runner).run(job())
+            doAnswer { next.countDown(); finish.await(); null }.whenever(h.runner).run(job(2))
+            h.worker.start()
+            try {
+                await(first); h.worker.heartbeat(); await(renewing)
+                h.worker.stop(); h.worker.start(); wake(h.worker); await(next)
+                assertThat(h.worker.heartbeat()).isEmpty()
+                verify(h.store, never()).renew(job(2).token)
+                release.countDown()
+                until { h.worker.heartbeat().isNotEmpty() }
+                await(renewedNext)
+                verify(h.store, never()).snapshot(job().token)
+            } finally { release.countDown(); finish.countDown() }
+        }
+    }
+
+    @Test
+    fun `실행 종료는 heartbeat DB 복구 대기를 중단하고 다음 heartbeat에 interrupt를 남기지 않는다`() {
+        val waiting = CountDownLatch(1); val cancelled = CountDownLatch(1)
+        val heartbeatThread = AtomicReference<Thread>()
+        Harness(database = retryDatabase {
+            heartbeatThread.set(Thread.currentThread()); waiting.countDown()
+            try { CountDownLatch(1).await() } finally { cancelled.countDown() }
+        }).use { h ->
+            val started = CountDownLatch(1); val next = CountDownLatch(1); val leave = CountDownLatch(1)
+            val finish = CountDownLatch(1); val renewedNext = CountDownLatch(1)
+            whenever(h.store.claim(any(), any(), any())).thenReturn(job(), job(2), null)
+            whenever(h.store.renew(job().token)).thenThrow(DataAccessResourceFailureException("offline"))
+            whenever(h.store.renew(job(2).token)).thenAnswer {
+                assertThat(Thread.currentThread()).isSameAs(heartbeatThread.get())
+                assertThat(Thread.currentThread().isInterrupted).isFalse()
+                renewedNext.countDown(); 1
+            }
+            doAnswer { started.countDown(); leave.await(); null }.whenever(h.runner).run(job())
+            doAnswer { next.countDown(); finish.await(); null }.whenever(h.runner).run(job(2))
+            h.worker.start()
+            try {
+                await(started); h.worker.heartbeat(); await(waiting)
+                leave.countDown(); await(cancelled); await(next)
+                until { h.worker.heartbeat().isNotEmpty() }; await(renewedNext)
+                verify(h.store, never()).snapshot(job().token)
+            } finally { leave.countDown(); finish.countDown() }
+        }
+    }
+
+    @Test
     fun `별도 heartbeat는 모든 runner가 대기 중이어도 활성 Job을 갱신한다`() {
         Harness(concurrency = 2, heartbeatInterval = Duration.ofMillis(20)).use { h ->
             val started = CountDownLatch(2)
@@ -382,7 +457,7 @@ class DbJobWorkerTest {
             val tokens = java.util.concurrent.ConcurrentHashMap.newKeySet<ExecutionToken>()
             whenever(h.store.claim(any(), any(), any())).thenAnswer { job(count.incrementAndGet().toLong()) }
             whenever(h.store.renew(any())).thenAnswer {
-                assertThat(Thread.currentThread().name).isEqualTo("job-heartbeat")
+                assertThat(Thread.currentThread().name).startsWith("job-heartbeat-")
                 if (tokens.add(it.getArgument(0))) renewed.countDown()
                 1
             }
@@ -404,8 +479,8 @@ class DbJobWorkerTest {
             h.worker.start()
             try {
                 await(started); h.worker.heartbeat()
-                verify(h.store).renew(job().token)
-                verify(h.store).renew(job(2).token)
+                verify(h.store, timeout(1000)).renew(job().token)
+                verify(h.store, timeout(1000)).renew(job(2).token)
             } finally { h.worker.stop(); finish.countDown() }
         }
     }
@@ -448,7 +523,7 @@ class DbJobWorkerTest {
             val pool = Executors.newSingleThreadExecutor()
             whenever(h.store.claim(any(), any(), any())).thenReturn(job(), job(2), null)
             whenever(h.store.renew(any())).thenReturn(1)
-            whenever(h.store.renew(job().token)).thenAnswer { renewing.countDown(); returnRenew.await(); 0 }
+            whenever(h.store.renew(job().token)).thenAnswer { renewing.countDown(); awaitIgnoringInterrupt(returnRenew); 0 }
             doAnswer {
                 firstThread.set(Thread.currentThread()); firstStarted.countDown(); returnFirst.await(); null
             }.whenever(h.runner).run(job())
@@ -461,7 +536,7 @@ class DbJobWorkerTest {
             h.worker.start()
             try {
                 await(firstStarted)
-                val heartbeat = pool.submit { h.worker.heartbeat() }
+                val heartbeat = pool.submit { finishHeartbeats(h.worker) }
                 await(renewing); returnFirst.countDown(); await(nextStarted)
                 returnRenew.countDown(); heartbeat.get(3, TimeUnit.SECONDS)
                 assertThat(interrupted.get()).isFalse()
@@ -488,7 +563,7 @@ class DbJobWorkerTest {
             }.whenever(h.runner).run(job())
             h.worker.start()
             try {
-                await(started); h.worker.heartbeat(); finish.countDown(); await(cleaned)
+                await(started); finishHeartbeats(h.worker); finish.countDown(); await(cleaned)
                 assertThat(interrupted.get()).isFalse()
             } finally { finish.countDown() }
         }
@@ -515,7 +590,7 @@ class DbJobWorkerTest {
             }.whenever(h.runner).run(job())
             h.worker.start()
             try {
-                await(released); h.worker.heartbeat(); finish.countDown(); await(cleaned)
+                await(released); finishHeartbeats(h.worker); finish.countDown(); await(cleaned)
                 assertThat(interrupted.get()).isFalse()
             } finally { h.worker.stop(); finish.countDown() }
         }
@@ -573,6 +648,17 @@ class DbJobWorkerTest {
 
     private fun job(id: Long = 1) = ClaimedJob(testToken.copy(jobId = id), JobType.INDEX,
         UUID.nameUUIDFromBytes("event-$id".toByteArray()), id + 10, id + 20, "trace-$id")
+
+    private fun finishHeartbeats(worker: DbJobWorker) {
+        worker.heartbeat().forEach {
+            try { it.get(3, TimeUnit.SECONDS) } catch (_: java.util.concurrent.CancellationException) { }
+        }
+    }
+
+    private fun until(condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        while (!condition()) { check(System.nanoTime() < deadline); Thread.sleep(1) }
+    }
 
     private fun await(latch: CountDownLatch) { check(latch.await(3, TimeUnit.SECONDS)) { "Worker did not reach expected state" } }
 

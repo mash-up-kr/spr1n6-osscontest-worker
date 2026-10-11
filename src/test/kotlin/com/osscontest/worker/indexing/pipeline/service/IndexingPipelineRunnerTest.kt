@@ -33,7 +33,7 @@ class IndexingPipelineRunnerTest {
     private val execution = directExecution()
     private val store: JobQueueStore = mock()
     private val runner get() = createRunner(execution)
-    private fun createRunner(operation: ExecutionOperations) = IndexingPipelineRunner(jobs, documents, versions, download, parsers, parse,
+    private fun createRunner(operation: ExecutionOperations, parsing: ParsingTimeoutGuard = parse) = IndexingPipelineRunner(jobs, documents, versions, download, parsers, parsing,
         chunker, mock(), processor, failures, mock(), operation, deletion, 5, java.time.Duration.ofMillis(1), 10000,
         ChunkingStrategy.FIXED_TOKEN, SimpleMeterRegistry(), publication = publication)
     private val job = ClaimedJob(testToken, JobType.INDEX, UUID.randomUUID(), 2, 3, null)
@@ -51,6 +51,70 @@ class IndexingPipelineRunnerTest {
         whenever(download.download("key")).thenAnswer { Files.createTempFile("runner-test-", ".txt").also {
             Files.writeString(it, "hello world")
         } }
+    }
+
+    @Test
+    fun `다운로드 직후 파일 크기 조회 실패도 임시 파일을 정리한다`() {
+        setup()
+        val path = Files.createTempFile("runner-size-", ".txt").also { Files.writeString(it, "hello world") }
+        whenever(download.download("key")).thenReturn(path)
+        whenever(failures.recordFailure(any(), any(), any(), any(), any(), any(), anyOrNull()))
+            .thenReturn(IndexingJobStatus.RETRY_WAIT)
+        try {
+            org.mockito.Mockito.mockStatic(Files::class.java, org.mockito.Mockito.CALLS_REAL_METHODS).use { files ->
+                files.`when`<Long> { Files.size(path) }.thenThrow(java.io.IOException("size unavailable"))
+                runner.run(job)
+            }
+            assertThat(Files.exists(path)).isFalse()
+            verify(failures).recordFailure(eq(testToken), eq("IOException"), any(), eq(false), eq(5), any(), anyOrNull())
+        } finally { Files.deleteIfExists(path) }
+    }
+
+    @Test
+    fun `parser 포화는 일시 실패를 기록하고 파일과 실행을 반환한다`() {
+        setup()
+        whenever(parse.parse(any(), any(), any())).thenThrow(ParseCapacityException(IllegalStateException("full")))
+        whenever(failures.recordFailure(any(), any(), any(), any(), any(), any(), anyOrNull()))
+            .thenReturn(IndexingJobStatus.RETRY_WAIT)
+        runner.run(job)
+        verify(failures).recordFailure(eq(testToken), eq("ParseCapacityException"), any(), eq(false), eq(5), any(), anyOrNull())
+        val source = argumentCaptor<com.osscontest.worker.indexing.retrieval.TemporaryDocumentFile>()
+        verify(parse).parse(any(), source.capture(), any())
+        assertThat(Files.exists(source.firstValue.path)).isFalse()
+        assertThat(processor.calls).isEmpty()
+    }
+
+    @Test
+    fun `runner 취소는 실패를 쓰지 않고 parser 실제 종료까지 파일을 유지한다`() {
+        setup()
+        val entered = java.util.concurrent.CountDownLatch(1); val finish = java.util.concurrent.CountDownLatch(1)
+        val source = java.util.concurrent.atomic.AtomicReference<java.nio.file.Path>()
+        whenever(download.download("key")).thenAnswer {
+            Files.createTempFile("runner-cancel-", ".txt").also { Files.writeString(it, "hello world"); source.set(it) }
+        }
+        val parser: DocumentParser = mock()
+        whenever(parsers.findParser(any())).thenReturn(parser)
+        whenever(parser.parse(any())).thenReturn(sequence {
+            entered.countDown()
+            while (finish.count > 0) {
+                try { finish.await() } catch (_: InterruptedException) { }
+            }
+        })
+        val guard = ParsingTimeoutGuard(java.time.Duration.ofSeconds(10), 1, SimpleMeterRegistry())
+        val activeRunner = createRunner(execution, guard)
+        val thread = Thread { activeRunner.run(job) }
+        thread.start()
+        try {
+            check(entered.await(3, java.util.concurrent.TimeUnit.SECONDS))
+            thread.interrupt(); thread.join(3000)
+            assertThat(thread.isAlive).isFalse()
+            verifyNoInteractions(failures)
+            assertThat(Files.exists(source.get())).isTrue()
+            finish.countDown()
+            val until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3)
+            while (Files.exists(source.get())) { check(System.nanoTime() < until); Thread.sleep(1) }
+            assertThat(processor.calls).isEmpty()
+        } finally { finish.countDown(); thread.interrupt(); thread.join(3000); guard.shutdown() }
     }
 
     @Test
@@ -80,9 +144,9 @@ class IndexingPipelineRunnerTest {
         verify(jobs).updatePhase(1, "PARSING", testToken.workerId, testToken.epoch)
         verify(jobs).updatePhase(1, "CHUNKING", testToken.workerId, testToken.epoch)
         verify(jobs).updatePhase(1, "EMBEDDING", testToken.workerId, testToken.epoch)
-        val path = argumentCaptor<java.nio.file.Path>()
+        val path = argumentCaptor<com.osscontest.worker.indexing.retrieval.TemporaryDocumentFile>()
         verify(parse).parse(any(), path.capture(), any())
-        assertThat(Files.exists(path.firstValue)).isFalse()
+        assertThat(Files.exists(path.firstValue.path)).isFalse()
         verifyNoInteractions(failures)
     }
 
@@ -150,6 +214,7 @@ class IndexingPipelineRunnerTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("database")
     fun `다운로드 이후 DB 장애는 파일을 유지하고 실패한 phase 기록부터 재개한다`() {
         setup()
         var downloaded: java.nio.file.Path? = null

@@ -19,7 +19,8 @@ class JobQueueStore(
     private val locks: JobExecutionLocks,
     private val ownership: JobOwnershipGuard,
 ) {
-    fun claim(maxAttempts: Int, prepared: (ExecutionToken) -> Unit): ClaimedJob? =
+    // Fixture helper; the Worker supplies a distinct owner for every claim attempt.
+    internal fun claim(maxAttempts: Int, prepared: (ExecutionToken) -> Unit): ClaimedJob? =
         claimForWorker(properties.workerId, properties.leaseDuration.toMillis(), maxAttempts, prepared)
 
     fun claim(maxAttempts: Int, ownerId: String, prepared: (ExecutionToken) -> Unit): ClaimedJob? =

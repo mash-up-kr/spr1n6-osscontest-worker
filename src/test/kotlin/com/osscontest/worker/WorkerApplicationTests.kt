@@ -11,6 +11,7 @@ import org.springframework.test.context.ActiveProfiles
 
 @SpringBootTest
 @ActiveProfiles("test")
+@org.junit.jupiter.api.Tag("database")
 class WorkerApplicationTests {
     @Test
     fun contextLoads() {

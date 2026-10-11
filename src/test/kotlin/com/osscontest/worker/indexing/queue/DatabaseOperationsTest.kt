@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 
+@org.junit.jupiter.api.Tag("database")
 class DatabaseOperationsTest {
     private val source = DriverManagerDataSource("jdbc:h2:mem:wait-test;DB_CLOSE_DELAY=-1", "sa", "")
 

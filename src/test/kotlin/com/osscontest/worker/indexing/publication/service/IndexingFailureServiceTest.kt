@@ -31,6 +31,13 @@ class IndexingFailureServiceTest {
     }
 
     @Test
+    fun `활성 실패 경로는 오류 길이 상한을 지킨다`() {
+        setup()
+        service.recordFailure(testToken, "E".repeat(150), "m".repeat(1500), false, 5, Duration.ofSeconds(30))
+        verify(jobs).fail(1, "worker", 1, "RETRY_WAIT", testNow.plusSeconds(30), "E".repeat(100), "m".repeat(1000))
+    }
+
+    @Test
     fun `Worker 실패 outcome도 보관한 deadline 오류와 다르면 실행 상실로 처리한다`() {
         results.prepare(testToken) { FailureRecord(com.osscontest.worker.indexing.pipeline.service.FailureDecision(
             IndexingJobStatus.RETRY_WAIT, testNow.plusSeconds(30)), "TIMEOUT", "message") }
