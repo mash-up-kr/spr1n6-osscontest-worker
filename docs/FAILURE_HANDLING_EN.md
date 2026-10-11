@@ -80,7 +80,8 @@ for the same document, while other documents can run. Successful batches in memo
 
 When 5 consecutive transient embedding failures (5xx, timeout, connection error) accumulate, OPEN is recorded in the DB
 (`external_circuit_breaker`) and shared by all Workers. 429 uses its own cooldown path and is not counted.
-While OPEN, the embedding API is not called and callers wait, so Job attempts are not consumed and new claims stop.
+While OPEN, the embedding API is not called and callers wait, so Job attempts are not consumed. New claims are limited
+to DELETE Jobs, which do not call the embedding API; INDEX claims stop.
 After 60 seconds a single Worker makes a probe call: success closes the breaker, failure reopens it.
 While a probe Job is needed, each poll claims at most one Job.
 
@@ -116,6 +117,7 @@ retries remain an external dependency; the Worker also terminates ineligible IND
 | Predecessor retry deadline is in the future | Block successors for the same document; allow other documents |
 | Worker dies during retry | Preserve deadline on recovery; new execution may recompute |
 | DELETE replay or stale INDEX publication | Idempotent completion and ownership rejection |
+| INDEX and DELETE waiting while the breaker is OPEN | Claim DELETE only; INDEX waits |
 
 Unit and PostgreSQL integration tests are distinct. Validate SQL races and rollbacks against a dedicated
 database with the shared schema and [queue contract](sql/DB_JOB_QUEUE_CONTRACT.sql) applied.

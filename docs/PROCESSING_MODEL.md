@@ -76,7 +76,8 @@ heartbeat는 INDEX 처리나 claim과 독립적으로 실행합니다. 같은 �
 실패 쓰기는 `PROCESSING`, Worker ID, epoch, 유효 lease를 검증하며 상태 변경과 Worker·lease 해제를 원자적으로 처리합니다.
 Job·`source_event_id`·`enqueue_seq`는 유지합니다. 실행 종료 후 슬롯을 반환해 다른 문서를 처리할 수 있습니다.
 `next_retry_at`은 그 시각 이후부터 claim 가능하다는 뜻이며 실행 시각을 보장하지 않습니다.
-전역 재시도 차단·API 재시도 직렬화·외부 API circuit breaker는 사용하지 않습니다.
+전역 재시도 차단·API 재시도 직렬화는 사용하지 않습니다. 임베딩 API의 연속 일시 실패는 DB 공유 circuit breaker로 다루며,
+열려 있는 동안 INDEX claim과 임베딩 호출을 멈추고 DELETE Job은 계속 claim합니다([장애 대응](FAILURE_HANDLING.md)).
 
 ## DELETE 처리
 

@@ -75,6 +75,6 @@ The Worker supports concurrency across documents, fencing of stale owners, atomi
 and waiting at failed database calls. Process termination loses in-memory files/chunks/embeddings;
 a new execution computes them again. Active Job limits are per Worker; retry waits do not occupy slots.
 A global external request limiter is outside this implementation. Consecutive transient failures of the
-embedding API are handled by a DB-shared circuit breaker: while it is open, calls and new claims stop and attempts are not consumed.
+embedding API are handled by a DB-shared circuit breaker: while it is open, calls and new INDEX claims stop and attempts are not consumed. DELETE Jobs, which do not call the embedding API, are still claimed.
 
 [Processing model](PROCESSING_MODEL_EN.md) · [Failure handling](FAILURE_HANDLING_EN.md) · [README](../README_EN.md)

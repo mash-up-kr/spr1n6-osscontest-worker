@@ -68,16 +68,14 @@ class DbJobWorker(
                 slots.release()
                 throw error
             }
-            if (admission == ClaimAdmission.BLOCKED) {
-                slots.release()
-                break
-            }
+            // breaker는 임베딩 API 장애만 다룬다. 임베딩을 쓰지 않는 DELETE Job은 열려 있는 동안에도 처리한다.
+            val onlyType = if (admission == ClaimAdmission.BLOCKED) JobType.DELETE else null
             val prepared = AtomicReference<ExecutionToken?>()
             val job = try {
                 database.execute {
                     val previous = prepared.get()
                     if (previous != null) store.resolveClaim(previous)
-                    else store.claim(maxAttempts) { prepared.set(it) }
+                    else store.claim(maxAttempts, onlyType) { prepared.set(it) }
                 }
             } catch (error: Exception) {
                 slots.release()
