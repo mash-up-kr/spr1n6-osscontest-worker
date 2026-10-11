@@ -76,6 +76,20 @@ BEGIN
 END;
 $$;
 
+-- 외부 API(임베딩) 장애 상태를 모든 Worker가 공유한다. 전이는 Worker가 조건부 UPDATE 한 문장으로 처리한다.
+CREATE TABLE external_circuit_breaker (
+    name VARCHAR(50) PRIMARY KEY,
+    state VARCHAR(20) NOT NULL DEFAULT 'CLOSED',
+    consecutive_failures INT NOT NULL DEFAULT 0,
+    opened_until TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT ck_external_circuit_breaker_state CHECK (state IN ('CLOSED', 'OPEN', 'HALF_OPEN')),
+    CONSTRAINT ck_external_circuit_breaker_failures CHECK (consecutive_failures >= 0),
+    CONSTRAINT ck_external_circuit_breaker_open CHECK (state = 'CLOSED' OR opened_until IS NOT NULL)
+);
+
+INSERT INTO external_circuit_breaker (name) VALUES ('embedding-api');
+
 COMMIT;
 
 -- Producer contract (Core scope): upload the object successfully before registering INDEX.
