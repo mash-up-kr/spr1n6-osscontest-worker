@@ -75,7 +75,14 @@ next_retry_at = database time + base-delay × max(attempt_count, 1) × U(0.8, 1.
 A valid Retry-After in seconds or HTTP-date form is a minimum: the later of it and linear jitter is persisted.
 Retries retain Job identity, source_event_id, and enqueue_seq. A future retry predecessor blocks later Jobs
 for the same document, while other documents can run. Successful batches in memory are not retained across claims.
-There is no external API circuit breaker.
+
+### Embedding API circuit breaker
+
+When 5 consecutive transient embedding failures (5xx, timeout, connection error) accumulate, OPEN is recorded in the DB
+(`external_circuit_breaker`) and shared by all Workers. 429 uses its own cooldown path and is not counted.
+While OPEN, the embedding API is not called and callers wait, so Job attempts are not consumed and new claims stop.
+After 60 seconds a single Worker makes a probe call: success closes the breaker, failure reopens it.
+While a probe Job is needed, each poll claims at most one Job.
 
 Expired PROCESSING recovery uses the same attempt budget and jittered linear backoff. It selects RETRY_WAIT
 with attempts remaining and FAILED otherwise. Existing RETRY_WAIT deadlines are preserved; recovery does not

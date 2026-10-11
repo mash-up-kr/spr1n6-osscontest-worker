@@ -76,7 +76,15 @@ SDK 자동 재시도는 비활성화합니다. 일반 오류와 429는 runner의
 `next_retry_at = DB 시각 + base-delay × max(attempt_count, 1) × U(0.8, 1.2)`입니다.
 429는 `Retry-After` 초 또는 HTTP 날짜가 유효하면 이 시각과 선형 지터 deadline 중 더 늦은 값을 저장합니다.
 재시도는 같은 Job·`source_event_id`·`enqueue_seq`를 유지합니다. 미래의 선행 재시도는 같은 문서의 후속 Job을 막지만 다른 문서는 막지 않습니다.
-성공한 임베딩 배치의 메모리 결과는 다음 실행으로 전달하지 않습니다. 외부 API circuit breaker는 없습니다.
+성공한 임베딩 배치의 메모리 결과는 다음 실행으로 전달하지 않습니다.
+
+### 임베딩 API circuit breaker
+
+임베딩 호출의 일시 실패(5xx, 타임아웃, 연결 오류)가 연속 5회 쌓이면 DB(`external_circuit_breaker`)에 OPEN을 기록해
+모든 Worker가 공유합니다. 429는 별도 쿨다운 경로를 쓰며 횟수에 넣지 않습니다.
+OPEN 동안에는 임베딩을 호출하지 않고 대기하므로 Job의 시도 횟수가 소비되지 않고, 신규 claim도 멈춥니다.
+60초 뒤 한 Worker만 시험 호출을 하며 성공하면 닫고 실패하면 다시 엽니다.
+시험 호출을 할 Job이 필요한 시점에는 poll마다 Job을 1건만 claim합니다.
 
 만료 복구 함수도 같은 시도 한도·선형 지터 설정을 사용합니다. 만료 `PROCESSING`은 잔여 횟수가 있으면
 `RETRY_WAIT`, 소진이면 `FAILED`가 됩니다. 기존 `RETRY_WAIT`의 deadline은 보존하며 시도 횟수·epoch는 증가시키지 않습니다.
