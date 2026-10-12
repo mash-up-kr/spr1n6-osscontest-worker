@@ -22,3 +22,63 @@ jobs:
 
       - name: Test
         run: ./gradlew --no-daemon test
+
+  integration-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Server와 운영(PostgreSQL 17, pgvector 0.8.1)에 맞춘 이미지다.
+        image: pgvector/pgvector:0.8.1-pg17
+        env:
+          POSTGRES_USER: worker
+          POSTGRES_PASSWORD: worker
+          # 통합 테스트는 이름에 test 또는 integration이 들어간 전용 DB에서만 실행된다.
+          POSTGRES_DB: worker_integration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U worker -d worker_integration_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: worker
+      PGPASSWORD: worker
+      PGDATABASE: worker_integration_test
+      INTEGRATION_DB_URL: jdbc:postgresql://localhost:5432/worker_integration_test
+      INTEGRATION_DB_USERNAME: worker
+      INTEGRATION_DB_PASSWORD: worker
+      INTEGRATION_STORAGE_BUCKET: integration-test
+      INTEGRATION_STORAGE_REGION: us-east-1
+      # 실제 임베딩 호출 테스트는 OPENAI_API_KEY가 있을 때만 실행되며 CI에서는 건너뛴다.
+      INTEGRATION_OPENAI_API_KEY: unused
+    steps:
+      - uses: actions/checkout@v4
+
+      # 공용 스키마는 Server가 소유한다. Server main의 마이그레이션을 받아 스키마 변경이 Worker를 깨뜨리면 바로 드러나게 한다.
+      - uses: actions/checkout@v4
+        with:
+          repository: mash-up-kr/spr1n6-osscontest-server
+          path: server-schema
+          sparse-checkout: src/main/resources/db/migration
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Apply schema
+        run: |
+          # Server는 pgcrypto를 Flyway 밖에서 설치한다(scripts/local-db/00-extensions.sql).
+          psql -v ON_ERROR_STOP=1 -q -c "CREATE EXTENSION IF NOT EXISTS pgcrypto"
+          # 파일명 V{yyyyMMdd}_{nnn}의 사전순이 Flyway 버전 순서와 같다.
+          for migration in $(ls server-schema/src/main/resources/db/migration/*.sql | sort); do
+            psql -v ON_ERROR_STOP=1 -q -f "$migration"
+          done
+          psql -v ON_ERROR_STOP=1 -q -f sql/20261012_worker_queue_and_circuit.sql
+
+      - name: Integration test
+        run: ./gradlew --no-daemon integrationTest
