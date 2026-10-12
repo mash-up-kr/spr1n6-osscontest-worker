@@ -26,7 +26,6 @@ class IndexingFailureServiceTest {
 
     private fun setup(attempts: Int = 1) {
         whenever(locks.lock(1)).thenReturn(lockedJob(processingJob(attempt = attempts)))
-        whenever(jobs.currentDbTimestamp()).thenReturn(testNow)
         whenever(jobs.fail(any(), any(), any(), any(), anyOrNull(), any(), any())).thenReturn(1)
     }
 
@@ -68,10 +67,9 @@ class IndexingFailureServiceTest {
         setup()
         whenever(jobs.fail(any(), any(), any(), any(), anyOrNull(), any(), any())).thenReturn(0, 1)
         assertThatThrownBy { fail() }.isInstanceOf(LeaseExpiredException::class.java)
-        whenever(jobs.currentDbTimestamp()).thenReturn(testNow.plusSeconds(100))
+        whenever(locks.lock(1)).thenReturn(lockedJob(processingJob(attempt = 1), now = testNow.plusSeconds(10)))
         service.recordFailure(testToken, "OTHER", "changed", false, 5, Duration.ofSeconds(90), "120")
         verify(jobs, times(2)).fail(1, "worker", 1, "RETRY_WAIT", testNow.plusSeconds(30), "TIMEOUT", "message")
-        verify(jobs, times(1)).currentDbTimestamp()
     }
 
     @Test

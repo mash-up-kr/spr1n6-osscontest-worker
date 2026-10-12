@@ -53,7 +53,7 @@ class IndexingFailureService(
         // 코드는 Server 스키마 last_error_code VARCHAR(100)에 맞춘다. 메시지는 조회 API로 그대로 노출되므로 1000자로 자른다.
         val record = results.prepare(token) {
             FailureRecord(retryPolicy.decideFailure(permanent, job.attemptCount, maxAttempts, baseDelay,
-                indexingJobRepository.currentDbTimestamp(), retryAfter), errorCode.take(100), errorMessage.take(1000))
+                execution.now, retryAfter), errorCode.take(100), errorMessage.take(1000))
         }
         val decision = record.decision
         if (indexingJobRepository.fail(token.jobId, token.workerId, token.epoch, decision.status.name,

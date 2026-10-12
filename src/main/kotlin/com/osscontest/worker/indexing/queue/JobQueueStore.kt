@@ -1,7 +1,6 @@
 package com.osscontest.worker.indexing.queue
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
-import org.springframework.jdbc.core.RowMapper
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
@@ -78,8 +77,7 @@ class JobQueueStore(
     }
 
     /** 통합 테스트가 DB 시각 기준으로 재시도 시각을 만들 때 쓴다. 운영 경로는 [JobExecutionLocks]의 시각을 쓴다. */
-    fun dbNow(): Instant = checkNotNull(jdbc.queryForObject("SELECT clock_timestamp()", emptyMap<String, Any>(),
-        RowMapper { rs, _ -> rs.getTimestamp(1).toInstant() }))
+    fun dbNow(): Instant = locks.dbNow()
 
     /**
      * 문서 행을 잠그고 Job을 등록한다. 같은 source_event_id가 이미 있으면 아무것도 하지 않는다.

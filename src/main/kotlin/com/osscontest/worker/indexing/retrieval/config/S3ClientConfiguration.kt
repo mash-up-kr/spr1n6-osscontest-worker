@@ -1,6 +1,5 @@
 package com.osscontest.worker.indexing.retrieval.config
 
-import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider
@@ -11,7 +10,6 @@ import software.amazon.awssdk.services.s3.S3Configuration
 import java.net.URI
 
 @Configuration
-@EnableConfigurationProperties(StorageProperties::class)
 class S3ClientConfiguration {
     @Bean
     fun s3Client(properties: StorageProperties): S3Client {

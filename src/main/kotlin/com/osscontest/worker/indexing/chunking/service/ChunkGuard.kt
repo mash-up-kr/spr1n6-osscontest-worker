@@ -2,11 +2,9 @@ package com.osscontest.worker.indexing.chunking.service
 
 import com.osscontest.worker.indexing.chunking.config.ChunkingProperties
 import com.osscontest.worker.indexing.chunking.domain.Chunk
-import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.stereotype.Component
 
 @Component
-@EnableConfigurationProperties(ChunkingProperties::class)
 class ChunkGuard(
     private val properties: ChunkingProperties,
 ) {
