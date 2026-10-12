@@ -32,8 +32,8 @@ Jobs; removing source objects remains the Server's responsibility.
 
 **Deployment dependencies:** The physical schema and migrations follow the Server. The Worker assumes
 a shared schema migrated by the Server and never changes it (`ddl-auto: none`).
-The queue and circuit breaker schema the Worker needs is collected in the
-[Worker migration proposal](sql/20261012_worker_queue_and_circuit.sql). The Server migration is written from this file; this repository never applies it.
+The queue and circuit breaker schema the Worker needs is in the Server migration
+[`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql). This repository never applies migrations.
 Recovering `PROCESSING` Jobs with expired leases is also outside the Worker.
 Durable Job production and restrictions on historical version retries must be implemented
 and verified in the Server repository. Worker changes do not migrate the Server.
@@ -143,7 +143,8 @@ the health check tests Java PID 1 liveness.
 
 Unit tests cover parsers, chunking, queue capacity, database waits, ownership, and the circuit breaker
 without external services. Integration tests require a dedicated PostgreSQL/pgvector database
-with the shared schema and the Worker migration applied. Its name must contain `test` or `integration`.
+with all Server migrations applied. The Server installs the `pgcrypto` extension outside its migrations,
+so create it first. Its name must contain `test` or `integration`.
 Configure `INTEGRATION_*` settings from `.env.example`. Live embedding tests run only when
 the key conditions in their test code are met.
 

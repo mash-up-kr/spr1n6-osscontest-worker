@@ -78,7 +78,6 @@ jobs:
           for migration in $(ls server-schema/src/main/resources/db/migration/*.sql | sort); do
             psql -v ON_ERROR_STOP=1 -q -f "$migration"
           done
-          psql -v ON_ERROR_STOP=1 -q -f sql/20261012_worker_queue_and_circuit.sql
 
       - name: Integration test
         run: ./gradlew --no-daemon integrationTest

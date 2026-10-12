@@ -123,7 +123,7 @@ the searchable pointer back.
 | Quota exhaustion (429 insufficient_quota) | Opens the breaker immediately instead of a rate-limit retry; wait without consuming attempts while open |
 
 Unit and PostgreSQL integration tests are distinct. Validate SQL races and rollbacks against a dedicated
-database with the shared schema and the [Worker migration](../sql/20261012_worker_queue_and_circuit.sql) applied.
+database with all Server migrations applied, including [`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql).
 This document does not claim that production migrations or integration tests have been completed.
 
 Metrics: `indexing_db_wait_total`, `indexing_retry_scheduled_total{errorCode}`,

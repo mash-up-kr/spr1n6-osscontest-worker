@@ -59,8 +59,8 @@ version state, searchable pointer, and Job completion together. External calls f
 ## Deployment dependencies
 
 The physical schema and migrations follow the Server; the Worker never changes the schema.
-The queue and breaker schema the Worker needs is collected in the [Worker migration proposal](../sql/20261012_worker_queue_and_circuit.sql).
-The Server migration is written from this file; this repository never applies it. Stop Workers without fencing and drain `PROCESSING` Jobs first.
+The queue and breaker schema the Worker needs is in the Server migration [`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql).
+This repository never applies it. Stop Workers without fencing and drain `PROCESSING` Jobs first.
 The Worker does not include a recovery procedure for `PROCESSING` Jobs with expired leases.
 
 Server producers must lock the document and enqueue Jobs in the document mutation transaction.

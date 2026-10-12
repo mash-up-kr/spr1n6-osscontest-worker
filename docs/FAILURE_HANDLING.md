@@ -124,7 +124,7 @@ Server의 과거 버전 재시도 제한은 외부 의존성입니다. 문서-�
 | 결제 한도 초과(429 `insufficient_quota`) | rate limit 재시도가 아니라 breaker를 바로 열고, 열린 동안 시도 횟수 소비 없이 대기 |
 
 일반 테스트와 실제 PostgreSQL 통합 테스트를 구분합니다. SQL 경쟁·롤백 검증은
-전용 DB에 공용 스키마와 [Worker 마이그레이션](../sql/20261012_worker_queue_and_circuit.sql)을 적용한 뒤 실행해야 합니다.
+전용 DB에 Server 마이그레이션([`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql) 포함)을 모두 적용한 뒤 실행해야 합니다.
 이 문서는 운영 DB 적용이나 통합 테스트 실행 완료를 의미하지 않습니다.
 
 메트릭: `indexing_db_wait_total`, `indexing_retry_scheduled_total{errorCode}`,

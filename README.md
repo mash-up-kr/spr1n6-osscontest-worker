@@ -32,8 +32,8 @@ Worker는 이미 등록된 Job을 실행하며 원본 Object Storage 삭제는 �
 
 **배포 의존성:** 물리 스키마와 마이그레이션은 Server를 따릅니다. Worker는 Server 마이그레이션이 적용된
 공용 스키마를 전제로 동작하며 스키마를 변경하지 않습니다(`ddl-auto: none`).
-Worker가 요구하는 큐·circuit breaker 스키마는 [Worker 마이그레이션 제안](sql/20261012_worker_queue_and_circuit.sql)에 정리했습니다.
-Server 마이그레이션은 이 파일을 기준으로 작성하며 이 저장소는 적용하지 않습니다. lease가 만료된 `PROCESSING` Job의 회수도 Worker 범위 밖입니다.
+Worker가 요구하는 큐·circuit breaker 스키마는 Server 마이그레이션 [`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql)에 있습니다.
+이 저장소는 마이그레이션을 적용하지 않습니다. lease가 만료된 `PROCESSING` Job의 회수도 Worker 범위 밖입니다.
 Server의 Job 생산 경로와 과거 버전 재시도 제한도 별도 저장소에서 구현·검증해야 합니다.
 이 저장소의 수정으로 Server가 전환되지는 않습니다.
 
@@ -148,7 +148,8 @@ docker run --rm --name aidocs-worker --env-file .env osscontest-indexing-worker
 ```
 
 일반 테스트는 외부 서비스 없이 파서·청킹·큐 슬롯·DB 대기·실행권·circuit breaker를 검증합니다.
-통합 테스트는 공용 스키마와 Worker 마이그레이션이 적용된 전용 PostgreSQL/pgvector가 필요합니다.
+통합 테스트는 Server 마이그레이션을 모두 적용한 전용 PostgreSQL/pgvector가 필요합니다.
+Server는 `pgcrypto` 확장을 마이그레이션 밖에서 설치하므로 적용 전에 먼저 만듭니다.
 DB 이름에 `test` 또는 `integration`이 포함되어야 하며 `.env.example`의 `INTEGRATION_*`를 설정합니다.
 실제 임베딩 연동 테스트는 테스트 코드의 API key 조건을 충족할 때만 실행됩니다.
 

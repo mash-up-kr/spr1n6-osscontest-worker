@@ -1,4 +1,5 @@
--- 미적용 제안이다. 스키마 소유자(Server)가 직접 적용하며 Worker는 적용하지 않는다.
+-- Server 마이그레이션 V20261012_001__add_db_queue_schema.sql로 반영된 제안이다. 이 저장소는 적용하지 않는다.
+-- CircuitBreakerIntegrationTest가 CIRCUIT SCHEMA 구간의 breaker DDL을 읽어 테스트 스키마를 만든다.
 -- efb3eb7 이후 Worker 계약을 누적한 것이며, 이전 큐 제안을 이미 적용한 DB에도 실행할 수 있다.
 -- 적용 전에 실행권 확인이 없는 이전 Writer와 breaker Writer를 멈추고 PROCESSING Job을 비우거나 외부에서 회수한다.
 -- 기존 Job의 timezone 없는 시각은 UTC여야 한다. 적용 뒤에는 이전 큐·재시도 제안을 실행하지 않는다.
