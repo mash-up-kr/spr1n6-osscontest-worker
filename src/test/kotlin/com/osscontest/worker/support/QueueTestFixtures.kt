@@ -8,6 +8,8 @@ import com.osscontest.worker.indexing.queue.ExecutionToken
 import com.osscontest.worker.indexing.queue.LockedJobExecution
 import com.osscontest.worker.indexing.queue.JobQueueStore
 import org.mockito.kotlin.any
+import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 import java.time.Instant
@@ -62,12 +64,13 @@ fun lockedJob(job: IndexingJobEntity = processingJob(), documentEpoch: Long = jo
 fun closedCircuitBreaker() = mock<com.osscontest.worker.indexing.queue.CircuitBreaker>().also { allowCircuitCalls(it) }
 
 fun allowCircuitCalls(breaker: com.osscontest.worker.indexing.queue.CircuitBreaker) {
-    whenever(breaker.admission()).thenReturn(com.osscontest.worker.indexing.queue.ClaimAdmission.NORMAL)
-    whenever(breaker.lockForClaim()).thenReturn(com.osscontest.worker.indexing.queue.BreakerSnapshot(
-        com.osscontest.worker.indexing.queue.BreakerState.CLOSED, null, testNow))
-    whenever(breaker.acquire(any(), any())).thenAnswer {
+    // 공유 mock은 다른 스레드가 호출하는 중에도 스텁하므로 메서드를 호출하지 않는 doReturn 형태를 쓴다.
+    doReturn(com.osscontest.worker.indexing.queue.ClaimAdmission.NORMAL).whenever(breaker).admission()
+    doReturn(com.osscontest.worker.indexing.queue.BreakerSnapshot(
+        com.osscontest.worker.indexing.queue.BreakerState.CLOSED, null, testNow)).whenever(breaker).lockForClaim()
+    doAnswer {
         com.osscontest.worker.indexing.queue.CallAdmission.Allowed(com.osscontest.worker.indexing.queue.CircuitPermit(
             "embedding-api", 0, it.getArgument<String>(1)))
-    }
-    whenever(breaker.valid(any())).thenReturn(true)
+    }.whenever(breaker).acquire(any(), any())
+    doReturn(true).whenever(breaker).valid(any())
 }

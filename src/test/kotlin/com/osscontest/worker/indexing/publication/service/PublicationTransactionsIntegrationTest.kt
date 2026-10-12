@@ -152,7 +152,7 @@ class PublicationTransactionsIntegrationTest(
     @AfterAll fun dropSchema() { jdbc.execute("DROP SCHEMA worker_c3_publication CASCADE") }
     @BeforeEach fun fixture() {
         org.mockito.Mockito.reset(breaker)
-        whenever(breaker.admission()).thenReturn(ClaimAdmission.NORMAL)
+        doReturn(ClaimAdmission.NORMAL).whenever(breaker).admission()
         com.osscontest.worker.support.allowCircuitCalls(breaker)
         source.loseNextCommit.set(false)
         jdbc.update("DELETE FROM document_chunk")
@@ -521,7 +521,7 @@ class PublicationTransactionsIntegrationTest(
         queue.enqueue(UUID.randomUUID(), 1, 2, JobType.INDEX, null)
         jdbc.update("UPDATE document SET deleted_at=clock_timestamp() WHERE id=2")
         queue.enqueue(UUID.randomUUID(), 2, null, JobType.DELETE, null)
-        whenever(breaker.admission()).thenReturn(ClaimAdmission.BLOCKED)
+        doReturn(ClaimAdmission.BLOCKED).whenever(breaker).admission()
         val before = jdbc.queryForMap("SELECT * FROM indexing_job WHERE id=?", id)
         val epoch = jdbc.queryForObject("SELECT execution_epoch FROM document WHERE id=1", Long::class.java)
         val first = checkNotNull(queue.claim(5, "open-1"))
@@ -541,8 +541,9 @@ class PublicationTransactionsIntegrationTest(
 
     @Test fun `claim 뒤 OPEN 호출 차단은 같은 실행에서 기다리며 실패 기록이나 attempt 증가 없이 완료한다`() {
         val job = claim()
-        whenever(breaker.admission()).thenReturn(ClaimAdmission.BLOCKED)
-        whenever(breaker.acquire(any(), any())).thenReturn(CallAdmission.Blocked(Duration.ofSeconds(30)), CallAdmission.Allowed(CircuitPermit("embedding-api", 0, "test")))
+        doReturn(ClaimAdmission.BLOCKED).whenever(breaker).admission()
+        doReturn(CallAdmission.Blocked(Duration.ofSeconds(30)), CallAdmission.Allowed(CircuitPermit("embedding-api", 0, "test")))
+            .whenever(breaker).acquire(any(), any())
         val pipeline = PipelineFixture()
         pipeline.runner.run(job)
         assertThat(row(job)["status"]).isEqualTo("COMPLETED")
@@ -562,7 +563,7 @@ class PublicationTransactionsIntegrationTest(
         queue.enqueue(UUID.randomUUID(), 1, 2, JobType.INDEX, null)
         queue.enqueue(UUID.randomUUID(), 2, null, JobType.DELETE, null)
         jdbc.update("UPDATE document SET deleted_at=clock_timestamp() WHERE id IN (1,2)")
-        if (open) whenever(breaker.admission()).thenReturn(ClaimAdmission.BLOCKED)
+        if (open) doReturn(ClaimAdmission.BLOCKED).whenever(breaker).admission()
         val before = row(job)
         assertThat(queue.claim(5, "other-1")!!.documentId).isEqualTo(2)
         assertThat(queue.claim(5, "other-2")).isNull()
@@ -591,7 +592,7 @@ class PublicationTransactionsIntegrationTest(
     fun `OPEN에서도 삭제 INDEX를 claim하고 실제 runner가 외부 호출 없이 skip 완료한다`(open: Boolean) {
         queue.enqueue(UUID.randomUUID(), 1, 1, JobType.INDEX, null)
         jdbc.update("UPDATE document SET deleted_at=clock_timestamp() WHERE id=1")
-        if (open) whenever(breaker.admission()).thenReturn(ClaimAdmission.BLOCKED)
+        if (open) doReturn(ClaimAdmission.BLOCKED).whenever(breaker).admission()
         val job = checkNotNull(queue.claim(5, "deleted-index-1"))
         val pipeline = PipelineFixture()
         pipeline.runner.run(job)
@@ -607,7 +608,7 @@ class PublicationTransactionsIntegrationTest(
 
     @ParameterizedTest @ValueSource(booleans = [false, true])
     fun `OPEN에서도 비활성 문서 DELETE runner는 처리기 성공을 DELETED 완료로 연결한다`(open: Boolean) {
-        if (open) whenever(breaker.admission()).thenReturn(ClaimAdmission.BLOCKED)
+        if (open) doReturn(ClaimAdmission.BLOCKED).whenever(breaker).admission()
         jdbc.update("UPDATE document SET deleted_at=clock_timestamp() WHERE id=1")
         queue.enqueue(UUID.randomUUID(), 1, null, JobType.DELETE, null)
         val job = checkNotNull(queue.claim(5, "delete-1"))
@@ -767,7 +768,7 @@ class PublicationTransactionsIntegrationTest(
 
     @Test fun `서킷 대기 중 커밋된 삭제는 현재 INDEX를 skip 완료하고 후속 DELETE가 정리한다`() {
         val job=claim()
-        whenever(breaker.acquire(any(),any())).thenReturn(CallAdmission.Blocked(Duration.ofSeconds(30)))
+        doReturn(CallAdmission.Blocked(Duration.ofSeconds(30))).whenever(breaker).acquire(any(),any())
         queue.enqueue(UUID.randomUUID(),1,null,JobType.DELETE,null)
         val waiting=CountDownLatch(1); val deleted=CountDownLatch(1)
         val pipeline=PipelineFixture(circuitWaiter=RetryWaiter {
@@ -812,8 +813,8 @@ class PublicationTransactionsIntegrationTest(
                 }
             }
         },DatabaseWaitProperties(),SimpleMeterRegistry())
-        whenever(breaker.acquire(any(),any())).thenThrow(org.springframework.dao.DataAccessResourceFailureException("acquire DB down"))
-            .thenReturn(CallAdmission.Allowed(CircuitPermit("embedding-api",0,"recovered")))
+        doThrow(org.springframework.dao.DataAccessResourceFailureException("acquire DB down"))
+            .doReturn(CallAdmission.Allowed(CircuitPermit("embedding-api",0,"recovered"))).whenever(breaker).acquire(any(),any())
         val pipeline=PipelineFixture(database=database)
         pipeline.runner.run(job)
         assertThat(waits).isEqualTo(1)
@@ -837,7 +838,7 @@ class PublicationTransactionsIntegrationTest(
         val job=queue.claim(5,"failing")!!
         val pipeline=PipelineFixture()
         whenever(pipeline.embedding.embed(any())).thenThrow(RuntimeException("503"))
-        doAnswer { whenever(breaker.admission()).thenReturn(ClaimAdmission.BLOCKED); null }
+        doAnswer { doReturn(ClaimAdmission.BLOCKED).whenever(breaker).admission(); null }
             .whenever(breaker).record(any(),any())
         pipeline.runner.run(job)
         assertThat(row(job)["status"]).isEqualTo(if(attempt==5) "FAILED" else "RETRY_WAIT")
