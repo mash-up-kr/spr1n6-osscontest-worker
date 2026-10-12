@@ -41,7 +41,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import javax.sql.DataSource
 
-/** A private schema exercises Worker SQL only; no Core migrations, recovery function or external APIs. */
+/** 전용 스키마에서 Worker SQL만 검증한다. Core 마이그레이션, 회수 함수, 외부 API는 쓰지 않는다. */
 @Tag("integration")
 @SpringJUnitConfig(JobFencingIntegrationTest.Config::class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -188,7 +188,7 @@ class JobFencingIntegrationTest(
         val runner: IndexingPipelineRunner = mock()
         doAnswer {
             val job = it.getArgument<ClaimedJob>(0)
-            // Outside a transaction, this JDBC read uses another connection and observes the committed claim.
+            // 트랜잭션 밖의 이 JDBC 조회는 다른 연결을 써서 커밋된 claim을 본다.
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse()
             val committed = row(job.token.jobId)
             assertThat(committed["status"]).isEqualTo("PROCESSING")
@@ -325,7 +325,7 @@ class JobFencingIntegrationTest(
         try {
             val result = pool.submit<ClaimedJob?> { queue.claimFixture(5) { error("Ineligible claim issued a token") } }
             check(selected.await(5, TimeUnit.SECONDS))
-            // Represent a concurrent legacy Job-only writer without invoking any recovery procedure.
+            // 회수 절차 없이 Job 행만 잠그는 과거 Writer의 동시 실행을 흉내 낸다.
             jdbc.update("UPDATE indexing_job SET status='COMPLETED' WHERE id=?", id)
             resume.countDown()
             assertThat(result.get(5, TimeUnit.SECONDS)).isNull()
@@ -383,7 +383,7 @@ class JobFencingIntegrationTest(
                 val pending = pool.submit<Int> { writes.updatePhase(job.token.jobId, "PARSING", job.token.workerId, job.token.epoch) }
                 waitForLock()
                 TransactionTemplate(transactions).execute {
-                    // This NOWAIT succeeds only if the waiting writer has not locked Job first.
+                    // 대기 중인 Writer가 Job을 먼저 잠그지 않았을 때만 이 NOWAIT가 성공한다.
                     jdbc.queryForList("SELECT id FROM indexing_job WHERE id=${job.token.jobId} FOR UPDATE NOWAIT")
                 }
                 waitUntil { jdbc.queryForObject("SELECT lease_until <= clock_timestamp() FROM indexing_job WHERE id=?", Boolean::class.java, job.token.jobId) == true }
@@ -414,8 +414,8 @@ class JobFencingIntegrationTest(
         doAnswer {
             val permitted = it.callRealMethod() as Boolean
             assertThat(permitted).isTrue()
-            // Deterministically move the lease past its deadline after the in-memory check.
-            // This changes no owner, epoch or status and invokes no recovery procedure.
+            // 메모리 확인 뒤 lease를 만료 시각 이후로 확실히 옮긴다.
+            // 소유자·epoch·상태는 바꾸지 않으며 회수 절차도 부르지 않는다.
             expire(job.token.jobId)
             permitted
         }.whenever(ownership).canWrite(any(), eq(job.token))

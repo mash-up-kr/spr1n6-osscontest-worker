@@ -19,7 +19,7 @@ val testToken = ExecutionToken(1, "worker", 1)
 
 private val fixtureClaimIds = AtomicLong()
 
-/** Fixture convenience only; every claim still uses the production API and a distinct owner. */
+/** fixture 편의 함수다. 모든 claim은 운영 API와 서로 다른 owner를 쓴다. */
 fun JobQueueStore.claimFixture(maxAttempts: Int = 5, prepared: (ExecutionToken) -> Unit = {}) =
     claim(maxAttempts, "fixture-${fixtureClaimIds.updateAndGet { Math.incrementExact(it) }}", prepared)
 
@@ -35,7 +35,7 @@ fun directDatabase(): DatabaseOperations = mock<DatabaseOperations>().apply {
     whenever(execute<Any?>(any(), any())).thenAnswer { it.getArgument<() -> Any?>(1)() }
 }
 
-/** Retry orchestration without opening even an embedded DB; not a commit simulation. */
+/** 내장 DB 없이 재시도 흐름만 실행한다. 커밋을 흉내 내지 않는다. */
 fun retryingDatabase(): DatabaseOperations = mock<DatabaseOperations>().apply {
     whenever(execute<Any?>(any(), any())).thenAnswer {
         val action = it.getArgument<() -> Any?>(1)
@@ -58,7 +58,7 @@ fun directExecution(): ExecutionOperations = mock<ExecutionOperations>().apply {
 fun lockedJob(job: IndexingJobEntity = processingJob(), documentEpoch: Long = job.executionEpoch,
               now: Instant = testNow) = LockedJobExecution(job, documentEpoch, now)
 
-/** Closed circuit for tests whose subject is the queue/pipeline, not shared circuit SQL. */
+/** 공유 breaker SQL이 아니라 큐·파이프라인을 검증하는 테스트용 닫힌 breaker다. */
 fun closedCircuitBreaker() = mock<com.osscontest.worker.indexing.queue.CircuitBreaker>().also { allowCircuitCalls(it) }
 
 fun allowCircuitCalls(breaker: com.osscontest.worker.indexing.queue.CircuitBreaker) {

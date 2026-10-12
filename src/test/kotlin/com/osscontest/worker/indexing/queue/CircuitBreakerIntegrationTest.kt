@@ -30,7 +30,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import javax.sql.DataSource
 
-/** Private PG schema, real Spring transaction proxies and the pending migration's circuit DDL. */
+/** 전용 PostgreSQL 스키마에서 실제 Spring 트랜잭션 프록시와 마이그레이션 제안의 breaker DDL로 검증한다. */
 @Tag("integration")
 @SpringJUnitConfig(CircuitBreakerIntegrationTest.Config::class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -214,7 +214,7 @@ class CircuitBreakerIntegrationTest(
         assertThat(store.snapshot(name).probeOwner).isEqualTo(jobs.single().token.workerId)
         assertThat(queue.claim(5,"extra")).isNull()
         queue.enqueue(UUID.randomUUID(), 8, null, JobType.DELETE, null)
-        // Earlier INDEX on document 8 still blocks its DELETE.
+        // 문서 8에 먼저 등록된 INDEX가 남아 있어 DELETE는 claim되지 않는다.
         assertThat(queue.claim(5,"delete-blocked")).isNull()
         jdbc.update("INSERT INTO document(id) VALUES(9),(10)")
         queue.enqueue(UUID.randomUUID(),9,null,JobType.DELETE,null)

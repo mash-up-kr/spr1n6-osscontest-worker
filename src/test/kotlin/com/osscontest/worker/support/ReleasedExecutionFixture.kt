@@ -5,7 +5,7 @@ import com.osscontest.worker.indexing.queue.ExecutionToken
 import org.springframework.jdbc.core.JdbcTemplate
 import java.time.Instant
 
-/** Prepare an externally released execution; this fixture does not implement recovery policy. */
+/** 외부에서 해제된 실행 상태를 만든다. 회수 정책은 구현하지 않는다. */
 fun seedReleasedExecution(jdbc: JdbcTemplate, token: ExecutionToken, status: IndexingJobStatus, retryAt: Instant? = null) {
     require(status == IndexingJobStatus.RETRY_WAIT || status == IndexingJobStatus.FAILED)
     require((status == IndexingJobStatus.RETRY_WAIT) == (retryAt != null))

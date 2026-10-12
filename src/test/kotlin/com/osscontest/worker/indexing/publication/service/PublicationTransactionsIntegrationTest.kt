@@ -62,7 +62,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import javax.sql.DataSource
 
-/** Worker-owned private schema. Uses the real JDBC writer and JPA repositories on one transaction manager. */
+/** Worker 전용 스키마에서 실제 JDBC Writer와 JPA 리포지토리를 한 트랜잭션 매니저로 검증한다. */
 @Tag("integration")
 @SpringJUnitConfig(PublicationTransactionsIntegrationTest.Config::class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -102,7 +102,7 @@ class PublicationTransactionsIntegrationTest(
             val base = DriverManagerDataSource(url, user, password)
             assertDedicatedIntegrationDatabase(JdbcTemplate(base))
             JdbcTemplate(base).execute("CREATE SCHEMA worker_c3_publication")
-            // pgvector is a prerequisite of the dedicated DB, not created by this fixture.
+            // pgvector는 전용 DB의 사전 조건이며 이 fixture가 만들지 않는다.
             return CommitResponseLossDataSource(DriverManagerDataSource(url +
                 (if ('?' in url) "&" else "?") + "currentSchema=worker_c3_publication,public", user, password))
         }
@@ -253,7 +253,7 @@ class PublicationTransactionsIntegrationTest(
         assertThat(row(job)["worker_id"]).isNull()
         assertThat(row(job)["lease_until"]).isNull()
         assertThat(jdbc.queryForObject("SELECT count(*) FROM document_chunk", Int::class.java)).isZero()
-        publish(job) // receipt acknowledges the same result, with no writes
+        publish(job) // 같은 결과는 쓰기 없이 완료로 확인
         verify(writer, never()).upsertAll(any())
     }
 
@@ -606,7 +606,7 @@ class PublicationTransactionsIntegrationTest(
         queue.enqueue(UUID.randomUUID(), 1, null, JobType.DELETE, null)
         val job = checkNotNull(queue.claim(5, "delete-1"))
         val handler: DocumentDeletionService = mock()
-        // Only model the handler's successful completion contract, never execute its internal cleanup.
+        // handler의 정상 완료 계약만 흉내 내고 내부 정리는 실행하지 않는다.
         doAnswer { check(jobs.complete(job.token.jobId, job.token.workerId, job.token.epoch) == 1); null }
             .whenever(handler).delete(job)
         val pipeline = PipelineFixture(deletion = handler)
@@ -858,7 +858,7 @@ class PublicationTransactionsIntegrationTest(
         }.whenever(jobs).complete(any(),any(),any(),any())
         val worker=DbJobWorker(QueueProperties(concurrency=1,pollInterval=Duration.ofDays(1)),pipeline.database,
             queue,pipeline.runner,ThreadSleepQueueLoopWaiter(),5,ExecutionResults())
-        // Feed the already committed first claim, then resume the real queue entry point.
+        // 이미 커밋된 첫 claim을 넘긴 뒤 실제 큐 진입점으로 이어 간다.
         whenever(store.claim(eq(5),any(),any())).thenAnswer {
             if(row(job)["status"]=="PROCESSING") job else it.callRealMethod()
         }
@@ -923,7 +923,7 @@ class PublicationTransactionsIntegrationTest(
         assertThat(databaseState()).isEqualTo(before)
     }
 
-    /** Actual Worker/runner/embedding orchestration and Spring services; external work stays controlled. */
+    /** 실제 Worker·runner·임베딩 흐름과 Spring 서비스를 쓰고 외부 작업만 테스트가 제어한다. */
     private inner class PipelineFixture(
         val database: DatabaseOperations = DatabaseOperations(jdbc, RetryWaiter {}, DatabaseWaitProperties(), SimpleMeterRegistry()),
         deletion: DocumentDeletionService = mock(),

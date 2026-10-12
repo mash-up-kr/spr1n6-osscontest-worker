@@ -205,7 +205,7 @@ class IndexingPipelineRunnerIntegrationTest(
             if (index < count - 1) {
                 assertThat(saved.status).isEqualTo(IndexingJobStatus.RETRY_WAIT)
                 assertThat(saved.outcome).isEqualTo("RETRY_SCHEDULED")
-                // Set a deterministic future deadline before checking eligibility, then make it due.
+                // 대상 여부를 확인하기 전에 미래 재시도 시각을 고정하고, 그다음 시각을 지나게 만든다.
                 jdbcTemplate.update("UPDATE indexing_job SET next_retry_at=clock_timestamp()+INTERVAL '1 minute' WHERE id=?", saved.id)
                 assertThat(queue.claimFixture(5) {}).isNull()
                 jdbcTemplate.update("UPDATE indexing_job SET next_retry_at=clock_timestamp()-INTERVAL '1 second' WHERE id=?", saved.id)
