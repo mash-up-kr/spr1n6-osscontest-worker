@@ -46,13 +46,13 @@ class IndexingErrorClassifierTest {
 
     @Test
     fun `파싱 timeout 포화와 알 수 없는 IO 오류는 재시도 가능한 오류다`() {
-        val errors = listOf(
-            com.osscontest.worker.indexing.parsing.ParseTimeoutException("text/plain", java.time.Duration.ofSeconds(1)),
-            com.osscontest.worker.indexing.parsing.ParseCapacityException(IllegalStateException("full")),
-            java.io.IOException("temporary failure"),
+        val cases = listOf(
+            com.osscontest.worker.indexing.parsing.ParseTimeoutException("text/plain", java.time.Duration.ofSeconds(1)) to "PARSE_TIMEOUT",
+            com.osscontest.worker.indexing.parsing.ParseCapacityException(IllegalStateException("full")) to "PARSE_CAPACITY",
+            java.io.IOException("temporary failure") to "IOException",
         )
-        errors.forEach {
-            assertThat(IndexingErrorClassifier.classify(it)).isEqualTo(IndexingError(it::class.simpleName!!, retryable = true))
+        cases.forEach { (error, code) ->
+            assertThat(IndexingErrorClassifier.classify(error)).isEqualTo(IndexingError(code, retryable = true))
         }
     }
 }

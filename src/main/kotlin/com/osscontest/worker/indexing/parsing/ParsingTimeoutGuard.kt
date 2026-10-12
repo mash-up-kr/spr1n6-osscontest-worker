@@ -91,4 +91,6 @@ class ParsingTimeoutGuard(
     }
 }
 
-class ParseCapacityException(cause: Throwable) : RuntimeException("Parser capacity exhausted", cause)
+class ParseCapacityException(cause: Throwable) : RuntimeException("Parser capacity exhausted", cause) {
+    val code: String = "PARSE_CAPACITY"
+}

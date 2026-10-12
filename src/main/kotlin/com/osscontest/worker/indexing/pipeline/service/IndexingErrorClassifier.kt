@@ -10,6 +10,8 @@ import com.osscontest.worker.indexing.embedding.service.EmbeddingConfigurationEx
 import com.osscontest.worker.indexing.embedding.service.EmbeddingRequestRejectedException
 import com.osscontest.worker.indexing.embedding.service.InvalidEmbeddingException
 import com.osscontest.worker.indexing.parsing.CorruptedFileException
+import com.osscontest.worker.indexing.parsing.ParseCapacityException
+import com.osscontest.worker.indexing.parsing.ParseTimeoutException
 import com.osscontest.worker.indexing.parsing.UnsupportedMimeTypeException
 import com.osscontest.worker.indexing.retrieval.ContentIntegrityException
 import com.osscontest.worker.indexing.retrieval.FileTooLargeException
@@ -28,6 +30,9 @@ internal object IndexingErrorClassifier {
             is EmbeddingRateLimitedException -> IndexingError("RATE_LIMITED", retryable = true)
             is EmbeddingQuotaExceededException -> IndexingError("EMBEDDING_QUOTA_EXCEEDED", retryable = true)
             is EmbeddingConfigurationException -> IndexingError(error.code, retryable = true)
+            // 파싱 시간 초과와 파서 포화는 같은 입력이라도 다른 시점에는 성공할 수 있다.
+            is ParseTimeoutException -> IndexingError(error.code, retryable = true)
+            is ParseCapacityException -> IndexingError(error.code, retryable = true)
             is InvalidJobException -> permanent(error.code)
             is ContentIntegrityException -> permanent(error.code)
             is EmptyExtractionException -> permanent(error.code)
