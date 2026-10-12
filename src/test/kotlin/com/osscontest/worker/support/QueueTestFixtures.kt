@@ -58,8 +58,16 @@ fun directExecution(): ExecutionOperations = mock<ExecutionOperations>().apply {
 fun lockedJob(job: IndexingJobEntity = processingJob(), documentEpoch: Long = job.executionEpoch,
               now: Instant = testNow) = LockedJobExecution(job, documentEpoch, now)
 
-/** Closed breaker without DB reads for fixtures testing other Worker contracts. */
-fun closedCircuitBreaker() = mock<com.osscontest.worker.indexing.queue.CircuitBreaker>().apply {
-    whenever(admission()).thenReturn(com.osscontest.worker.indexing.queue.ClaimAdmission.NORMAL)
-    whenever(acquire()).thenReturn(java.time.Duration.ZERO)
+/** Closed circuit for tests whose subject is the queue/pipeline, not shared circuit SQL. */
+fun closedCircuitBreaker() = mock<com.osscontest.worker.indexing.queue.CircuitBreaker>().also { allowCircuitCalls(it) }
+
+fun allowCircuitCalls(breaker: com.osscontest.worker.indexing.queue.CircuitBreaker) {
+    whenever(breaker.admission()).thenReturn(com.osscontest.worker.indexing.queue.ClaimAdmission.NORMAL)
+    whenever(breaker.lockForClaim()).thenReturn(com.osscontest.worker.indexing.queue.BreakerSnapshot(
+        com.osscontest.worker.indexing.queue.BreakerState.CLOSED, null, testNow))
+    whenever(breaker.acquire(any(), any())).thenAnswer {
+        com.osscontest.worker.indexing.queue.CallAdmission.Allowed(com.osscontest.worker.indexing.queue.CircuitPermit(
+            "embedding-api", 0, it.getArgument<String>(1)))
+    }
+    whenever(breaker.valid(any())).thenReturn(true)
 }

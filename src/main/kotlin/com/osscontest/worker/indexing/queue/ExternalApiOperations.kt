@@ -1,16 +1,16 @@
 package com.osscontest.worker.indexing.queue
 
 import com.osscontest.worker.indexing.embedding.service.EmbeddingRateLimitedException
+import com.osscontest.worker.indexing.embedding.service.EmbeddingQuotaExceededException
+import com.osscontest.worker.indexing.embedding.service.EmbeddingConfigurationException
 import com.osscontest.worker.indexing.pipeline.service.IndexingErrorClassifier
 import com.osscontest.worker.indexing.pipeline.service.RetryWaiter
+import com.osscontest.worker.indexing.publication.service.IndexingPublicationService
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
-import java.time.Duration
+import java.util.concurrent.atomic.AtomicLong
 
-/**
- * 임베딩 API 호출 경계. 호출 전에 DB 가용성·실행권·breaker를 확인한다.
- * breaker를 연 실패는 삼키고 열려 있는 동안 기다린 뒤 같은 [action]을 다시 실행하므로, [action]은 재실행해도 안전해야 한다.
- */
+/** Retains actual responses/errors through circuit DB waits; never retries an actual API failure inline. */
 @Component
 class ExternalApiOperations(
     private val execution: ExecutionOperations,
@@ -18,40 +18,59 @@ class ExternalApiOperations(
     private val breaker: CircuitBreaker,
     private val waiter: RetryWaiter,
     private val properties: DatabaseWaitProperties,
+    private val publication: IndexingPublicationService,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
+    private val callIds = AtomicLong()
 
-    fun <T> execute(token: ExecutionToken, action: () -> T): T {
-        while (true) {
-            database.awaitAvailable()
-            execution.checkpoint(token)
-            // OPEN이면 호출하지 않고 기다린다. 실패가 만들어지지 않으므로 시도 횟수가 소비되지 않는다.
-            val breakerWait = database.execute { breaker.acquire() }
-            if (breakerWait.isPositive) {
-                // DB 대기와 같은 확인 간격으로 끊는다. 그 사이 실행권 상실·종료 신호를 놓치지 않는다.
-                waiter.waitFor(minOf(breakerWait, properties.checkInterval))
-                continue
-            }
-            try {
-                val result = action()
-                database.execute { breaker.recordSuccess() }
+    fun <T> execute(token: ExecutionToken, attempt: Int = 1, action: () -> T): T {
+        val callId = "${token.workerId}-${callIds.updateAndGet { Math.incrementExact(it) }}"
+        var recorded = false
+        try {
+            while (true) {
+                database.awaitAvailable()
+                checkpoint(token)
+                val admission = database.execute(afterRecovery = { checkpoint(token) }) { breaker.acquire(token, callId) }
+                if (admission is CallAdmission.Blocked) {
+                    waiter.waitFor(minOf(admission.delay, properties.checkInterval))
+                    continue
+                }
+                val permit = (admission as CallAdmission.Allowed).permit
+                checkpoint(token)
+                if (!database.execute(afterRecovery = { checkpoint(token) }) { breaker.valid(permit) }) continue
+                // Only exceptions from the actual external action enter provider error classification.
+                val result = try { action() } catch (error: Exception) {
+                    if (error is InterruptedException || Thread.currentThread().isInterrupted ||
+                        error is ExecutionLostException || error is ExecutionCompletedException || error is LeaseExpiredException) throw error
+                    val outcome = when (error) {
+                        is EmbeddingRateLimitedException -> CircuitOutcome.RATE_LIMIT
+                        is EmbeddingQuotaExceededException, is EmbeddingConfigurationException -> CircuitOutcome.CONFIGURATION
+                        else -> if (IndexingErrorClassifier.classify(error).retryable) CircuitOutcome.FAILURE else CircuitOutcome.PERMANENT
+                    }
+                    val record = CircuitResult(outcome, attempt, (error as? EmbeddingRateLimitedException)?.retryAfter)
+                    if (outcome == CircuitOutcome.CONFIGURATION || outcome == CircuitOutcome.PERMANENT) {
+                        log.error("EMBEDDING_CALL_REJECTED jobId={} cause={} message={}", token.jobId,
+                            IndexingErrorClassifier.classify(error).code, error.message)
+                    }
+                    database.execute { breaker.record(permit, record) }
+                    recorded = true
+                    throw error
+                }
+                val record = CircuitResult(CircuitOutcome.SUCCESS)
+                database.execute { breaker.record(permit, record) }
+                recorded = true
                 return result
-            } catch (error: Exception) {
-                if (!isBreakerFailure(error)) throw error
-                // 열렸다면 이 실패를 삼키고 위로 돌아가 열려 있는 동안 기다린 뒤 같은 호출을 재시도한다.
-                if (!database.execute { breaker.recordTransientFailure() }) throw error
-                log.warn("EMBEDDING_CALL_DEFERRED_BY_CIRCUIT_BREAKER jobId={} error={}", token.jobId, error.javaClass.simpleName)
+            }
+        } finally {
+            if (!recorded) {
+                try { database.execute { breaker.release(token, callId) } }
+                catch (_: InterruptedException) { Thread.currentThread().interrupt() }
             }
         }
     }
 
-    /**
-     * 재시도로 풀릴 수 있는 임베딩 호출 실패만 센다. 실행권 상실·중단·Rate Limit은 API 장애가 아니다.
-     * 결제 한도 초과(`EmbeddingQuotaExceededException`)는 분류기에서 일시 오류이므로 여기서 센다.
-     */
-    private fun isBreakerFailure(error: Exception): Boolean =
-        error !is InterruptedException && !Thread.currentThread().isInterrupted &&
-            error !is ExecutionLostException && error !is ExecutionCompletedException && error !is LeaseExpiredException &&
-            error !is EmbeddingRateLimitedException &&
-            IndexingErrorClassifier.classify(error).retryable
+    private fun checkpoint(token: ExecutionToken) {
+        execution.checkpoint(token)
+        if (execution.database(token) { publication.preflight(token) }) throw ExecutionCompletedException(token)
+    }
 }

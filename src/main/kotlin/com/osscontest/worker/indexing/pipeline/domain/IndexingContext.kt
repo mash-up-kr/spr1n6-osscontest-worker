@@ -9,4 +9,5 @@ data class IndexingContext(
     val versionNo: Long,
     val extractedMetadata: Map<String, Any>?,
     val executionToken: ExecutionToken,
+    val attemptCount: Int = 1,
 )

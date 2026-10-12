@@ -15,6 +15,7 @@ import com.osscontest.worker.indexing.queue.JobOutcome
 import com.osscontest.worker.indexing.queue.JobOwnershipGuard
 import com.osscontest.worker.indexing.queue.JobType
 import com.osscontest.worker.indexing.queue.LeaseExpiredException
+import com.osscontest.worker.indexing.queue.LockedJobExecution
 import com.osscontest.worker.indexing.queue.isCompletedExecution
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Isolation
@@ -38,10 +39,19 @@ class IndexingPublicationService(
         val job = execution.job
         check(job.jobType == claim.type && job.documentId == claim.documentId &&
             job.documentVersionId == claim.documentVersionId)
-        if (job.isCompletedExecution(claim.token)) return true
-        ownership.requireProcessing(execution, claim.token)
-        if (!state.document(claim.documentId).deleted) return false
-        complete(claim.token, JobOutcome.SKIPPED_DOCUMENT_DELETED)
+        return finishDeleted(execution, claim.token)
+    }
+
+    /** Reused during circuit waits, under the same document -> Job locks and write guard. */
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    fun preflight(token: ExecutionToken): Boolean = finishDeleted(ownership.lockForResult(token), token)
+
+    private fun finishDeleted(execution: LockedJobExecution, token: ExecutionToken): Boolean {
+        check(execution.job.jobType == JobType.INDEX)
+        if (execution.job.isCompletedExecution(token)) return true
+        ownership.requireProcessing(execution, token)
+        if (!state.document(execution.job.documentId).deleted) return false
+        complete(token, JobOutcome.SKIPPED_DOCUMENT_DELETED)
         return true
     }
 

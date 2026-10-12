@@ -5,7 +5,6 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.Tag
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DataSourceTransactionManager
 import org.springframework.jdbc.datasource.DriverManagerDataSource
@@ -23,7 +22,6 @@ import java.util.concurrent.atomic.AtomicInteger
 class DatabaseOperationsTest {
     private val source = DriverManagerDataSource("jdbc:h2:mem:wait-test;DB_CLOSE_DELAY=-1", "sa", "")
 
-    @Tag("integration")
     @Test
     fun `DB 장애 대기 구간에는 실패 트랜잭션의 커넥션이 반환돼 있다`() {
         val openConnections = AtomicInteger()

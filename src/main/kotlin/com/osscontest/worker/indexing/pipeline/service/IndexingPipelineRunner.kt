@@ -75,7 +75,7 @@ class IndexingPipelineRunner(
                     }
                     if (version.documentId != job.documentId) throw InvalidJobException("DOCUMENT_MISMATCH", "Version mismatch")
                     attempt.process(job.token.jobId, job.token, job.documentId, version,
-                        FaultInjectionContext(job.sourceEventId, job.token)) {}
+                        FaultInjectionContext(job.sourceEventId, job.token), job.attemptCount) {}
                 }
                 log.info("INDEXING_JOB_COMPLETED jobId={} workerId={} epoch={}", job.token.jobId, job.token.workerId, job.token.epoch)
                 return

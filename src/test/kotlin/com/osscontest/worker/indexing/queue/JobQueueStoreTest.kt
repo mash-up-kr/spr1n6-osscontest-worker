@@ -52,8 +52,8 @@ class JobQueueStoreTest {
         whenever(claims.claim(any(), any(), any(), any(), eq(allowLlm), any())).thenReturn(ClaimAttempt.Empty)
         assertThat(store.claim(5, "instance-1")).isNull()
         verify(claims).claim(eq("instance-1"), eq(90_000L), eq(5), eq(emptySet()), eq(allowLlm), any())
-        verify(breaker, never()).acquire()
-        verify(breaker, never()).recordSuccess()
+        verify(breaker, never()).acquire(any(), any())
+        verify(breaker, never()).record(any(), any())
     }
 
     @Test

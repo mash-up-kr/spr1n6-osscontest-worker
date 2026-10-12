@@ -45,6 +45,7 @@ internal class IndexingAttemptProcessor(
         documentId: Long,
         documentVersion: DocumentVersionEntity,
         faultInjectionContext: FaultInjectionContext,
+        attemptCount: Int = 1,
         onStageStarted: (String) -> Unit,
     ) {
         if (documentVersion.fileSize > maxFileSizeBytes) {
@@ -126,6 +127,7 @@ internal class IndexingAttemptProcessor(
                     versionNo = documentVersion.versionNo,
                     extractedMetadata = null,
                     executionToken = token,
+                    attemptCount = attemptCount,
                 )
 
             onStageStarted("EMBEDDING")

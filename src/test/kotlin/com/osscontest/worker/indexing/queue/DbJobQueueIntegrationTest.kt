@@ -40,7 +40,7 @@ class DbJobQueueIntegrationTest(
     @BeforeEach
     fun fixture() {
         whenever(breaker.admission()).thenReturn(ClaimAdmission.NORMAL)
-        whenever(breaker.acquire()).thenReturn(java.time.Duration.ZERO)
+        com.osscontest.worker.support.allowCircuitCalls(breaker)
         assertDedicatedIntegrationDatabase(jdbc)
         jdbc.update("INSERT INTO tenant (id, name) VALUES (800001, 'queue-integration')")
         for (id in 800001L..800002L) {

@@ -64,8 +64,8 @@ class DbJobWorkerTest {
                 verify(h.runner).run(deletedIndex)
                 verify(claims, times(2)).claim(any(), any(), any(), any(), eq(false), any())
                 verify(claims, never()).claim(any(), any(), any(), any(), eq(true), any())
-                verify(breaker, never()).acquire()
-                verify(breaker, never()).recordSuccess()
+                verify(breaker, never()).acquire(any(), any())
+                verify(breaker, never()).record(any(), any())
             } finally { h.worker.stop(); finish.countDown() }
         }
     }

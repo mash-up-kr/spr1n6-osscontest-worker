@@ -44,6 +44,8 @@ indexing:
     failure-threshold: ${INDEXING_CIRCUIT_BREAKER_FAILURE_THRESHOLD:5}
     # 열린 뒤 이 시간이 지나면 한 Worker가 시험 호출을 한다.
     open-duration: ${INDEXING_CIRCUIT_BREAKER_OPEN_DURATION:PT60S}
+    # Actual probe TTL; must exceed spring.ai.openai.embedding.timeout (default 60s).
+    call-duration: ${INDEXING_CIRCUIT_BREAKER_CALL_DURATION:PT90S}
   database:
     check-interval: ${INDEXING_DB_CHECK_INTERVAL:PT5S}
     query-timeout: ${INDEXING_DB_QUERY_TIMEOUT:PT3S}

@@ -1,79 +1,59 @@
 package com.osscontest.worker.indexing.queue
 
+import com.osscontest.worker.support.testNow
+import com.osscontest.worker.support.testToken
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.*
 import java.time.Duration
-import java.time.Instant
 
 class CircuitBreakerTest {
-    private val now = Instant.parse("2026-10-11T00:00:00Z")
     private val store: CircuitBreakerStore = mock()
-    private val properties = CircuitBreakerProperties(failureThreshold = 5, openDuration = Duration.ofSeconds(60))
-    private val breaker = CircuitBreaker(store, properties, SimpleMeterRegistry())
-
-    private fun snapshot(state: BreakerState, openedUntil: Instant? = null) = BreakerSnapshot(state, openedUntil, now)
-
-    @Test
-    fun `CLOSED면 기다리지 않고 claim도 정상이다`() {
-        whenever(store.snapshot("embedding-api")).thenReturn(snapshot(BreakerState.CLOSED))
-        assertThat(breaker.acquire()).isEqualTo(Duration.ZERO)
+    private val breaker = CircuitBreaker(store, CircuitBreakerProperties(), SimpleMeterRegistry())
+    @Test fun `CLOSED면 claim 정상이며 호출권을 요청 ID와 함께 저장소에서 얻는다`() {
+        whenever(store.snapshot("embedding-api")).thenReturn(BreakerSnapshot(BreakerState.CLOSED, null, testNow))
+        val permission = CallAdmission.Allowed(CircuitPermit("embedding-api", 0, "1"))
+        whenever(store.acquire("embedding-api", testToken, "1", 90_000)).thenReturn(permission)
         assertThat(breaker.admission()).isEqualTo(ClaimAdmission.NORMAL)
+        assertThat(breaker.acquire(testToken, "1")).isEqualTo(permission)
     }
-
-    @Test
-    fun `행이 없으면 breaker 없이 동작한다`() {
-        whenever(store.snapshot("embedding-api")).thenReturn(null)
-        assertThat(breaker.acquire()).isEqualTo(Duration.ZERO)
-        assertThat(breaker.admission()).isEqualTo(ClaimAdmission.NORMAL)
-        whenever(store.recordFailure(any(), any(), any())).thenReturn(null)
-        assertThat(breaker.recordTransientFailure()).isFalse()
+    @Test fun `필수 서킷 행이 없으면 서킷 없이 실행하지 않는다`() {
+        whenever(store.snapshot("embedding-api")).thenThrow(IllegalStateException("missing"))
+        assertThatThrownBy { breaker.admission() }.isInstanceOf(IllegalStateException::class.java)
     }
-
-    @Test
-    fun `OPEN 유지 시간이 남았으면 남은 시간만큼 기다리고 claim을 막는다`() {
-        whenever(store.snapshot("embedding-api")).thenReturn(snapshot(BreakerState.OPEN, now.plusSeconds(20)))
-        assertThat(breaker.acquire()).isEqualTo(Duration.ofSeconds(20))
-        assertThat(breaker.admission()).isEqualTo(ClaimAdmission.BLOCKED)
-        verify(store, never()).tryStartProbe(any(), any())
+    @Test fun `OPEN과 HALF_OPEN 유효 시간에는 새 활성 INDEX claim을 막고 만료 뒤 LIMITED다`() {
+        for (state in listOf(BreakerState.OPEN, BreakerState.HALF_OPEN)) {
+            whenever(store.snapshot("embedding-api")).thenReturn(BreakerSnapshot(state, testNow.plusSeconds(30), testNow,
+                probeUntil = testNow.plusSeconds(30)))
+            assertThat(breaker.admission()).isEqualTo(ClaimAdmission.BLOCKED)
+            whenever(store.snapshot("embedding-api")).thenReturn(BreakerSnapshot(state, testNow.minusSeconds(1), testNow,
+                probeUntil = testNow.minusSeconds(1)))
+            assertThat(breaker.admission()).isEqualTo(ClaimAdmission.LIMITED)
+        }
     }
-
-    @Test
-    fun `HALF_OPEN이고 시험 호출 시간이 남았으면 다른 호출은 기다린다`() {
-        whenever(store.snapshot("embedding-api")).thenReturn(snapshot(BreakerState.HALF_OPEN, now.plusSeconds(30)))
-        assertThat(breaker.acquire()).isEqualTo(Duration.ofSeconds(30))
-        assertThat(breaker.admission()).isEqualTo(ClaimAdmission.BLOCKED)
+    @Test fun `호출권과 결과는 같은 세대 식별자로 저장소에 전달한다`() {
+        val permit = CircuitPermit("embedding-api", 5, "7", testToken.workerId)
+        val result = CircuitResult(CircuitOutcome.FAILURE)
+        whenever(store.record(eq(permit), eq(result), eq(5), eq(60_000L), any())).thenReturn(BreakerState.OPEN)
+        breaker.record(permit, result)
+        verify(store).record(eq(permit), eq(result), eq(5), eq(60_000L), any())
     }
-
-    @Test
-    fun `유지 시간이 지났고 시험 호출권을 얻으면 바로 호출한다`() {
-        whenever(store.snapshot("embedding-api")).thenReturn(snapshot(BreakerState.OPEN, now.minusSeconds(1)))
-        whenever(store.tryStartProbe("embedding-api", 60_000)).thenReturn(true)
-        assertThat(breaker.acquire()).isEqualTo(Duration.ZERO)
-        assertThat(breaker.admission()).describedAs("시험 호출 기한이 되어 실제 호출 직전 시험권을 얻을 수 있다")
-            .isEqualTo(ClaimAdmission.LIMITED)
+    @Test fun `공유 시험의 429 시각은 결정적 지터와 유효한 RetryAfter 중 늦은 값을 사용한다`() {
+        val actual=CircuitBreaker(store,CircuitBreakerProperties(),SimpleMeterRegistry(),
+            com.osscontest.worker.indexing.pipeline.service.RetryPolicy { 0.8 })
+        for((header,seconds) in listOf(null to 48L,"7" to 48L,"120" to 120L,"invalid" to 48L)) {
+            val result=CircuitResult(CircuitOutcome.RATE_LIMIT,2,header)
+            whenever(store.record(any(),eq(result),any(),any(),any())).thenAnswer {
+                val deadline=it.getArgument<(java.time.Instant)->java.time.Instant>(4)(testNow)
+                assertThat(deadline).isEqualTo(testNow.plusSeconds(seconds)); BreakerState.OPEN
+            }
+            actual.record(CircuitPermit("embedding-api",1,"rate-$header",testToken.workerId),result)
+        }
     }
-
-    @Test
-    fun `시험 호출권을 얻지 못하면 기다린다`() {
-        whenever(store.snapshot("embedding-api")).thenReturn(snapshot(BreakerState.OPEN, now.minusSeconds(1)))
-        whenever(store.tryStartProbe("embedding-api", 60_000)).thenReturn(false)
-        assertThat(breaker.acquire()).isEqualTo(Duration.ofSeconds(60))
-    }
-
-    @Test
-    fun `일시 실패 기록은 OPEN이 되었을 때만 true를 돌려준다`() {
-        whenever(store.recordFailure("embedding-api", 5, 60_000))
-            .thenReturn(BreakerState.CLOSED).thenReturn(BreakerState.OPEN)
-        assertThat(breaker.recordTransientFailure()).isFalse()
-        assertThat(breaker.recordTransientFailure()).isTrue()
-    }
-
-    @Test
-    fun `성공 기록은 저장소에 위임한다`() {
-        whenever(store.recordSuccess("embedding-api")).thenReturn(1)
-        breaker.recordSuccess()
-        verify(store).recordSuccess("embedding-api")
+    @Test fun `호출 TTL은 임베딩 timeout보다 길어야 한다`() {
+        assertThatThrownBy { CircuitBreaker(store, CircuitBreakerProperties(callDuration = Duration.ofSeconds(60)), SimpleMeterRegistry()) }
+            .isInstanceOf(IllegalArgumentException::class.java)
     }
 }

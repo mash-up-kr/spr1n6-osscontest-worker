@@ -37,7 +37,7 @@ class EmbeddingIndexingProcessorTest {
     private val embeddingUseCase: EmbeddingUseCase = mock()
     private val publicationService: IndexingPublicationService = mock()
     private val externalApi: ExternalApiOperations = mock<ExternalApiOperations>().apply {
-        whenever(execute<Any?>(any(), any())).thenAnswer { it.getArgument<() -> Any?>(1)() }
+        whenever(execute<Any?>(any(), any(), any())).thenAnswer { it.getArgument<() -> Any?>(2)() }
     }
     private val processor =
         EmbeddingIndexingProcessor(
@@ -144,14 +144,14 @@ class EmbeddingIndexingProcessorTest {
             null
         }.whenever(database).awaitAvailable()
         doAnswer {
-            if (checkpoints.incrementAndGet() == 2 && lost) throw ExecutionLostException(testToken)
+            if (checkpoints.incrementAndGet() == 3 && lost) throw ExecutionLostException(testToken)
             null
         }.whenever(execution).checkpoint(testToken)
         whenever(embeddingUseCase.embed(listOf("content-0"))).thenReturn(listOf(embedding(0.1f)))
         whenever(embeddingUseCase.embed(listOf("content-1"))).thenReturn(listOf(embedding(0.2f)))
         whenever(publicationService.publish(any(), any())).thenReturn(com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus.COMPLETED)
         val actual = EmbeddingIndexingProcessor(embeddingUseCase, publicationService, NoriTokenizer(),
-            Clock.systemUTC(), 100, ExternalApiOperations(execution, database, closedCircuitBreaker(), com.osscontest.worker.indexing.pipeline.service.RetryWaiter {}, DatabaseWaitProperties()), execution)
+            Clock.systemUTC(), 100, ExternalApiOperations(execution, database, closedCircuitBreaker(), com.osscontest.worker.indexing.pipeline.service.RetryWaiter {}, DatabaseWaitProperties(), publicationService), execution)
         val pool = Executors.newSingleThreadExecutor()
         try {
             val running = pool.submit {
@@ -160,13 +160,13 @@ class EmbeddingIndexingProcessorTest {
             check(waiting.await(3, TimeUnit.SECONDS))
             verify(embeddingUseCase, times(1)).embed(listOf("content-0"))
             verify(embeddingUseCase, never()).embed(listOf("content-1"))
-            verifyNoInteractions(publicationService)
-            assertThat(checkpoints.get()).isEqualTo(1)
+            verify(publicationService, never()).publish(any(), any())
+            assertThat(checkpoints.get()).isEqualTo(2)
             recover.countDown()
             if (lost) {
                 assertThatThrownBy { running.get(3, TimeUnit.SECONDS) }.hasCauseInstanceOf(ExecutionLostException::class.java)
                 verify(embeddingUseCase, never()).embed(listOf("content-1"))
-                verifyNoInteractions(publicationService)
+                verify(publicationService, never()).publish(any(), any())
             } else {
                 running.get(3, TimeUnit.SECONDS)
                 verify(embeddingUseCase, times(1)).embed(listOf("content-1"))
@@ -174,7 +174,7 @@ class EmbeddingIndexingProcessorTest {
                 verify(publicationService).publish(any(), results.capture())
                 assertThat(results.firstValue.map { it.embedding[0] }).containsExactly(0.1f, 0.2f)
             }
-            assertThat(checkpoints.get()).isEqualTo(2)
+            assertThat(checkpoints.get()).isEqualTo(if (lost) 3 else 4)
             verify(embeddingUseCase, times(1)).embed(listOf("content-0"))
         } finally { recover.countDown(); pool.shutdownNow() }
     }

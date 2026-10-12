@@ -1,116 +1,317 @@
 package com.osscontest.worker.indexing.queue
 
-import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
+import com.osscontest.worker.indexing.pipeline.service.RetryPolicy
+import com.osscontest.worker.indexing.publication.repository.IndexingJobWritesImpl
+import com.osscontest.worker.support.*
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
-import org.junit.jupiter.api.BeforeEach
-import org.junit.jupiter.api.Tag
-import org.junit.jupiter.api.Test
-import org.springframework.boot.test.context.SpringBootTest
+import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.jupiter.api.*
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.EnumSource
+import org.mockito.kotlin.*
+import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Configuration
+import org.springframework.context.annotation.Import
+import org.springframework.core.io.ClassPathResource
 import org.springframework.jdbc.core.JdbcTemplate
-import org.springframework.test.context.ActiveProfiles
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
+import org.springframework.jdbc.datasource.DriverManagerDataSource
+import org.springframework.jdbc.datasource.DataSourceTransactionManager
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean
+import org.springframework.test.context.junit.jupiter.SpringJUnitConfig
+import org.springframework.transaction.PlatformTransactionManager
+import org.springframework.transaction.annotation.EnableTransactionManagement
+import org.springframework.transaction.support.TransactionTemplate
+import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import javax.sql.DataSource
 
+/** Private PG schema, real Spring transaction proxies and the pending migration's circuit DDL. */
 @Tag("integration")
-@SpringBootTest(properties = ["indexing.queue.enabled=false"])
-@ActiveProfiles("integration")
+@SpringJUnitConfig(CircuitBreakerIntegrationTest.Config::class)
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CircuitBreakerIntegrationTest(
-    private val store: CircuitBreakerStore,
-    private val jdbc: JdbcTemplate,
+    private val store: CircuitBreakerStore, private val breaker: CircuitBreaker,
+    private val queue: JobQueueStore, private val jdbc: JdbcTemplate,
+    private val source: CommitResponseLossDataSource, private val tx: PlatformTransactionManager,
 ) {
+    @MockitoSpyBean private lateinit var locks: JobExecutionLocks
+    @MockitoSpyBean private lateinit var circuitStore: CircuitBreakerStore
     private val name = "embedding-api"
-    private val openMillis = 60_000L
-
-    @BeforeEach
-    fun reset() {
-        assertDedicatedIntegrationDatabase(jdbc)
-        val updated = jdbc.update(
-            "UPDATE external_circuit_breaker SET state = 'CLOSED', consecutive_failures = 0, opened_until = NULL WHERE name = ?", name)
-        assertThat(updated).describedAs("embedding-api 행이 있어야 한다").isEqualTo(1)
-    }
-
-    private fun failures(count: Int) = (1..count).map { store.recordFailure(name, 5, openMillis) }
-
-    @Test
-    fun `임계치 직전까지는 CLOSED로 남고 임계치에 도달하면 OPEN이 된다`() {
-        assertThat(failures(4)).containsOnly(BreakerState.CLOSED)
-        assertThat(store.recordFailure(name, 5, openMillis)).isEqualTo(BreakerState.OPEN)
-        val snapshot = checkNotNull(store.snapshot(name))
-        assertThat(snapshot.state).isEqualTo(BreakerState.OPEN)
-        assertThat(snapshot.openedUntil).isAfter(snapshot.now)
-    }
-
-    @Test
-    fun `성공은 연속 실패 카운트를 리셋한다`() {
-        failures(3)
-        assertThat(store.recordSuccess(name)).isEqualTo(1)
-        assertThat(failures(4)).containsOnly(BreakerState.CLOSED)
-        assertThat(store.recordSuccess(name)).isEqualTo(1)
-        assertThat(store.recordSuccess(name)).describedAs("바꿀 것이 없으면 쓰지 않는다").isZero()
-    }
-
-    @Test
-    fun `OPEN 유지 시간이 지나기 전에는 시험 호출권을 주지 않는다`() {
-        failures(5)
-        assertThat(store.tryStartProbe(name, openMillis)).isFalse()
-    }
-
-    @Test
-    fun `OPEN 유지 시간이 지나면 동시에 요청해도 시험 호출권은 한 곳에만 간다`() {
-        failures(5)
-        jdbc.update("UPDATE external_circuit_breaker SET opened_until = clock_timestamp() - INTERVAL '1 second' WHERE name = ?", name)
-        val threads = 8
-        val pool = Executors.newFixedThreadPool(threads)
-        val ready = CountDownLatch(threads)
-        val go = CountDownLatch(1)
-        val wins = AtomicInteger()
-        try {
-            repeat(threads) {
-                pool.execute {
-                    ready.countDown()
-                    go.await()
-                    if (store.tryStartProbe(name, openMillis)) wins.incrementAndGet()
-                }
-            }
-            check(ready.await(5, TimeUnit.SECONDS))
-            go.countDown()
-        } finally {
-            pool.shutdown()
-            check(pool.awaitTermination(10, TimeUnit.SECONDS))
+    private val calls = AtomicLong()
+    private val token = ExecutionToken(1, "probe-worker", 1)
+    @Configuration
+    @EnableTransactionManagement(proxyTargetClass = true)
+    @Import(CircuitBreakerStore::class, JobExecutionLocks::class, JobOwnershipGuard::class,
+        JobClaimTransactions::class, JobQueueStore::class, IndexingJobWritesImpl::class)
+    class Config {
+        @Bean fun dataSource(): CommitResponseLossDataSource {
+            val url = requireNotNull(System.getenv("INTEGRATION_DB_URL"))
+            val user = requireNotNull(System.getenv("INTEGRATION_DB_USERNAME"))
+            val password = System.getenv("INTEGRATION_DB_PASSWORD").orEmpty()
+            val base = DriverManagerDataSource(url, user, password)
+            assertDedicatedIntegrationDatabase(JdbcTemplate(base))
+            JdbcTemplate(base).execute("CREATE SCHEMA worker_circuit")
+            return CommitResponseLossDataSource(DriverManagerDataSource(url + (if ('?' in url) "&" else "?") +
+                "currentSchema=worker_circuit", user, password))
         }
-        assertThat(wins.get()).isEqualTo(1)
-        assertThat(checkNotNull(store.snapshot(name)).state).isEqualTo(BreakerState.HALF_OPEN)
+        @Bean fun jdbc(source: DataSource) = JdbcTemplate(source)
+        @Bean fun namedJdbc(jdbc: JdbcTemplate) = NamedParameterJdbcTemplate(jdbc)
+        @Bean fun transactionManager(source: DataSource) = DataSourceTransactionManager(source)
+        @Bean fun queueProperties() = QueueProperties()
+        @Bean fun circuitProperties() = CircuitBreakerProperties()
+        @Bean fun meters() = SimpleMeterRegistry()
+        @Bean fun retryPolicy() = RetryPolicy { 1.0 }
+        @Bean fun breaker(store: CircuitBreakerStore, properties: CircuitBreakerProperties, meters: SimpleMeterRegistry,
+                          policy: RetryPolicy) = CircuitBreaker(store,properties,meters,policy)
     }
+    @BeforeAll fun schema() {
+        jdbc.execute("CREATE TABLE document(id BIGINT PRIMARY KEY, execution_epoch BIGINT NOT NULL DEFAULT 0, deleted_at TIMESTAMPTZ)")
+        jdbc.execute("""CREATE TABLE indexing_job(id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            source_event_id UUID NOT NULL UNIQUE,document_id BIGINT NOT NULL REFERENCES document(id),document_version_id BIGINT,
+            job_type TEXT NOT NULL,enqueue_seq BIGINT GENERATED BY DEFAULT AS IDENTITY UNIQUE,status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,execution_epoch BIGINT NOT NULL DEFAULT 0,worker_id TEXT,
+            lease_until TIMESTAMPTZ,next_retry_at TIMESTAMPTZ,updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+            started_at TIMESTAMPTZ,completed_at TIMESTAMPTZ,trace_id TEXT,phase TEXT,outcome TEXT,
+            last_error_code TEXT,last_error_message TEXT)""")
+        val migration = ClassPathResource("db/worker_migrations/20261012_worker_queue_and_circuit.sql").inputStream.bufferedReader().use { it.readText() }
+        val ddl = migration.substringAfter("-- CIRCUIT SCHEMA BEGIN").substringBefore("-- CIRCUIT SCHEMA END")
+        jdbc.execute(ddl)
+    }
+    @AfterAll fun cleanup() { jdbc.execute("DROP SCHEMA worker_circuit CASCADE") }
+    @BeforeEach fun reset() {
+        source.loseNextCommit.set(false)
+        jdbc.update("DELETE FROM external_circuit_result")
+        jdbc.update("UPDATE external_circuit_breaker SET state='CLOSED',generation=0,consecutive_failures=0,opened_until=NULL," +
+            "probe_owner=NULL,probe_job_id=NULL,probe_epoch=NULL,probe_reserved_until=NULL,probe_call_id=NULL,probe_call_until=NULL")
+        jdbc.update("DELETE FROM indexing_job")
+        jdbc.update("DELETE FROM document")
+        jdbc.update("INSERT INTO document(id) VALUES (1),(2),(3),(4),(5),(6),(7),(8)")
+    }
+    private fun acquire(owner: ExecutionToken = token): CircuitPermit =
+        (store.acquire(name, owner, "call-${calls.incrementAndGet()}", 90_000) as CallAdmission.Allowed).permit
+    private fun record(permit: CircuitPermit, outcome: CircuitOutcome, threshold: Int = 5): BreakerState =
+        store.record(permit, CircuitResult(outcome), threshold, 60_000) { it.plusSeconds(30) }
+    private fun failures(count: Int): List<BreakerState> = List(count) { record(acquire(), CircuitOutcome.FAILURE) }
+    private fun expireOpen() { jdbc.update("UPDATE external_circuit_breaker SET opened_until=clock_timestamp()-INTERVAL '1 second'") }
+    private fun row() = jdbc.queryForMap("SELECT * FROM external_circuit_breaker WHERE name=?", name)
 
-    @Test
-    fun `시험 호출이 실패하면 즉시 OPEN으로 돌아간다`() {
+    @Test fun `임계치 직전까지 CLOSED이며 임계치에 도달하면 OPEN이다`() {
+        assertThat(failures(4)).containsOnly(BreakerState.CLOSED)
+        assertThat(record(acquire(), CircuitOutcome.FAILURE)).isEqualTo(BreakerState.OPEN)
+        assertThat(store.snapshot(name).openedUntil).isAfter(store.snapshot(name).now)
+    }
+    @Test fun `정상 성공은 연속 실패 카운트를 초기화하고 같은 영수증 재전달은 변경하지 않는다`() {
+        failures(3)
+        val permit = acquire()
+        record(permit, CircuitOutcome.SUCCESS)
+        val before = row()
+        record(permit, CircuitOutcome.SUCCESS)
+        assertThat(row()).isEqualTo(before)
+        assertThat(failures(4)).containsOnly(BreakerState.CLOSED)
+    }
+    @Test fun `OPEN 유지 중 시험 호출은 차단한다`() {
         failures(5)
-        jdbc.update("UPDATE external_circuit_breaker SET opened_until = clock_timestamp() - INTERVAL '1 second' WHERE name = ?", name)
-        assertThat(store.tryStartProbe(name, openMillis)).isTrue()
-        assertThat(store.recordFailure(name, 5, openMillis)).isEqualTo(BreakerState.OPEN)
-        val snapshot = checkNotNull(store.snapshot(name))
-        assertThat(snapshot.openedUntil).isAfter(snapshot.now)
+        assertThat(store.acquire(name, token, "blocked", 90_000)).isInstanceOf(CallAdmission.Blocked::class.java)
     }
-
-    @Test
-    fun `시험 호출이 성공하면 CLOSED로 돌아가고 카운트가 0이 된다`() {
+    @Test fun `독립 연결 여덟 Worker의 동시 시험 호출권은 하나만 유효하다`() {
+        failures(5); expireOpen()
+        val results = race(8) { i -> store.acquire(name, ExecutionToken(i.toLong()+1, "worker-$i", 1), "probe-$i", 90_000) }
+        assertThat(results.filterIsInstance<CallAdmission.Allowed>()).hasSize(1)
+        assertThat(store.snapshot(name).state).isEqualTo(BreakerState.HALF_OPEN)
+    }
+    @Test fun `시험 실패는 즉시 OPEN 시험 성공은 CLOSED로 돌아간다`() {
+        failures(5); expireOpen()
+        assertThat(record(acquire(), CircuitOutcome.FAILURE)).isEqualTo(BreakerState.OPEN)
+        expireOpen()
+        assertThat(record(acquire(), CircuitOutcome.SUCCESS)).isEqualTo(BreakerState.CLOSED)
+        assertThat(row()["consecutive_failures"]).isEqualTo(0)
+    }
+    @Test fun `필수 행이 없으면 조회와 획득 기록이 서킷 없이 성공하지 않는다`() {
+        assertThatThrownBy { store.snapshot("missing") }.isInstanceOf(IllegalStateException::class.java)
+        assertThatThrownBy { store.acquire("missing", token, "missing", 90_000) }.isInstanceOf(IllegalStateException::class.java)
+    }
+    @ParameterizedTest @EnumSource(value = CircuitOutcome::class, names = ["SUCCESS", "FAILURE"])
+    fun `이전 CLOSED 호출 결과는 새 OPEN과 HALF_OPEN을 변경하지 않는다`(outcome: CircuitOutcome) {
+        val old = acquire()
         failures(5)
-        jdbc.update("UPDATE external_circuit_breaker SET opened_until = clock_timestamp() - INTERVAL '1 second' WHERE name = ?", name)
-        assertThat(store.tryStartProbe(name, openMillis)).isTrue()
-        assertThat(store.recordSuccess(name)).isEqualTo(1)
-        val row = jdbc.queryForMap("SELECT state, consecutive_failures, opened_until FROM external_circuit_breaker WHERE name = ?", name)
-        assertThat(row["state"]).isEqualTo("CLOSED")
-        assertThat(row["consecutive_failures"]).isEqualTo(0)
-        assertThat(row["opened_until"]).isNull()
+        val before = row()
+        record(old, outcome)
+        assertThat(row()).isEqualTo(before)
+        expireOpen(); acquire(token.copy(workerId="new"))
+        val probe = row()
+        record(old.copy(callId="late-half-${outcome.name}"), outcome)
+        assertThat(row()).isEqualTo(probe)
+        assertThat(jdbc.queryForObject("SELECT applied FROM external_circuit_result WHERE call_id=?", Boolean::class.java, old.callId)).isFalse()
+    }
+    @Test fun `만료된 이전 시험권의 결과와 반환은 새 시험권을 덮어쓰지 않는다`() {
+        failures(5); expireOpen()
+        val old = acquire()
+        jdbc.update("UPDATE external_circuit_breaker SET probe_call_until=clock_timestamp()-INTERVAL '1 second'")
+        val current = acquire(token.copy(workerId="new"))
+        val before = row()
+        record(old, CircuitOutcome.SUCCESS)
+        store.release(name, token, old.callId)
+        assertThat(row()).isEqualTo(before)
+        assertThat(store.valid(current)).isTrue()
+    }
+    @Test fun `실제 결과 커밋 응답 유실 뒤 같은 실패는 한번만 집계한다`() {
+        val permit = acquire()
+        val result = CircuitResult(CircuitOutcome.FAILURE)
+        source.loseNextCommit.set(true)
+        assertThatThrownBy { store.record(permit, result, 5, 60_000) { it.plusSeconds(30) } }.isInstanceOf(Exception::class.java)
+        store.record(permit, result, 5, 60_000) { error("receipt should resolve") }
+        assertThat(row()["consecutive_failures"]).isEqualTo(1)
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM external_circuit_result", Long::class.java)).isEqualTo(1)
+    }
+    @Test fun `서킷 변경 뒤 영수증 저장 전 실패는 실제 TX에서 둘 다 rollback한다`() {
+        val permit=acquire(); val before=row(); var reads=0
+        doAnswer {
+            if(++reads==2) error("after state UPDATE before receipt INSERT")
+            it.callRealMethod()
+        }.whenever(circuitStore).snapshot(name)
+        assertThatThrownBy { record(permit,CircuitOutcome.FAILURE) }.isInstanceOf(IllegalStateException::class.java)
+        assertThat(reads).isEqualTo(2)
+        assertThat(row()).isEqualTo(before)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM external_circuit_result",Long::class.java)).isZero()
+    }
+    @Test fun `이미 claim하고 기다린 Job과 새 LIMITED claim도 하나의 전역 시험 예약을 경쟁한다`() {
+        for(id in 1L..4L) queue.enqueue(UUID.randomUUID(),id,id,JobType.INDEX,null)
+        val waiting=listOf(queue.claim(5,"waiting-1")!!,queue.claim(5,"waiting-2")!!)
+        failures(5); expireOpen()
+        race(4) { i ->
+            if(i<2) store.acquire(name,waiting[i].token,"existing-$i",90_000)
+            else queue.claim(5,"new-$i")
+        }
+        val probe=store.snapshot(name)
+        assertThat(probe.state).isEqualTo(BreakerState.HALF_OPEN)
+        assertThat(probe.probeOwner).isIn("waiting-1","waiting-2","new-2","new-3")
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM indexing_job WHERE status='PROCESSING'",Int::class.java)).isBetween(2,3)
+        for(job in waiting.filter { it.token.workerId!=probe.probeOwner }) {
+            assertThat(store.acquire(name,job.token,"loser-${job.token.workerId}",90_000)).isInstanceOf(CallAdmission.Blocked::class.java)
+        }
+        assertThat(queue.claim(5,"extra")).isNull()
     }
 
-    @Test
-    fun `행이 없으면 조회와 기록 모두 null이거나 0건이다`() {
-        assertThat(store.snapshot("missing")).isNull()
-        assertThat(store.recordFailure("missing", 5, openMillis)).isNull()
-        assertThat(store.recordSuccess("missing")).isZero()
-        assertThat(store.tryStartProbe("missing", openMillis)).isFalse()
+    @Test fun `시험 획득 커밋 응답 유실은 같은 요청을 확인하고 새 세대를 발급하지 않는다`() {
+        failures(5); expireOpen()
+        source.loseNextCommit.set(true)
+        assertThatThrownBy { store.acquire(name, token, "lost", 90_000) }.isInstanceOf(Exception::class.java)
+        val before = row()
+        assertThat(store.acquire(name, token, "lost", 90_000)).isInstanceOf(CallAdmission.Allowed::class.java)
+        assertThat(row()).isEqualTo(before)
+    }
+    @Test fun `LIMITED의 동시 claim은 활성 INDEX 시험 대상을 하나만 선점한다`() {
+        failures(5); expireOpen()
+        for (id in 1L..8L) queue.enqueue(UUID.randomUUID(), id, id, JobType.INDEX, null)
+        val jobs = race(8) { i -> queue.claim(5,"claim-$i") }.filterNotNull()
+        assertThat(jobs).hasSize(1)
+        assertThat(jdbc.queryForObject("SELECT SUM(attempt_count) FROM indexing_job", Long::class.java)).isEqualTo(1)
+        assertThat(store.snapshot(name).probeOwner).isEqualTo(jobs.single().token.workerId)
+        assertThat(queue.claim(5,"extra")).isNull()
+        queue.enqueue(UUID.randomUUID(), 8, null, JobType.DELETE, null)
+        // Earlier INDEX on document 8 still blocks its DELETE.
+        assertThat(queue.claim(5,"delete-blocked")).isNull()
+        jdbc.update("INSERT INTO document(id) VALUES(9),(10)")
+        queue.enqueue(UUID.randomUUID(),9,null,JobType.DELETE,null)
+        jdbc.update("UPDATE document SET deleted_at=clock_timestamp() WHERE id IN(9,10)")
+        queue.enqueue(UUID.randomUUID(),10,10,JobType.INDEX,null)
+        assertThat(queue.claim(5,"delete")!!.type).isEqualTo(JobType.DELETE)
+        assertThat(queue.claim(5,"skip")!!.documentId).isEqualTo(10)
+    }
+    @Test fun `시험 예약과 claim UPDATE 뒤 실패는 함께 rollback된다`() {
+        failures(5); expireOpen()
+        queue.enqueue(UUID.randomUUID(),1,1,JobType.INDEX,null)
+        val id = jdbc.queryForObject("SELECT id FROM indexing_job", Long::class.java)!!
+        val before = row()
+        doAnswer { error("after UPDATE") }.whenever(locks).lockJob(id,false)
+        assertThatThrownBy { queue.claim(5,"rollback") }.isInstanceOf(IllegalStateException::class.java)
+        assertThat(row()).isEqualTo(before)
+        assertThat(jdbc.queryForObject("SELECT attempt_count FROM indexing_job",Int::class.java)).isZero()
+        assertThat(jdbc.queryForObject("SELECT execution_epoch FROM document WHERE id=1",Long::class.java)).isZero()
+    }
+    @Test fun `시험 예약과 claim 커밋 응답 유실은 기존 실행을 확인하며 추가 선점하지 않는다`() {
+        failures(5); expireOpen()
+        queue.enqueue(UUID.randomUUID(),1,1,JobType.INDEX,null)
+        queue.enqueue(UUID.randomUUID(),2,2,JobType.INDEX,null)
+        var prepared: ExecutionToken? = null
+        source.loseNextCommit.set(true)
+        assertThatThrownBy { queue.claim(5,"lost-claim") { prepared=it } }.isInstanceOf(Exception::class.java)
+        val committed=row()
+        val job=queue.resolveClaim(checkNotNull(prepared))!!
+        assertThat(job.token).isEqualTo(prepared)
+        assertThat(job.attemptCount).isEqualTo(1)
+        assertThat(store.snapshot(name).owns(job.token)).isTrue()
+        assertThat(queue.claim(5,"extra-claim")).isNull()
+        assertThat(row()).isEqualTo(committed)
+        assertThat(jdbc.queryForObject("SELECT SUM(attempt_count) FROM indexing_job",Long::class.java)).isEqualTo(1)
+        assertThat(jdbc.queryForObject("SELECT SUM(execution_epoch) FROM document",Long::class.java)).isEqualTo(1)
+    }
+    @Test fun `준비 예약은 heartbeat lease를 따르며 실제 호출 TTL은 호출 시작부터 발급된다`() {
+        failures(5); expireOpen(); queue.enqueue(UUID.randomUUID(),1,1,JobType.INDEX,null)
+        val job = queue.claim(5,"prepared")!!
+        jdbc.update("UPDATE external_circuit_breaker SET probe_reserved_until=clock_timestamp()-INTERVAL '1 second'")
+        assertThat(queue.renew(job.token)).isEqualTo(1)
+        assertThat(breaker.admission()).isEqualTo(ClaimAdmission.BLOCKED)
+        val permit = acquire(job.token)
+        assertThat(store.snapshot(name).probeUntil).isAfter(store.snapshot(name).now.plusSeconds(80))
+        assertThat(store.valid(permit)).isTrue()
+    }
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings=["RETRY_WAIT","FAILED","COMPLETED"])
+    fun `소유권이 해제된 준비 예약은 같은 DB 시각에서 즉시 무효이며 다른 문서를 선점한다`(status:String) {
+        failures(5); expireOpen()
+        queue.enqueue(UUID.randomUUID(),1,1,JobType.INDEX,null)
+        queue.enqueue(UUID.randomUUID(),2,2,JobType.INDEX,null)
+        val old=queue.claim(5,"old-preparation")!!
+        jdbc.update("UPDATE indexing_job SET status=?,worker_id=NULL,lease_until=NULL,next_retry_at=" +
+            "CASE WHEN ?='RETRY_WAIT' THEN clock_timestamp()+INTERVAL '30 seconds' ELSE NULL END WHERE id=?",
+            status,status,old.token.jobId)
+        val snapshot=store.snapshot(name)
+        assertThat(snapshot.probeUntil).isEqualTo(snapshot.now)
+        assertThat(breaker.admission()).isEqualTo(ClaimAdmission.LIMITED)
+        val next=queue.claim(5,"new-preparation")!!
+        assertThat(next.documentId).isEqualTo(2)
+        assertThat(store.snapshot(name).probeOwner).isEqualTo("new-preparation")
+        assertThat(jdbc.queryForObject("SELECT attempt_count FROM indexing_job WHERE id=?",Int::class.java,old.token.jobId)).isEqualTo(1)
+    }
+    @ParameterizedTest @EnumSource(value=CircuitOutcome::class,names=["RATE_LIMIT","PERMANENT","CONFIGURATION"])
+    fun `시험 중립과 공통 설정 오류의 상태 카운트 다음 시험 시각을 구분한다`(outcome: CircuitOutcome) {
+        failures(5); expireOpen(); val permit=acquire()
+        val result=CircuitResult(outcome,2,"120")
+        breaker.record(permit,result)
+        val row=store.snapshot(name)
+        assertThat(row.state).isEqualTo(BreakerState.OPEN)
+        assertThat(this.row()["probe_owner"]).isNull()
+        assertThat(this.row()["consecutive_failures"]).isEqualTo(if(outcome==CircuitOutcome.CONFIGURATION) 6 else 5)
+        if(outcome==CircuitOutcome.RATE_LIMIT) assertThat(row.openedUntil).isAfter(row.now.plusSeconds(119))
+        if(outcome==CircuitOutcome.PERMANENT) assertThat(row.available()).isTrue()
+    }
+    @Test fun `서킷 행이 잠겨도 독립 문서 DELETE는 선점할 수 있다`() {
+        queue.enqueue(UUID.randomUUID(),1,1,JobType.INDEX,null)
+        queue.enqueue(UUID.randomUUID(),2,null,JobType.DELETE,null)
+        val held=CountDownLatch(1); val release=CountDownLatch(1)
+        val pool=Executors.newSingleThreadExecutor()
+        try {
+            val holder=pool.submit { TransactionTemplate(tx).execute {
+                jdbc.queryForMap("SELECT name FROM external_circuit_breaker FOR UPDATE")
+                held.countDown(); check(release.await(5,TimeUnit.SECONDS))
+            } }
+            check(held.await(5,TimeUnit.SECONDS))
+            assertThat(queue.claim(5,"nonllm")!!.type).isEqualTo(JobType.DELETE)
+            release.countDown(); holder.get(5,TimeUnit.SECONDS)
+        } finally { release.countDown(); pool.shutdownNow() }
+    }
+    private fun <T> race(count:Int, action:(Int)->T):List<T> {
+        val pool=Executors.newFixedThreadPool(count); val ready=CountDownLatch(count); val go=CountDownLatch(1)
+        try {
+            val futures=(0 until count).map { i -> pool.submit<T> { ready.countDown(); check(go.await(5,TimeUnit.SECONDS)); action(i) } }
+            check(ready.await(5,TimeUnit.SECONDS)); go.countDown()
+            return futures.map { it.get(10,TimeUnit.SECONDS) }
+        } finally { go.countDown(); pool.shutdownNow() }
     }
 }

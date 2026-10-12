@@ -19,7 +19,7 @@ class DocumentDeletionService(
     private val documentRepository: DocumentRepository,
     private val ownership: JobOwnershipGuard,
 ) {
-    @Transactional
+    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     fun delete(job: ClaimedJob): IndexingJobStatus {
         require(job.type == JobType.DELETE)
         val owned = ownership.lock(job.token)

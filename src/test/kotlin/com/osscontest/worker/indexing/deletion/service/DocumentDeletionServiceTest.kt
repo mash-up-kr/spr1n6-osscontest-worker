@@ -6,6 +6,7 @@ import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.queue.*
 import com.osscontest.worker.support.*
 import org.junit.jupiter.api.Test
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.mockito.kotlin.*
 import java.time.LocalDateTime
 
@@ -30,9 +31,12 @@ class DocumentDeletionServiceTest {
     }
 
     @Test
-    fun `이미 완료된 삭제 Job을 재호출하면 삭제하지 않는다`() {
-        whenever(locks.lock(1)).thenReturn(lockedJob(processingJob(status = IndexingJobStatus.COMPLETED)))
-        service.delete(job)
+    fun `소유권이 해제된 완료 DELETE를 처리기에 직접 재호출하면 변경 없이 거절한다`() {
+        whenever(locks.lock(1)).thenReturn(lockedJob(processingJob(status = IndexingJobStatus.COMPLETED).apply {
+            jobType = JobType.DELETE; documentVersionId = null; outcome = JobOutcome.DELETED.name
+            workerId = null; leaseUntil = null; completedAt = testNow
+        }))
+        assertThatThrownBy { service.delete(job) }.isInstanceOf(ExecutionLostException::class.java)
         verifyNoInteractions(chunks)
     }
 

@@ -466,11 +466,11 @@ class JobFencingIntegrationTest(
         val before = row(id)
         val reads = java.util.concurrent.atomic.AtomicInteger()
         doAnswer {
-            if (reads.incrementAndGet() == 2) error("fail after claim UPDATE before commit")
+            if (reads.incrementAndGet() == 1) error("fail after claim UPDATE before commit")
             it.callRealMethod()
         }.whenever(locks).lockJob(id, false)
         assertThatThrownBy { queue.claimFixture() }.isInstanceOf(IllegalStateException::class.java)
-        assertThat(reads.get()).isEqualTo(2)
+        assertThat(reads.get()).isEqualTo(1)
         assertThat(row(id)).isEqualTo(before)
         assertThat(jdbc.queryForObject("SELECT execution_epoch FROM document WHERE id=1", Long::class.java)).isZero()
     }

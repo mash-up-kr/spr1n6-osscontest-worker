@@ -126,7 +126,7 @@ class EmbeddingIndexingProcessor(
             batches.add(currentBatch)
         }
         return batches.flatMap { batch ->
-            externalApi.execute(context.executionToken) { embeddingUseCase.embed(batch.map(Chunk::content)) }
+            externalApi.execute(context.executionToken, context.attemptCount) { embeddingUseCase.embed(batch.map(Chunk::content)) }
         }
     }
 

@@ -84,4 +84,18 @@ class EmbeddingServiceTest {
 
         assertEquals("7", exception.retryAfter)
     }
+
+    @Test
+    fun `인증과 권한 오류는 개별 입력과 rate limit 대신 공통 설정 원인으로 변환한다`() {
+        val errorObject = ErrorObject.builder().code("authentication_error").message("invalid credentials")
+            .param(null as String?).type("authentication_error").build()
+        for (cause in listOf(com.openai.errors.UnauthorizedException.builder().headers(Headers.builder().build()).error(errorObject).build(),
+            com.openai.errors.PermissionDeniedException.builder().headers(Headers.builder().build()).error(errorObject).build())) {
+            Mockito.doThrow(cause).`when`(embeddingModel).embed(listOf("content"))
+            val error = assertThrows(EmbeddingConfigurationException::class.java) { embeddingService.embed(listOf("content")) }
+            assertSame(cause, error.cause)
+            assertEquals(if (cause is com.openai.errors.UnauthorizedException) "EMBEDDING_AUTHENTICATION_FAILED"
+                else "EMBEDDING_PERMISSION_DENIED", error.code)
+        }
+    }
 }

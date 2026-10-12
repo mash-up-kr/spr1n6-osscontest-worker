@@ -14,13 +14,17 @@ sealed interface ClaimAttempt {
 
 /** One candidate per transaction: skipped candidates release their document lock before another attempt. */
 @Component
-class JobClaimTransactions(private val jdbc: NamedParameterJdbcTemplate, private val locks: JobExecutionLocks) {
+class JobClaimTransactions(private val jdbc: NamedParameterJdbcTemplate, private val locks: JobExecutionLocks,
+                           private val breaker: CircuitBreaker) {
     @Transactional(isolation = Isolation.READ_COMMITTED)
     fun claim(workerId: String, leaseMillis: Long, maxAttempts: Int, excludedDocuments: Set<Long>,
               allowLlm: Boolean, prepared: (ExecutionToken) -> Unit): ClaimAttempt {
         locks.requireTransaction()
+        // Circuit -> document -> Job. Reservation and claim share this transaction.
+        val gate = breaker.lockForClaim()
+        val admitted = allowLlm && gate?.available() == true
         val exclusions = if (excludedDocuments.isEmpty()) "" else "AND d.id NOT IN (:excludedDocuments)"
-        val params = mapOf("maxAttempts" to maxAttempts, "excludedDocuments" to excludedDocuments, "allowLlm" to allowLlm)
+        val params = mapOf("maxAttempts" to maxAttempts, "excludedDocuments" to excludedDocuments, "allowLlm" to admitted)
         val candidate = jdbc.query("""
             SELECT j.id, j.document_id FROM indexing_job j JOIN document d ON d.id = j.document_id
             WHERE $ELIGIBLE $exclusions
@@ -38,6 +42,9 @@ class JobClaimTransactions(private val jdbc: NamedParameterJdbcTemplate, private
             mapOf("documentId" to documentId), Long::class.java))
         val token = ExecutionToken(jobId, workerId, Math.addExact(previousEpoch, 1))
         prepared(token)
+        val activeIndex = job.jobType == JobType.INDEX && jdbc.queryForObject(
+            "SELECT deleted_at IS NULL FROM document WHERE id=:id", mapOf("id" to documentId), Boolean::class.java) == true
+        if (activeIndex && gate!!.state != BreakerState.CLOSED) breaker.reserveForClaim(gate, token, leaseMillis)
         check(jdbc.update("""
             WITH bumped AS (
                 UPDATE document SET execution_epoch = :epoch

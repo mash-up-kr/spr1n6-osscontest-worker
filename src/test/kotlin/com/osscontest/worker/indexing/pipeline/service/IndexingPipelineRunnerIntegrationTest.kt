@@ -67,7 +67,7 @@ class IndexingPipelineRunnerIntegrationTest(
     @BeforeEach
     fun resetProcessor() {
         whenever(breaker.admission()).thenReturn(com.osscontest.worker.indexing.queue.ClaimAdmission.NORMAL)
-        whenever(breaker.acquire()).thenReturn(java.time.Duration.ZERO)
+        com.osscontest.worker.support.allowCircuitCalls(breaker)
         fakeIndexingProcessor.reset()
     }
 

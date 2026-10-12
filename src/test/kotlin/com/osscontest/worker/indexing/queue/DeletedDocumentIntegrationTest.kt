@@ -40,7 +40,7 @@ class DeletedDocumentIntegrationTest(
     @BeforeEach
     fun fixture() {
         whenever(breaker.admission()).thenReturn(ClaimAdmission.NORMAL)
-        whenever(breaker.acquire()).thenReturn(java.time.Duration.ZERO)
+        com.osscontest.worker.support.allowCircuitCalls(breaker)
         assertDedicatedIntegrationDatabase(jdbc)
         cleanup()
         jdbc.update("INSERT INTO tenant (id, name) VALUES (?, 'deleted-document')", tenantId)
