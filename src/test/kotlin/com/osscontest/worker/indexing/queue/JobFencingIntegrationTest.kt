@@ -11,9 +11,11 @@ import com.osscontest.worker.support.CommitResponseLossDataSource
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.*
+import org.springframework.boot.convert.ApplicationConversionService
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Import
+import org.springframework.dao.InvalidDataAccessApiUsageException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.jdbc.datasource.DriverManagerDataSource
@@ -69,11 +71,15 @@ class JobFencingIntegrationTest(
             val password = System.getenv("INTEGRATION_DB_PASSWORD").orEmpty()
             val base = DriverManagerDataSource(url, user, password)
             assertDedicatedIntegrationDatabase(JdbcTemplate(base))
+            // 이전 실행이 컨텍스트 생성 중 실패하면 스키마가 남으므로 먼저 지운다.
+            JdbcTemplate(base).execute("DROP SCHEMA IF EXISTS worker_c1_fencing CASCADE")
             JdbcTemplate(base).execute("CREATE SCHEMA worker_c1_fencing")
             return CommitResponseLossDataSource(DriverManagerDataSource(url + if ('?' in url) "&currentSchema=worker_c1_fencing"
                 else "?currentSchema=worker_c1_fencing", user, password))
         }
         @Bean fun jdbc(dataSource: DataSource) = JdbcTemplate(dataSource)
+        // Boot 없이 띄운 컨텍스트라 @Value의 "PT30S" 같은 Duration 문자열을 바꿀 변환기를 직접 등록한다.
+        @Bean fun conversionService() = ApplicationConversionService.getSharedInstance()
         @Bean fun namedJdbc(jdbc: JdbcTemplate) = NamedParameterJdbcTemplate(jdbc)
         @Bean fun entityManagerFactory(dataSource: DataSource) = LocalContainerEntityManagerFactoryBean().apply {
             setDataSource(dataSource)
@@ -279,7 +285,9 @@ class JobFencingIntegrationTest(
                 "FAILED" to queue.dbNow().plusSeconds(30))) {
             assertThatThrownBy {
                 writes.fail(job.token.jobId, job.token.workerId, job.token.epoch, status, deadline, "ERROR", "test")
-            }.isInstanceOf(IllegalArgumentException::class.java)
+            }.isInstanceOf(InvalidDataAccessApiUsageException::class.java)
+            // @Repository 예외 변환이 require 실패를 감싼다.
+            .hasCauseInstanceOf(IllegalArgumentException::class.java)
             assertThat(row(job.token.jobId)).isEqualTo(before)
         }
     }

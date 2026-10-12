@@ -10,6 +10,7 @@ import org.junit.jupiter.api.*
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
 import org.mockito.kotlin.*
+import org.springframework.boot.convert.ApplicationConversionService
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Import
@@ -55,11 +56,15 @@ class CircuitBreakerIntegrationTest(
             val password = System.getenv("INTEGRATION_DB_PASSWORD").orEmpty()
             val base = DriverManagerDataSource(url, user, password)
             assertDedicatedIntegrationDatabase(JdbcTemplate(base))
+            // 이전 실행이 컨텍스트 생성 중 실패하면 스키마가 남으므로 먼저 지운다.
+            JdbcTemplate(base).execute("DROP SCHEMA IF EXISTS worker_circuit CASCADE")
             JdbcTemplate(base).execute("CREATE SCHEMA worker_circuit")
             return CommitResponseLossDataSource(DriverManagerDataSource(url + (if ('?' in url) "&" else "?") +
                 "currentSchema=worker_circuit", user, password))
         }
         @Bean fun jdbc(source: DataSource) = JdbcTemplate(source)
+        // Boot 없이 띄운 컨텍스트라 @Value의 "PT30S" 같은 Duration 문자열을 바꿀 변환기를 직접 등록한다.
+        @Bean fun conversionService() = ApplicationConversionService.getSharedInstance()
         @Bean fun namedJdbc(jdbc: JdbcTemplate) = NamedParameterJdbcTemplate(jdbc)
         @Bean fun transactionManager(source: DataSource) = DataSourceTransactionManager(source)
         @Bean fun queueProperties() = QueueProperties()

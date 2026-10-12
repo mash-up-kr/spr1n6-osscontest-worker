@@ -1,5 +1,7 @@
 package com.osscontest.worker.indexing.publication.repository
 
+import com.osscontest.worker.indexing.queue.JobExecutionLocks
+import com.osscontest.worker.indexing.queue.JobOwnershipGuard
 import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
@@ -7,11 +9,14 @@ import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase
+import org.springframework.context.annotation.Import
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
 
 @Tag("integration")
 @DataJpaTest
+// IndexingJobRepository의 쓰기 조각(IndexingJobWritesImpl)이 이 두 빈을 쓴다.
+@Import(JobExecutionLocks::class, JobOwnershipGuard::class)
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("integration")
 class DocumentChunkRepositoryIntegrationTest(

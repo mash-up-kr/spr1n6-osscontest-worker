@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase
+import org.springframework.dao.InvalidDataAccessApiUsageException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
 import com.osscontest.worker.indexing.queue.JobQueueStore
@@ -75,7 +76,9 @@ class IndexingJobRepositoryIntegrationTest(
         org.assertj.core.api.Assertions.assertThatThrownBy {
             indexingJobRepository.complete(job.token.jobId, job.token.workerId, job.token.epoch,
                 com.osscontest.worker.indexing.queue.JobOutcome.SKIPPED_DOCUMENT_DELETED)
-        }.isInstanceOf(IllegalArgumentException::class.java)
+        }.isInstanceOf(InvalidDataAccessApiUsageException::class.java)
+            // @Repository 예외 변환이 require 실패를 감싼다.
+            .hasCauseInstanceOf(IllegalArgumentException::class.java)
         assertThat(queue.snapshot(job.token)!!.status).isEqualTo(IndexingJobStatus.PROCESSING)
     }
 

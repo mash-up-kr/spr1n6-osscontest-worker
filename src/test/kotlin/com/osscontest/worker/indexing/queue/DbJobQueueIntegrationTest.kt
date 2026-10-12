@@ -44,7 +44,9 @@ class DbJobQueueIntegrationTest(
         assertDedicatedIntegrationDatabase(jdbc)
         jdbc.update("INSERT INTO tenant (id, name) VALUES (800001, 'queue-integration')")
         for (id in 800001L..800002L) {
-            jdbc.update("INSERT INTO document (id, tenant_id, owner_principal_id, title) VALUES (?, 800001, 'test', 'queue')", id)
+            // 버전 1을 업로드한 상태로 둔다. Server 제약상 임베딩 버전은 업로드 버전을 넘을 수 없다.
+            jdbc.update("INSERT INTO document (id, tenant_id, owner_principal_id, title, latest_upload_version_no) " +
+                "VALUES (?, 800001, 'test', 'queue', 1)", id)
             jdbc.update("""
                 INSERT INTO document_version (id, document_id, version_no, embedding_version_no,
                     source_object_key, original_filename, mime_type, file_size, content_hash, created_by_principal_id)

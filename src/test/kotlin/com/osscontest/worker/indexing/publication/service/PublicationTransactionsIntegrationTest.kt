@@ -11,6 +11,7 @@ import com.osscontest.worker.indexing.publication.repository.*
 import com.osscontest.worker.indexing.queue.*
 import com.osscontest.worker.support.CommitResponseLossDataSource
 import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
+import com.osscontest.worker.support.callSpiedMethod
 import com.osscontest.worker.support.seedReleasedExecution
 import com.osscontest.worker.indexing.chunking.domain.Chunk
 import com.osscontest.worker.indexing.chunking.service.ChunkGuard
@@ -32,6 +33,7 @@ import org.junit.jupiter.api.*
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.ValueSource
 import org.mockito.kotlin.*
+import org.springframework.boot.convert.ApplicationConversionService
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Import
@@ -95,12 +97,16 @@ class PublicationTransactionsIntegrationTest(
         RetryPolicy::class, RandomRetryJitter::class)
     class Config {
         @Bean fun circuitBreaker() = com.osscontest.worker.support.closedCircuitBreaker()
+        // Boot 없이 띄운 컨텍스트라 @Value의 "PT30S" 같은 Duration 문자열을 바꿀 변환기를 직접 등록한다.
+        @Bean fun conversionService() = ApplicationConversionService.getSharedInstance()
         @Bean fun dataSource(): CommitResponseLossDataSource {
             val url = requireNotNull(System.getenv("INTEGRATION_DB_URL"))
             val user = requireNotNull(System.getenv("INTEGRATION_DB_USERNAME"))
             val password = System.getenv("INTEGRATION_DB_PASSWORD").orEmpty()
             val base = DriverManagerDataSource(url, user, password)
             assertDedicatedIntegrationDatabase(JdbcTemplate(base))
+            // 이전 실행이 컨텍스트 생성 중 실패하면 스키마가 남으므로 먼저 지운다.
+            JdbcTemplate(base).execute("DROP SCHEMA IF EXISTS worker_c3_publication CASCADE")
             JdbcTemplate(base).execute("CREATE SCHEMA worker_c3_publication")
             // pgvector는 전용 DB의 사전 조건이며 이 fixture가 만들지 않는다.
             return CommitResponseLossDataSource(DriverManagerDataSource(url +
@@ -182,11 +188,11 @@ class PublicationTransactionsIntegrationTest(
         val allBefore = databaseState()
         val interrupt = { error("stop after $stage") }
         when (stage) {
-            "upsert" -> doAnswer { it.callRealMethod(); interrupt() }.whenever(writer).upsertAll(any())
-            "trailing" -> doAnswer { it.callRealMethod(); interrupt() }.whenever(chunks).deleteTrailingChunks(any(), any())
-            "version" -> doAnswer { it.callRealMethod(); interrupt() }.whenever(versions).complete(any(), any(), any(), anyOrNull())
-            "promotion" -> doAnswer { it.callRealMethod(); interrupt() }.whenever(documents).promoteSearchableVersion(any(), any())
-            else -> doAnswer { it.callRealMethod(); interrupt() }.whenever(jobs).complete(any(), any(), any(), any())
+            "upsert" -> doAnswer { it.callSpiedMethod(); interrupt() }.whenever(writer).upsertAll(any())
+            "trailing" -> doAnswer { it.callSpiedMethod(); interrupt() }.whenever(chunks).deleteTrailingChunks(any(), any())
+            "version" -> doAnswer { it.callSpiedMethod(); interrupt() }.whenever(versions).complete(any(), any(), any(), anyOrNull())
+            "promotion" -> doAnswer { it.callSpiedMethod(); interrupt() }.whenever(documents).promoteSearchableVersion(any(), any())
+            else -> doAnswer { it.callSpiedMethod(); interrupt() }.whenever(jobs).complete(any(), any(), any(), any())
         }
         assertThatThrownBy { publish(job) }.isInstanceOf(IllegalStateException::class.java)
         assertRolledBack(job, before)
@@ -198,7 +204,7 @@ class PublicationTransactionsIntegrationTest(
         val allBefore = databaseState()
         doAnswer {
             jdbc.update("UPDATE indexing_job SET lease_until=clock_timestamp()-INTERVAL '1 second' WHERE id=?", job.token.jobId)
-            it.callRealMethod()
+            it.callSpiedMethod()
         }.whenever(jobs).complete(any(), any(), any(), any())
         assertThatThrownBy { publish(job) }.isInstanceOf(LeaseExpiredException::class.java)
         assertRolledBack(job, before)
@@ -280,7 +286,7 @@ class PublicationTransactionsIntegrationTest(
         val job = claim()
         var calls = 0
         doAnswer {
-            it.callRealMethod()
+            it.callSpiedMethod()
             if (++calls == 1) throw org.springframework.dao.DataAccessResourceFailureException("DB connection lost before commit")
             1
         }.whenever(versions).complete(any(), any(), any(), anyOrNull())
@@ -350,7 +356,7 @@ class PublicationTransactionsIntegrationTest(
 
     @Test fun `finalize가 먼저 문서를 잠그면 완료 커밋 이후 삭제가 진행된다`() {
         val job = claim(); val locked = CountDownLatch(1); val finish = CountDownLatch(1)
-        doAnswer { locked.countDown(); check(finish.await(5, TimeUnit.SECONDS)); it.callRealMethod() }
+        doAnswer { locked.countDown(); check(finish.await(5, TimeUnit.SECONDS)); it.callSpiedMethod() }
             .whenever(state).document(1)
         val pool = Executors.newFixedThreadPool(2)
         try {
@@ -421,7 +427,7 @@ class PublicationTransactionsIntegrationTest(
     fun `실패 UPDATE 직후 중단은 오류 상태 deadline owner lease 해제를 함께 롤백한다`(permanent: Boolean) {
         val job = claim()
         val before = databaseState()
-        doAnswer { it.callRealMethod(); error("stop after failure UPDATE before service commit") }
+        doAnswer { it.callSpiedMethod(); error("stop after failure UPDATE before service commit") }
             .whenever(jobs).fail(any(), any(), any(), any(), anyOrNull(), any(), any())
         assertThatThrownBy { failures.recordFailure(job.token, "ERROR", "test", permanent, 5, Duration.ofSeconds(30)) }
             .isInstanceOf(IllegalStateException::class.java)
@@ -651,7 +657,7 @@ class PublicationTransactionsIntegrationTest(
         val pipeline = PipelineFixture()
         val entered = CountDownLatch(1); val resume = CountDownLatch(1)
         val token = AtomicReference<ExecutionToken>()
-        doAnswer { token.set(it.getArgument(0)); it.callRealMethod() }.whenever(store).snapshot(any())
+        doAnswer { token.set(it.getArgument(0)); it.callSpiedMethod() }.whenever(store).snapshot(any())
         fun paused() {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse()
             entered.countDown(); check(resume.await(10, TimeUnit.SECONDS))
@@ -690,8 +696,10 @@ class PublicationTransactionsIntegrationTest(
         val waiting = CountDownLatch(1); val recover = CountDownLatch(1)
         val calls = AtomicInteger()
         doAnswer {
-            it.callRealMethod()
-            if (calls.incrementAndGet() == 1) throw java.sql.SQLException("injected DB fault before commit", "08006")
+            it.callSpiedMethod()
+            // 실제 연결 장애처럼 runtime 예외로 감싼다. checked SQLException을 그대로 던지면 @Transactional이 롤백하지 않고 커밋한다.
+            if (calls.incrementAndGet() == 1) throw org.springframework.dao.DataAccessResourceFailureException(
+                "injected DB fault before commit", java.sql.SQLException("injected DB fault before commit", "08006"))
             1
         }.whenever(versions).complete(any(), any(), any(), anyOrNull())
         val database = DatabaseOperations(jdbc, RetryWaiter {
@@ -732,7 +740,7 @@ class PublicationTransactionsIntegrationTest(
         val job = claim()
         queue.enqueue(UUID.randomUUID(), 1, 2, JobType.INDEX, null)
         val completed = CountDownLatch(1); val advance = CountDownLatch(1)
-        doAnswer { it.callRealMethod(); source.loseNextCommit.set(true); 1 }.whenever(jobs).complete(any(), any(), any(), any())
+        doAnswer { it.callSpiedMethod(); source.loseNextCommit.set(true); 1 }.whenever(jobs).complete(any(), any(), any(), any())
         val database = DatabaseOperations(jdbc, RetryWaiter {
             completed.countDown(); check(advance.await(10, TimeUnit.SECONDS))
         }, DatabaseWaitProperties(checkInterval = Duration.ofMillis(1)), SimpleMeterRegistry())
@@ -848,7 +856,7 @@ class PublicationTransactionsIntegrationTest(
         whenever(pipeline.embedding.embed(any())).thenThrow(RuntimeException("503"))
         val finished=CountDownLatch(1)
         doAnswer {
-            val result=it.callRealMethod()
+            val result=it.callSpiedMethod()
             if(it.getArgument<JobOutcome>(3)==JobOutcome.DELETED) {
                 TransactionSynchronizationManager.registerSynchronization(object : org.springframework.transaction.support.TransactionSynchronization {
                     override fun afterCommit() { finished.countDown() }
@@ -859,9 +867,10 @@ class PublicationTransactionsIntegrationTest(
         val worker=DbJobWorker(QueueProperties(concurrency=1,pollInterval=Duration.ofDays(1)),pipeline.database,
             queue,pipeline.runner,ThreadSleepQueueLoopWaiter(),5,ExecutionResults())
         // 이미 커밋된 첫 claim을 넘긴 뒤 실제 큐 진입점으로 이어 간다.
-        whenever(store.claim(eq(5),any(),any())).thenAnswer {
-            if(row(job)["status"]=="PROCESSING") job else it.callRealMethod()
-        }
+        // spy에 whenever(spy.claim(...))를 쓰면 stub을 거는 순간 실제 claim이 null 인자로 호출된다.
+        doAnswer {
+            if(row(job)["status"]=="PROCESSING") job else it.callSpiedMethod()
+        }.whenever(store).claim(eq(5),any(),any())
         worker.start()
         try {
             check(finished.await(5,TimeUnit.SECONDS))
@@ -891,8 +900,8 @@ class PublicationTransactionsIntegrationTest(
     @ParameterizedTest @ValueSource(strings=["chunks","completion"])
     fun `DELETE 삭제 후와 완료 UPDATE 후 중단은 실제 서비스 TX 전체를 rollback한다`(stage:String) {
         val job=deleteFixture(); val before=databaseState()
-        if(stage=="chunks") doAnswer { it.callRealMethod(); error("after deletion") }.whenever(chunks).deleteByDocumentId(1)
-        else doAnswer { it.callRealMethod(); error("after completion") }.whenever(jobs).complete(any(),any(),any(),any())
+        if(stage=="chunks") doAnswer { it.callSpiedMethod(); error("after deletion") }.whenever(chunks).deleteByDocumentId(1)
+        else doAnswer { it.callSpiedMethod(); error("after completion") }.whenever(jobs).complete(any(),any(),any(),any())
         assertThatThrownBy { deletion.delete(job) }.isInstanceOf(IllegalStateException::class.java)
         assertThat(databaseState()).isEqualTo(before)
     }
