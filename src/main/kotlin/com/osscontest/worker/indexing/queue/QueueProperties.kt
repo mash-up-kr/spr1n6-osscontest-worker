@@ -8,8 +8,9 @@ import java.util.UUID
 data class QueueProperties(
     val enabled: Boolean = true,
     val workerId: String = UUID.randomUUID().toString(),
-    val concurrency: Int = 5,
-    val pollInterval: Duration = Duration.ofSeconds(1),
+    val concurrency: Int = 5, // Maximum claim/processing loops per Worker instance.
+    val pollInterval: Duration = Duration.ofSeconds(1), // Idle discovery and unexpected claim-error backoff.
+    val workerIdleTimeout: Duration = Duration.ofSeconds(60), // Keep idle threads briefly for reuse, then release them.
     val leaseDuration: Duration = Duration.ofSeconds(60),
     val heartbeatInterval: Duration = Duration.ofSeconds(10),
 ) {
@@ -17,6 +18,7 @@ data class QueueProperties(
         require(workerId.isNotBlank())
         require(concurrency > 0)
         require(pollInterval.toMillis() > 0 && heartbeatInterval.toMillis() > 0)
+        require(workerIdleTimeout.toMillis() > 0)
         require(leaseDuration > heartbeatInterval.multipliedBy(2))
     }
 }

@@ -3,9 +3,10 @@ package com.osscontest.worker.indexing.queue
 import com.osscontest.worker.indexing.deletion.service.DocumentDeletionService
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
-import com.osscontest.worker.indexing.pipeline.domain.JobOutcome
+import com.osscontest.worker.indexing.queue.JobOutcome
 import com.osscontest.worker.indexing.publication.domain.DocumentChunk
 import com.osscontest.worker.indexing.publication.service.IndexingPublicationService
+import com.osscontest.worker.support.claimFixture
 import com.osscontest.worker.support.assertDedicatedIntegrationDatabase
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
@@ -14,6 +15,8 @@ import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.jdbc.core.JdbcTemplate
+import org.mockito.kotlin.whenever
+import org.springframework.test.context.bean.override.mockito.MockitoBean
 import org.springframework.test.context.ActiveProfiles
 import java.time.LocalDateTime
 import java.util.UUID
@@ -32,8 +35,12 @@ class DeletedDocumentIntegrationTest(
     private val oldVersionId = 900001L
     private val newVersionId = 900002L
 
+    @MockitoBean private lateinit var breaker: CircuitBreaker
+
     @BeforeEach
     fun fixture() {
+        whenever(breaker.admission()).thenReturn(ClaimAdmission.NORMAL)
+        com.osscontest.worker.support.allowCircuitCalls(breaker)
         assertDedicatedIntegrationDatabase(jdbc)
         cleanup()
         jdbc.update("INSERT INTO tenant (id, name) VALUES (?, 'deleted-document')", tenantId)
@@ -67,7 +74,7 @@ class DeletedDocumentIntegrationTest(
 
     private fun claimIndex(versionId: Long = oldVersionId): ClaimedJob {
         queue.enqueue(UUID.randomUUID(), documentId, versionId, JobType.INDEX, null)
-        return checkNotNull(queue.claim(5) {})
+        return checkNotNull(queue.claimFixture(5) {})
     }
 
     private fun enqueueIndexWithoutClaim(versionId: Long = oldVersionId): Long {
@@ -98,12 +105,12 @@ class DeletedDocumentIntegrationTest(
         val job = claimIndex()
         deleteDocument()
 
-        assertThat(deletion.skipIndexForDeletedDocument(job.token)).isTrue()
+        assertThat(publication.preflight(job)).isTrue()
         assertThat(row(job.token.jobId)["status"]).isEqualTo("COMPLETED")
-        assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.SKIPPED_DOCUMENT_DELETED)
+        assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.SKIPPED_DOCUMENT_DELETED.name)
         val completed = completedAt(job.token.jobId)
 
-        assertThat(deletion.skipIndexForDeletedDocument(job.token)).isTrue()
+        assertThat(publication.preflight(job)).isTrue()
         assertThat(completedAt(job.token.jobId)).isEqualTo(completed)
     }
 
@@ -111,7 +118,7 @@ class DeletedDocumentIntegrationTest(
     fun `삭제되지 않은 문서는 false를 돌려주고 Job을 건드리지 않는다`() {
         val job = claimIndex()
 
-        assertThat(deletion.skipIndexForDeletedDocument(job.token)).isFalse()
+        assertThat(publication.preflight(job)).isFalse()
         assertThat(row(job.token.jobId)["status"]).isEqualTo("PROCESSING")
         assertThat(row(job.token.jobId)["outcome"]).isNull()
     }
@@ -123,7 +130,7 @@ class DeletedDocumentIntegrationTest(
 
         assertThat(publication.publish(context(job), listOf(chunk(0)))).isEqualTo(IndexingJobStatus.COMPLETED)
         assertThat(chunkCount()).isZero()
-        assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.SKIPPED_DOCUMENT_DELETED)
+        assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.SKIPPED_DOCUMENT_DELETED.name)
         assertThat(jdbc.queryForObject("SELECT searchable_version_id FROM document WHERE id = ?", Long::class.java, documentId)).isNull()
     }
 
@@ -135,56 +142,56 @@ class DeletedDocumentIntegrationTest(
 
         assertThat(chunkCount()).isEqualTo(1)
         assertThat(row(job.token.jobId)["status"]).isEqualTo("COMPLETED")
-        assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.INDEXED)
+        assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.INDEXED.name)
     }
 
     @Test
     fun `DELETE Job 완료는 outcome DELETED를 기록한다`() {
         deleteDocument()
         queue.enqueue(UUID.randomUUID(), documentId, null, JobType.DELETE, null)
-        val job = checkNotNull(queue.claim(5) {})
+        val job = checkNotNull(queue.claimFixture(5) {})
 
         deletion.delete(job)
 
-        assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.DELETED)
+        assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.DELETED.name)
     }
 
     @Test
-    fun `회수는 삭제된 문서의 미종결 INDEX Job을 SKIPPED로 종결하고 후속 DELETE가 진행된다`() {
+    fun `소유한 삭제 INDEX를 preflight로 종결한 뒤 후속 DELETE가 진행된다`() {
         val job = claimIndex()
         deleteDocument()
         queue.enqueue(UUID.randomUUID(), documentId, null, JobType.DELETE, null)
         // 선행 INDEX가 미종결이라 DELETE는 아직 claim되지 않는다.
-        assertThat(queue.claim(5) {}).isNull()
+        assertThat(queue.claimFixture(5) {}).isNull()
 
-        queue.recover(5, java.time.Duration.ofSeconds(30))
+        assertThat(publication.preflight(job)).isTrue()
 
         assertThat(row(job.token.jobId)["status"]).isEqualTo("COMPLETED")
-        assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.SKIPPED_DOCUMENT_DELETED)
-        assertThat(checkNotNull(queue.claim(5) {}).type).isEqualTo(JobType.DELETE)
+        assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.SKIPPED_DOCUMENT_DELETED.name)
+        assertThat(checkNotNull(queue.claimFixture(5) {}).type).isEqualTo(JobType.DELETE)
     }
 
     @Test
-    fun `시도 횟수를 다 쓴 삭제 문서의 Job도 FAILED가 아니라 SKIPPED로 종결된다`() {
+    fun `시도 한도를 소진한 삭제 INDEX는 Worker가 선점하거나 강제 종결하지 않는다`() {
         val jobId = enqueueIndexWithoutClaim()
         jdbc.update("UPDATE indexing_job SET attempt_count = 5 WHERE id = ?", jobId)
         deleteDocument()
 
-        queue.recover(5, java.time.Duration.ofSeconds(30))
-
-        assertThat(row(jobId)["status"]).isEqualTo("COMPLETED")
-        assertThat(row(jobId)["outcome"]).isEqualTo(JobOutcome.SKIPPED_DOCUMENT_DELETED)
+        val before = row(jobId)
+        assertThat(queue.claimFixture(5) {}).isNull()
+        assertThat(row(jobId)).isEqualTo(before)
     }
 
     @Test
-    fun `오래된 버전의 재시도는 계속 FAILED DOCUMENT_INELIGIBLE로 종결된다`() {
+    fun `유효한 구버전 결과는 저장 완료하되 검색 버전을 역행시키지 않는다`() {
         jdbc.update("UPDATE document SET searchable_version_id = ? WHERE id = ?", newVersionId, documentId)
-        val jobId = enqueueIndexWithoutClaim(oldVersionId)
+        val job = claimIndex(oldVersionId)
+        publication.publish(context(job), listOf(chunk(0)))
 
-        queue.recover(5, java.time.Duration.ofSeconds(30))
-
-        assertThat(row(jobId)["status"]).isEqualTo("FAILED")
-        assertThat(row(jobId)["last_error_code"]).isEqualTo("DOCUMENT_INELIGIBLE")
-        assertThat(row(jobId)["outcome"]).isNull()
+        assertThat(row(job.token.jobId)["status"]).isEqualTo("COMPLETED")
+        assertThat(row(job.token.jobId)["outcome"]).isEqualTo(JobOutcome.INDEXED.name)
+        assertThat(chunkCount()).isEqualTo(1)
+        assertThat(jdbc.queryForObject("SELECT searchable_version_id FROM document WHERE id = ?", Long::class.java, documentId))
+            .isEqualTo(newVersionId)
     }
 }

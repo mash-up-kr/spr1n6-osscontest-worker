@@ -16,6 +16,7 @@ import com.osscontest.worker.indexing.publication.repository.IndexingJobReposito
 import com.osscontest.worker.indexing.retrieval.ContentIntegrityException
 import com.osscontest.worker.indexing.retrieval.DocumentDownloadClient
 import com.osscontest.worker.indexing.retrieval.FileTooLargeException
+import com.osscontest.worker.indexing.retrieval.TemporaryDocumentFile
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
@@ -44,6 +45,7 @@ internal class IndexingAttemptProcessor(
         documentId: Long,
         documentVersion: DocumentVersionEntity,
         faultInjectionContext: FaultInjectionContext,
+        attemptCount: Int = 1,
         onStageStarted: (String) -> Unit,
     ) {
         if (documentVersion.fileSize > maxFileSizeBytes) {
@@ -61,13 +63,13 @@ internal class IndexingAttemptProcessor(
         updatePhase(token, "DOWNLOADING")
         execution.checkpoint(token)
         val tempFile = downloadClient.download(documentVersion.sourceObjectKey)
-        log.info(
-            "indexing stage completed: stage=DOWNLOADING jobId={} downloadedBytes={} durationMs={}",
-            jobId,
-            Files.size(tempFile),
-            elapsedMillis(downloadStartedAt),
-        )
-        try {
+        TemporaryDocumentFile(tempFile).use { file ->
+            log.info(
+                "indexing stage completed: stage=DOWNLOADING jobId={} downloadedBytes={} durationMs={}",
+                jobId,
+                Files.size(tempFile),
+                elapsedMillis(downloadStartedAt),
+            )
             onStageStarted("VERIFYING_CONTENT")
             val verificationStartedAt = System.nanoTime()
             log.info("indexing stage started: stage=VERIFYING_CONTENT jobId={}", jobId)
@@ -90,7 +92,7 @@ internal class IndexingAttemptProcessor(
             )
             updatePhase(token, "PARSING")
             val parser = parserRegistry.findParser(documentVersion.mimeType)
-            val blocks = parsingTimeoutGuard.parse(parser, tempFile, documentVersion.mimeType)
+            val blocks = parsingTimeoutGuard.parse(parser, file, documentVersion.mimeType)
             log.info(
                 "indexing stage completed: stage=PARSING jobId={} blockCount={} durationMs={}",
                 jobId,
@@ -125,6 +127,7 @@ internal class IndexingAttemptProcessor(
                     versionNo = documentVersion.versionNo,
                     extractedMetadata = null,
                     executionToken = token,
+                    attemptCount = attemptCount,
                 )
 
             onStageStarted("EMBEDDING")
@@ -140,8 +143,6 @@ internal class IndexingAttemptProcessor(
                 context = faultInjectionContext,
             )
             indexingProcessor.process(context, chunks)
-        } finally {
-            Files.deleteIfExists(tempFile)
         }
     }
 

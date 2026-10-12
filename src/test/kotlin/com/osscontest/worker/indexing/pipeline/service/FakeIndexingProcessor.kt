@@ -41,7 +41,7 @@ class FakeIndexingProcessor(
             context.jobId,
             context.executionToken.workerId,
             context.executionToken.epoch,
-            com.osscontest.worker.indexing.pipeline.domain.JobOutcome.INDEXED,
+            com.osscontest.worker.indexing.queue.JobOutcome.INDEXED,
         )
     }
 }

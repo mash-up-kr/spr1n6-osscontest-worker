@@ -11,28 +11,46 @@ class ExecutionOperations(
     fun checkpoint(token: ExecutionToken, allowCompleted: Boolean = false) {
         database.execute {
             var job = store.snapshot(token) ?: throw ExecutionLostException(token)
-            if (!job.matches(token)) throw ExecutionLostException(token)
-            if (job.status == IndexingJobStatus.COMPLETED) {
+            if (job.completed(token)) {
                 if (allowCompleted) return@execute
                 throw ExecutionCompletedException(token)
             }
-            if (job.status !in ownedStatuses || job.leaseUntil == null) throw ExecutionLostException(token)
-            if (job.leaseUntil <= job.now) {
+            if (!job.ownsProcessing(token)) throw ExecutionLostException(token)
+            if (!job.canWrite(token)) {
                 if (store.renew(token) != 1) throw ExecutionLostException(token)
                 job = store.snapshot(token) ?: throw ExecutionLostException(token)
-                if (!job.matches(token) || job.status !in ownedStatuses) throw ExecutionLostException(token)
-                if (job.leaseUntil == null || job.leaseUntil <= job.now) throw LeaseExpiredException()
+                if (!job.ownsProcessing(token)) throw ExecutionLostException(token)
+                if (!job.canWrite(token)) throw LeaseExpiredException()
             }
         }
     }
 
-    fun <T> database(token: ExecutionToken, allowCompleted: Boolean = false, action: () -> T): T {
+    /** Rechecks the primary receipt on every retry, before invoking retained result writes. */
+    fun <T> completion(token: ExecutionToken, identity: ExecutionIdentity, completed: () -> T, action: () -> T): T {
         while (true) {
             try {
-                return database.execute(afterRecovery = { checkpoint(token, allowCompleted) }, action = action)
+                return database.execute {
+                    val snapshot = store.snapshot(token) ?: throw ExecutionLostException(token)
+                    if (!identity.matches(snapshot)) throw ExecutionLostException(token)
+                    if (snapshot.completed(token)) completed()
+                    else {
+                        checkpoint(token)
+                        action()
+                    }
+                }
+            } catch (_: LeaseExpiredException) {
+                checkpoint(token, allowCompleted = true)
+            }
+        }
+    }
+
+    fun <T> database(token: ExecutionToken, action: () -> T): T {
+        while (true) {
+            try {
+                return database.execute(afterRecovery = { checkpoint(token) }, action = action)
             } catch (_: LeaseExpiredException) {
                 // The failed transaction has unwound before renewing and recalling it.
-                checkpoint(token, allowCompleted)
+                checkpoint(token)
             }
         }
     }
@@ -47,4 +65,10 @@ class ExecutionOperations(
             }
         }
     }
+}
+
+data class ExecutionIdentity(val type: JobType, val documentId: Long, val documentVersionId: Long?) {
+    constructor(job: ClaimedJob) : this(job.type, job.documentId, job.documentVersionId)
+    fun matches(snapshot: JobSnapshot) = snapshot.type == type && snapshot.documentId == documentId &&
+        snapshot.documentVersionId == documentVersionId
 }

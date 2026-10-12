@@ -13,6 +13,7 @@ import com.osscontest.worker.indexing.publication.repository.DocumentVersionRepo
 import com.osscontest.worker.indexing.publication.repository.DocumentRepository
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
 import com.osscontest.worker.indexing.publication.service.IndexingFailureService
+import com.osscontest.worker.indexing.publication.service.IndexingPublicationService
 import com.osscontest.worker.indexing.queue.*
 import com.osscontest.worker.indexing.retrieval.DocumentDownloadClient
 import io.micrometer.core.instrument.MeterRegistry
@@ -44,6 +45,7 @@ class IndexingPipelineRunner(
     private val meterRegistry: MeterRegistry,
     @Value("\${indexing.storage.job-after-upload-confirmed:false}")
     private val jobAfterUploadConfirmed: Boolean = false,
+    private val publication: IndexingPublicationService,
 ) {
     init { require(maxAttempts > 0 && baseDelay.toMillis() > 0) }
 
@@ -58,21 +60,12 @@ class IndexingPipelineRunner(
             execution.checkpoint(job.token)
             try {
                 if (job.type == JobType.DELETE) {
-                    execution.database(job.token, allowCompleted = true) { deletion.delete(job) }
+                    execution.completion(job.token, ExecutionIdentity(job), completed = {}) { deletion.delete(job); Unit }
                 } else {
-                    val document = execution.database(job.token) {
-                        documentRepository.findById(job.documentId).orElseThrow {
-                            InvalidJobException("DOCUMENT_NOT_FOUND", "Document not found")
-                        }
+                    val finished = execution.completion(job.token, ExecutionIdentity(job), completed = { true }) {
+                        publication.preflight(job)
                     }
-                    // 위 조회는 잠금이 없어서 삭제로 보여도 확정이 아니다. 잠금 후 재확인에서 false가 오면 정상 처리를 이어간다.
-                    if (document.deletedAt != null &&
-                        execution.database(job.token, allowCompleted = true) { deletion.skipIndexForDeletedDocument(job.token) }
-                    ) {
-                        log.info("INDEXING_JOB_SKIPPED jobId={} reason=DOCUMENT_DELETED workerId={} epoch={}",
-                            job.token.jobId, job.token.workerId, job.token.epoch)
-                        return
-                    }
+                    if (finished) return
                     val documentVersionId = job.documentVersionId
                         ?: throw InvalidJobException("MISSING_DOCUMENT_VERSION_ID", "Missing version")
                     val version = execution.database(job.token) {
@@ -82,7 +75,7 @@ class IndexingPipelineRunner(
                     }
                     if (version.documentId != job.documentId) throw InvalidJobException("DOCUMENT_MISMATCH", "Version mismatch")
                     attempt.process(job.token.jobId, job.token, job.documentId, version,
-                        FaultInjectionContext(job.sourceEventId, job.token)) {}
+                        FaultInjectionContext(job.sourceEventId, job.token), job.attemptCount) {}
                 }
                 log.info("INDEXING_JOB_COMPLETED jobId={} workerId={} epoch={}", job.token.jobId, job.token.workerId, job.token.epoch)
                 return

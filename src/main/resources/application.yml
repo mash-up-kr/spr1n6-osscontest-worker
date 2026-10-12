@@ -30,8 +30,12 @@ indexing:
   queue:
     enabled: ${INDEXING_DB_QUEUE_ENABLED:true}
     worker-id: ${INDEXING_WORKER_ID:${random.uuid}}
+    # Worker 인스턴스별 최대 활동 루프 수. 작업이 있을 때만 최대치까지 늘어난다.
     concurrency: ${INDEXING_QUEUE_CONCURRENCY:5}
+    # idle 워커의 새 작업 탐색 간격. 처리 중인 워커는 완료 직후 다음 claim을 한다.
     poll-interval: ${INDEXING_QUEUE_POLL_INTERVAL:PT1S}
+    # idle 스레드를 1분 동안 재사용한 뒤 해제한다. 새 작업이 오면 다시 생성된다.
+    worker-idle-timeout: ${INDEXING_WORKER_IDLE_TIMEOUT:PT60S}
     lease-duration: ${INDEXING_LEASE_DURATION:PT60S}
     heartbeat-interval: ${INDEXING_HEARTBEAT_INTERVAL:PT10S}
   circuit-breaker:
@@ -40,6 +44,8 @@ indexing:
     failure-threshold: ${INDEXING_CIRCUIT_BREAKER_FAILURE_THRESHOLD:5}
     # 열린 뒤 이 시간이 지나면 한 Worker가 시험 호출을 한다.
     open-duration: ${INDEXING_CIRCUIT_BREAKER_OPEN_DURATION:PT60S}
+    # Actual probe TTL; must exceed spring.ai.openai.embedding.timeout (default 60s).
+    call-duration: ${INDEXING_CIRCUIT_BREAKER_CALL_DURATION:PT90S}
   database:
     check-interval: ${INDEXING_DB_CHECK_INTERVAL:PT5S}
     query-timeout: ${INDEXING_DB_QUERY_TIMEOUT:PT3S}

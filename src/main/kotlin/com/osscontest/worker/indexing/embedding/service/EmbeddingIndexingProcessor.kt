@@ -3,16 +3,19 @@ package com.osscontest.worker.indexing.embedding.service
 import com.osscontest.worker.indexing.chunking.domain.Chunk
 import com.osscontest.worker.indexing.embedding.usecase.EmbeddingUseCase
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
+import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.pipeline.service.IndexingProcessor
-import com.osscontest.worker.indexing.queue.ExternalApiOperations
-import com.osscontest.worker.indexing.queue.ExecutionOperations
 import com.osscontest.worker.indexing.publication.domain.DocumentChunk
 import com.osscontest.worker.indexing.publication.service.IndexingPublicationService
+import com.osscontest.worker.indexing.queue.ExecutionIdentity
+import com.osscontest.worker.indexing.queue.ExecutionOperations
+import com.osscontest.worker.indexing.queue.ExternalApiOperations
+import com.osscontest.worker.indexing.queue.JobType
+import java.time.Clock
+import java.time.LocalDateTime
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
-import java.time.Clock
-import java.time.LocalDateTime
 
 @Service
 class EmbeddingIndexingProcessor(
@@ -75,7 +78,9 @@ class EmbeddingIndexingProcessor(
                 context.documentVersionId,
                 documentChunks.size,
             )
-            val status = execution.database(context.executionToken, allowCompleted = true) {
+            val status = execution.completion(context.executionToken,
+                ExecutionIdentity(JobType.INDEX, context.documentId, context.documentVersionId),
+                completed = { IndexingJobStatus.COMPLETED }) {
                 indexingPublicationService.publish(context, documentChunks)
             }
             log.info(
@@ -121,7 +126,7 @@ class EmbeddingIndexingProcessor(
             batches.add(currentBatch)
         }
         return batches.flatMap { batch ->
-            externalApi.execute(context.executionToken) { embeddingUseCase.embed(batch.map(Chunk::content)) }
+            externalApi.execute(context.executionToken, context.attemptCount) { embeddingUseCase.embed(batch.map(Chunk::content)) }
         }
     }
 

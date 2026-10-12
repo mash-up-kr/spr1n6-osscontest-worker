@@ -1,5 +1,6 @@
 package com.osscontest.worker.indexing.pipeline.service
 
+import com.osscontest.worker.support.claimFixture
 import com.osscontest.worker.indexing.queue.JobQueueStore
 import com.osscontest.worker.indexing.queue.JobType
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
@@ -56,6 +57,8 @@ class IndexingPipelineRunnerIntegrationTest(
     @MockitoBean
     private lateinit var downloadClient: DocumentDownloadClient
 
+    @MockitoBean private lateinit var breaker: com.osscontest.worker.indexing.queue.CircuitBreaker
+
     @BeforeAll
     fun verifyDedicatedDatabase() {
         assertDedicatedIntegrationDatabase(jdbcTemplate)
@@ -63,6 +66,8 @@ class IndexingPipelineRunnerIntegrationTest(
 
     @BeforeEach
     fun resetProcessor() {
+        whenever(breaker.admission()).thenReturn(com.osscontest.worker.indexing.queue.ClaimAdmission.NORMAL)
+        com.osscontest.worker.support.allowCircuitCalls(breaker)
         fakeIndexingProcessor.reset()
     }
 
@@ -104,19 +109,7 @@ class IndexingPipelineRunnerIntegrationTest(
         // 처음 두 번은 실패(재시도 가능한 RuntimeException), 세 번째는 성공하도록 설정.
         fakeIndexingProcessor.failuresBeforeSuccess = 2
 
-        repeat(3) { attempt ->
-            repeat(5) { attempt ->
-            pipelineRunner.run(checkNotNull(queue.claim(5) {}))
-            if (attempt < 4) jdbcTemplate.update(
-                "UPDATE indexing_job SET next_retry_at = clock_timestamp() - INTERVAL '1 second' WHERE source_event_id = ?", sourceEventId)
-        }
-            if (attempt < 2) {
-                val waiting = checkNotNull(indexingJobRepository.findBySourceEventId(sourceEventId))
-                assertThat(waiting.status).isEqualTo(IndexingJobStatus.RETRY_WAIT)
-                assertThat(waiting.workerId).isNull()
-                jdbcTemplate.update("UPDATE indexing_job SET next_retry_at = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", waiting.id)
-            }
-        }
+        executeAttempts(sourceEventId, 3, IndexingJobStatus.COMPLETED)
 
         val job = indexingJobRepository.findBySourceEventId(sourceEventId)
         assertThat(job).isNotNull
@@ -149,7 +142,7 @@ class IndexingPipelineRunnerIntegrationTest(
 
         fakeIndexingProcessor.failuresBeforeSuccess = Int.MAX_VALUE // 계속 실패
 
-        pipelineRunner.run(checkNotNull(queue.claim(5) {}))
+        executeAttempts(sourceEventId, 5, IndexingJobStatus.FAILED)
 
         val job = indexingJobRepository.findBySourceEventId(sourceEventId)
         assertThat(job).isNotNull
@@ -181,7 +174,7 @@ class IndexingPipelineRunnerIntegrationTest(
         val sourceEventId = UUID.randomUUID()
         queue.enqueue(sourceEventId, 900003L, 900003L, JobType.INDEX, null)
 
-        pipelineRunner.run(checkNotNull(queue.claim(5) {}))
+        pipelineRunner.run(checkNotNull(queue.claimFixture(5) {}))
 
         val job = indexingJobRepository.findBySourceEventId(sourceEventId)
         assertThat(job).isNotNull
@@ -190,4 +183,39 @@ class IndexingPipelineRunnerIntegrationTest(
         assertThat(job.lastErrorCode).isEqualTo("HASH_MISMATCH")
     }
 
+    private fun executeAttempts(event: UUID, count: Int, terminal: IndexingJobStatus) {
+        var original: Map<String, Any?>? = null
+        var previousEpoch = 0L
+        repeat(count) { index ->
+            val claim = checkNotNull(queue.claim(5, "runner-test-${index + 1}"))
+            val claimed = jdbcTemplate.queryForMap("SELECT * FROM indexing_job WHERE id=?", claim.token.jobId)
+            if (original == null) original = claimed
+            for (column in listOf("id", "source_event_id", "enqueue_seq")) {
+                assertThat(claimed[column]).isEqualTo(original[column])
+            }
+            assertThat(claim.sourceEventId).isEqualTo(event)
+            assertThat(claim.attemptCount).isEqualTo(index + 1)
+            assertThat(claim.token.epoch).isEqualTo(previousEpoch + 1)
+            pipelineRunner.run(claim)
+            val saved = indexingJobRepository.findById(claim.token.jobId).orElseThrow()
+            assertThat(saved.executionEpoch).isEqualTo(claim.token.epoch)
+            assertThat(saved.attemptCount).isEqualTo(claim.attemptCount)
+            assertThat(saved.workerId).isNull()
+            assertThat(saved.leaseUntil).isNull()
+            if (index < count - 1) {
+                assertThat(saved.status).isEqualTo(IndexingJobStatus.RETRY_WAIT)
+                assertThat(saved.outcome).isEqualTo("RETRY_SCHEDULED")
+                // Set a deterministic future deadline before checking eligibility, then make it due.
+                jdbcTemplate.update("UPDATE indexing_job SET next_retry_at=clock_timestamp()+INTERVAL '1 minute' WHERE id=?", saved.id)
+                assertThat(queue.claimFixture(5) {}).isNull()
+                jdbcTemplate.update("UPDATE indexing_job SET next_retry_at=clock_timestamp()-INTERVAL '1 second' WHERE id=?", saved.id)
+            } else {
+                assertThat(saved.status).isEqualTo(terminal)
+                assertThat(saved.outcome).isEqualTo(if (terminal == IndexingJobStatus.COMPLETED) "INDEXED" else "FAILED_PROCESSING")
+                assertThat(queue.claimFixture(5) {}).isNull()
+            }
+            previousEpoch = claim.token.epoch
+        }
+        assertThat(fakeIndexingProcessor.calls).hasSize(count)
+    }
 }

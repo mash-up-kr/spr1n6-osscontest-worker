@@ -67,8 +67,20 @@ kotlin {
 
 tasks.test {
     useJUnitPlatform {
+        excludeTags("integration", "database")
+    }
+}
+
+tasks.register<Test>("databaseTest") {
+    group = "verification"
+    description = "Runs embedded database tests explicitly."
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform {
+        includeTags("database")
         excludeTags("integration")
     }
+    shouldRunAfter(tasks.test)
 }
 
 tasks.register<Test>("integrationTest") {
