@@ -13,8 +13,8 @@ interface DocumentRepository : JpaRepository<DocumentEntity, Long> {
     @Query("select document from DocumentEntity document where document.id = :id")
     fun findByIdForUpdate(@Param("id") id: Long): DocumentEntity?
 
-    // Job order and execution epochs fence writes. version_no rejects a late historical retry.
-    // The shared latest_embedding_version_no column remains Server response metadata, not a fence.
+    // 쓰기 차단은 Job 순서와 execution_epoch가 맡고, version_no 비교는 늦게 끝난 과거 버전 결과를 거절한다.
+    // latest_embedding_version_no는 Server 응답용 공용 메타데이터이며 fencing에 쓰지 않는다.
     @Modifying
     @Query(value = """
         UPDATE document d SET searchable_version_id = :documentVersionId,

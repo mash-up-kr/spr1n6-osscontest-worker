@@ -13,7 +13,7 @@ import java.sql.SQLRecoverableException
 import java.sql.SQLTransientConnectionException
 import java.util.concurrent.atomic.AtomicReference
 
-/** Call outside the transaction proxy: exceptions must unwind and release DB resources first. */
+/** 트랜잭션 프록시 밖에서 호출해야 한다. 예외가 먼저 트랜잭션을 풀어 DB 자원을 돌려준 뒤에 대기한다. */
 @Component
 class DatabaseOperations(
     jdbcTemplate: JdbcTemplate,
@@ -28,6 +28,7 @@ class DatabaseOperations(
     }
     private val log = LoggerFactory.getLogger(javaClass)
 
+    /** DB 연결 장애면 복구될 때까지 기다린 뒤 [action]을 다시 실행한다. 복구 직후에는 [afterRecovery]를 먼저 실행한다. */
     fun <T> execute(afterRecovery: () -> Unit = {}, action: () -> T): T {
         check(!TransactionSynchronizationManager.isActualTransactionActive()) {
             "Database wait must run outside a transaction"
@@ -64,7 +65,7 @@ class DatabaseOperations(
             waiter.waitFor(properties.checkInterval)
             try {
                 check(health.queryForObject("SELECT 1", Int::class.java) == 1)
-                // A probe started before a newer fault must not clear that fault.
+                // 새 장애보다 먼저 시작한 확인이 그 장애 표시를 지우지 않게 compareAndSet으로 바꾼다.
                 state.compareAndSet(observed, Availability(observed.generation, false))
             } catch (error: Exception) {
                 if (!isUnavailable(error)) throw error
@@ -80,6 +81,7 @@ class DatabaseOperations(
                 if (cause is DataAccessResourceFailureException || cause is QueryTimeoutException || cause is SQLRecoverableException ||
                     cause is SQLTransientConnectionException
                 ) return true
+                // 08xxx 연결 오류, 57P01~57P03 서버 종료·기동 중, 53300 연결 수 초과는 DB가 돌아오면 풀린다.
                 if (cause is SQLException) {
                     val sqlState = cause.sqlState.orEmpty()
                     if (sqlState.startsWith("08") || sqlState in setOf("57P01", "57P02", "57P03", "53300")) return true

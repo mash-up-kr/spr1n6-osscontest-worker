@@ -26,6 +26,10 @@ class IndexingFailureService(
     private val retryPolicy: RetryPolicy,
     private val results: ExecutionResults,
 ) {
+    /**
+     * 실패를 RETRY_WAIT 또는 FAILED로 기록하고 Worker·lease를 비운다.
+     * 같은 실행으로 다시 호출하면 처음 내린 결정을 재사용하며, 메트릭은 커밋 뒤에 한 번만 센다.
+     */
     @Transactional(isolation = Isolation.READ_COMMITTED)
     fun recordFailure(
         token: ExecutionToken,
@@ -46,6 +50,7 @@ class IndexingFailureService(
             return job.status
         }
         ownership.requireProcessing(execution, token)
+        // 코드는 Server 스키마 last_error_code VARCHAR(100)에 맞춘다. 메시지는 조회 API로 그대로 노출되므로 1000자로 자른다.
         val record = results.prepare(token) {
             FailureRecord(retryPolicy.decideFailure(permanent, job.attemptCount, maxAttempts, baseDelay,
                 indexingJobRepository.currentDbTimestamp(), retryAfter), errorCode.take(100), errorMessage.take(1000))

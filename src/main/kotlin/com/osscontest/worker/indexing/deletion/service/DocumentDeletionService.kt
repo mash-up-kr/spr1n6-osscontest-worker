@@ -12,6 +12,7 @@ import com.osscontest.worker.indexing.publication.repository.IndexingJobReposito
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
+/** DELETE Job을 처리한다. 문서가 삭제됐는지 확인하고 청크 삭제와 Job 완료를 한 트랜잭션에 저장한다. */
 @Service
 class DocumentDeletionService(
     private val indexingJobRepository: IndexingJobRepository,

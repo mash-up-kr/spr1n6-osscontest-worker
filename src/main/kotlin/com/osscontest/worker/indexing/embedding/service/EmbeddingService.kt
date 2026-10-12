@@ -20,7 +20,8 @@ class EmbeddingService(
             // 영구 실패 예외로 바꿔 바로 FAILED로 끝낸다. 5xx·네트워크 오류는 그대로 전파해 breaker가 센다.
             throw EmbeddingRequestRejectedException(e)
         } catch (e: RateLimitException) {
-            // Shared quota/configuration failures open the circuit and still use the bounded Job retry path.
+            // 결제 한도 초과(insufficient_quota)는 모든 호출에 공통이므로 breaker를 바로 연다.
+            // 그 밖의 429는 Retry-After를 넘겨 재시도 시각의 하한으로 쓴다. 두 경우 모두 Job은 시도 한도 안에서 재시도한다.
             if (e.code().orElse(null) == INSUFFICIENT_QUOTA) throw EmbeddingQuotaExceededException(e)
             throw EmbeddingRateLimitedException(e.headers().values("retry-after").firstOrNull(), e)
         } catch (e: UnauthorizedException) {

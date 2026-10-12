@@ -8,9 +8,9 @@ import java.util.UUID
 data class QueueProperties(
     val enabled: Boolean = true,
     val workerId: String = UUID.randomUUID().toString(),
-    val concurrency: Int = 5, // Maximum claim/processing loops per Worker instance.
-    val pollInterval: Duration = Duration.ofSeconds(1), // Idle discovery and unexpected claim-error backoff.
-    val workerIdleTimeout: Duration = Duration.ofSeconds(60), // Keep idle threads briefly for reuse, then release them.
+    val concurrency: Int = 5, // Worker 인스턴스당 최대 claim·처리 루프 수다.
+    val pollInterval: Duration = Duration.ofSeconds(1), // idle 작업 탐색 간격이자 claim 오류 뒤 대기 시간이다.
+    val workerIdleTimeout: Duration = Duration.ofSeconds(60), // idle 스레드를 이 시간 동안 재사용한 뒤 해제한다.
     val leaseDuration: Duration = Duration.ofSeconds(60),
     val heartbeatInterval: Duration = Duration.ofSeconds(10),
 ) {
@@ -19,6 +19,7 @@ data class QueueProperties(
         require(concurrency > 0)
         require(pollInterval.toMillis() > 0 && heartbeatInterval.toMillis() > 0)
         require(workerIdleTimeout.toMillis() > 0)
+        // heartbeat가 한 번 늦어도 lease가 끝나지 않도록 heartbeat 간격의 두 배보다 길게 둔다.
         require(leaseDuration > heartbeatInterval.multipliedBy(2))
     }
 }

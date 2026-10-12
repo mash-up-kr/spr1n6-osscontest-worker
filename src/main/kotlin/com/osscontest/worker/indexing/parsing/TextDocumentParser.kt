@@ -16,8 +16,8 @@ class TextDocumentParser : DocumentParser {
             input.bufferedReader(Charsets.UTF_8).useLines { lines ->
                 val paragraph = StringBuilder()
 
-                // 중첩 local fun은 sequence 빌더의 SequenceScope 리시버를 이어받지 못해 yield를
-                // 못 부른다 — 그래서 문단 방출은 항상 메인 루프에서 하고, 이 함수는 버퍼 비우기만 한다.
+                // yield는 sequence 빌더 블록에서만 부를 수 있어 local fun 안에서는 쓸 수 없다.
+                // 문단 방출은 메인 루프에서 하고 이 함수는 버퍼만 비운다.
                 fun flushParagraph() {
                     paragraph.clear()
                 }
@@ -40,8 +40,8 @@ class TextDocumentParser : DocumentParser {
 
                         val level = headingMatch.groupValues[1].length
                         val headingText = headingMatch.groupValues[2].trim()
-                        // 레벨을 건너뛰는 경우(예: H1 다음 바로 H3)는 가상의 중간 헤딩을 만들지 않고
-                        // 더 깊은 헤딩을 가장 가까운 얕은 헤딩 아래에 그대로 중첩시킨다 — 의도된 동작.
+                        // 레벨을 건너뛰면(예: H1 다음 H3) 가상의 중간 헤딩을 만들지 않고
+                        // 가장 가까운 얕은 헤딩 아래에 그대로 중첩한다.
                         while (headingStack.isNotEmpty() && headingStack.last().first >= level) {
                             headingStack.removeAt(headingStack.size - 1)
                         }

@@ -39,7 +39,7 @@ class RetryPolicy(private val jitter: RetryJitter) {
         val delayMillis = (baseDelay.toMillis().toDouble() * attemptCount.coerceAtLeast(1) * factor)
             .toLong().coerceAtLeast(1)
         val linearDeadline = dbNow.plusMillis(delayMillis)
-        // Retry-After is a provider minimum; it must not shorten the Job backoff.
+        // Retry-After는 공급자가 정한 최소 대기다. Job backoff를 줄이는 데 쓰지 않는다.
         val providerDeadline = retryAfterDeadline(retryAfter, dbNow)
         return FailureDecision(IndexingJobStatus.RETRY_WAIT,
             providerDeadline?.let { maxOf(linearDeadline, it) } ?: linearDeadline)

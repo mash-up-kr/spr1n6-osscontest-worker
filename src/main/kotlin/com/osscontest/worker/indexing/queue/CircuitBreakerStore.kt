@@ -7,7 +7,10 @@ import org.springframework.transaction.annotation.Transactional
 import java.time.Duration
 import java.time.Instant
 
-/** Required seeded row. Circuit writes never lock a document/Job. */
+/**
+ * external_circuit_breaker 행을 읽고 쓴다. 행은 마이그레이션이 미리 넣어 두어야 한다.
+ * breaker 쓰기는 문서·Job 행을 잠그지 않는다.
+ */
 @Repository
 class CircuitBreakerStore(private val jdbc: NamedParameterJdbcTemplate) {
     fun snapshot(name: String): BreakerSnapshot = checkNotNull(read(name)) { "Required circuit row missing: $name" }
@@ -33,7 +36,7 @@ class CircuitBreakerStore(private val jdbc: NamedParameterJdbcTemplate) {
             (rs.getObject("probe_job_id") as Number?)?.toLong(), (rs.getObject("probe_epoch") as Number?)?.toLong(),
             rs.getTimestamp("probe_until")?.toInstant(), rs.getString("probe_call_id"))
         }.firstOrNull()
-        // Projection time can precede FOR UPDATE's lock wait. Read DB time again under the acquired lock.
+        // 조회한 DB 시각이 FOR UPDATE 잠금 대기보다 앞설 수 있다. 잠금을 얻은 뒤 DB 시각을 다시 읽는다.
         return if (row != null && locking.isNotEmpty()) snapshot(name) else row
     }
 
@@ -56,7 +59,7 @@ class CircuitBreakerStore(private val jdbc: NamedParameterJdbcTemplate) {
             return CallAdmission.Allowed(CircuitPermit(name, row.generation, callId, token.workerId))
         }
         if (row.owns(token) && row.callId == null && row.deadline()!!.isAfter(row.now)) {
-            // Start the actual-call TTL after the claim's preparation reservation.
+            // claim에서 시험 호출을 예약해 둔 실행이므로 실제 호출 TTL은 지금부터 센다.
         } else if (row.available()) {
             reserve(name, row, token, callMillis)
             row = snapshot(name)
@@ -77,23 +80,26 @@ class CircuitBreakerStore(private val jdbc: NamedParameterJdbcTemplate) {
             row.callId == permit.callId && row.deadline()!!.isAfter(row.now)
     }
 
-    /** Receipt and state mutation share one transaction, including ignored stale results. */
+    /** 결과 기록과 상태 변경을 한 트랜잭션에 저장한다. 늦게 도착해 반영하지 않은 결과도 기록은 남긴다. */
     @Transactional(isolation = Isolation.READ_COMMITTED)
     fun record(permit: CircuitPermit, result: CircuitResult, threshold: Int, openMillis: Long,
                rateDeadline: (Instant) -> Instant): BreakerState {
         val row = checkNotNull(read(permit.name, " FOR UPDATE OF c")) { "Required circuit row missing: ${permit.name}" }
         val params = mapOf("name" to permit.name, "call" to permit.callId, "generation" to permit.generation,
             "owner" to permit.probeOwner, "outcome" to result.outcome.name)
+        // 이미 기록된 호출 결과 확인
         val receipt = jdbc.query("""SELECT outcome, resulting_state FROM external_circuit_result
             WHERE breaker_name = :name AND call_id = :call""", params) { rs, _ -> rs.getString(1) to rs.getString(2) }.firstOrNull()
         if (receipt != null) {
             check(receipt.first == result.outcome.name) { "Conflicting circuit result for ${permit.callId}" }
-            // The receipt proves idempotency; an old recorded state is not the current gauge state.
+            // 기록이 있으면 이미 처리한 호출이다. 기록된 resulting_state는 과거 값이므로 현재 상태를 돌려준다.
             return row.state
         }
+        // 허가 유효성 검증
         var accepted = row.generation == permit.generation && if (permit.probeOwner == null) row.state == BreakerState.CLOSED
             else row.state == BreakerState.HALF_OPEN && row.probeOwner == permit.probeOwner && row.callId == permit.callId &&
                 row.deadline()!!.isAfter(row.now)
+        // 다음 상태와 열림 기한 계산 및 반영
         if (accepted) {
             if (result.outcome == CircuitOutcome.RATE_LIMIT && result.retryAt == null) result.retryAt = rateDeadline(row.now)
             val probe = permit.probeOwner != null
@@ -107,7 +113,7 @@ class CircuitBreakerStore(private val jdbc: NamedParameterJdbcTemplate) {
             }
             val deadline = when (result.outcome) {
                 CircuitOutcome.RATE_LIMIT -> result.retryAt
-                CircuitOutcome.PERMANENT -> row.now
+                CircuitOutcome.PERMANENT -> row.now // 입력 문제라 API 상태를 알 수 없다. 다른 Job이 바로 시험 호출하게 한다
                 else -> row.now.plusMillis(openMillis)
             }
             accepted = jdbc.update("""
@@ -125,6 +131,7 @@ class CircuitBreakerStore(private val jdbc: NamedParameterJdbcTemplate) {
             """.trimIndent(), params + mapOf("state" to next.name, "probe" to probe,
                 "deadline" to deadline?.atOffset(java.time.ZoneOffset.UTC))) == 1
         }
+        // 결과 기록 저장
         val resulting = snapshot(permit.name).state
         jdbc.update("""INSERT INTO external_circuit_result
             (breaker_name, call_id, generation, probe_owner, outcome, applied, resulting_state)
@@ -133,6 +140,10 @@ class CircuitBreakerStore(private val jdbc: NamedParameterJdbcTemplate) {
         return resulting
     }
 
+    /**
+     * 결과를 기록하지 못하고 끝난 시험 호출을 반납한다.
+     * 다른 Worker가 바로 시험 호출을 하도록 열림 기한을 현재 시각으로 둔다.
+     */
     @Transactional(isolation = Isolation.READ_COMMITTED)
     fun release(name: String, token: ExecutionToken, callId: String) {
         jdbc.update("""UPDATE external_circuit_breaker SET state='OPEN', generation=generation+1,

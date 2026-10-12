@@ -3,7 +3,7 @@ package com.osscontest.worker.indexing.queue
 import com.osscontest.worker.indexing.publication.entity.IndexingJobEntity
 import org.springframework.stereotype.Component
 
-/** All callers retain the document and Job locks until their write transaction finishes. */
+/** 모든 호출자는 쓰기 트랜잭션이 끝날 때까지 문서·Job 잠금을 유지해야 한다. */
 @Component
 class JobOwnershipGuard(private val locks: JobExecutionLocks) {
     fun lockForResult(token: ExecutionToken): LockedJobExecution =
@@ -20,7 +20,7 @@ class JobOwnershipGuard(private val locks: JobExecutionLocks) {
         requireProcessing(lockForResult(token), token)
     }
 
-    /** Reuse the locked projection only within its transaction; final writes recheck the DB clock. */
+    /** 잠근 조회 결과는 같은 트랜잭션 안에서만 재사용한다. 최종 쓰기는 DB 시각으로 다시 확인한다. */
     fun requireProcessing(execution: LockedJobExecution, token: ExecutionToken) {
         locks.requireTransaction()
         if (!owns(execution, token)) throw ExecutionLostException(token)
@@ -34,7 +34,11 @@ class JobOwnershipGuard(private val locks: JobExecutionLocks) {
         execution.job.id == token.jobId && execution.snapshot().canWrite(token)
 }
 
-/** Used with alias j and ExecutionToken parameters. Renew permits an expired, unrecovered lease. */
+/**
+ * 별칭 j와 ExecutionToken 파라미터(:id, :workerId, :epoch)로 쓴다.
+ * [OWNED_PROCESSING]은 외부 회수나 새 claim으로 소유권이 바뀌지 않았으면 만료된 lease의 갱신도 허용한다.
+ * 결과 쓰기는 lease 만료까지 확인하는 [WRITABLE_PROCESSING]을 쓴다.
+ */
 internal object JobOwnershipSql {
     const val OWNED_PROCESSING = """
         j.id = :id AND j.worker_id = :workerId AND j.execution_epoch = :epoch

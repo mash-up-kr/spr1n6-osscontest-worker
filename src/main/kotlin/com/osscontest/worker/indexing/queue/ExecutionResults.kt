@@ -16,7 +16,7 @@ enum class JobOutcome {
     }
 }
 
-/** A read-only receipt never grants permission to write or renew. */
+/** 읽기 전용 완료 확인이다. 참이어도 쓰기나 lease 갱신 권한을 주지 않는다. */
 fun IndexingJobEntity.isCompletedExecution(token: ExecutionToken) = id == token.jobId &&
     snapshot().completed(token)
 
@@ -31,7 +31,7 @@ data class FailureRecord(val decision: FailureDecision, val code: String, val me
     fun matches(job: IndexingJobEntity, token: ExecutionToken) = job.id == token.jobId && matches(job.snapshot(), token)
 }
 
-/** Retains the original decision through rollback, database waits and an unknown commit result. */
+/** 롤백, DB 대기, 커밋 결과를 모르는 경우에도 처음 내린 실패 결정을 그대로 유지한다. */
 @Component
 class ExecutionResults {
     private val failures = ConcurrentHashMap<ExecutionToken, FailureRecord>()

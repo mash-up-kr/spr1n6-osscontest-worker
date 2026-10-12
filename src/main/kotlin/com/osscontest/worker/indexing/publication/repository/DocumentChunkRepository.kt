@@ -9,7 +9,7 @@ import org.springframework.transaction.annotation.Transactional
 
 /** Core 서버가 소유·마이그레이션하는 청크 스키마에서 Worker가 생성한 인덱싱 데이터만 관리한다. */
 interface DocumentChunkRepository : JpaRepository<DocumentChunkEntity, Long> {
-    // 몇 번을 다시 실행해도 두 번째부터는 0건 — 멱등(§3.9).
+    // 같은 문서를 다시 지우면 0건이 되므로 반복 실행해도 결과가 같다.
     @Modifying
     @Transactional
     @Query(

@@ -19,11 +19,8 @@ class S3DocumentDownloadClient(
                 .bucket(properties.bucket)
                 .key(objectKey)
                 .build()
-        // Files.createTempFile()는 유일한 경로를 "예약"하는 용도로만 쓴다 — 이 SDK 버전
-        // (sdk-core 2.29.1)의 ResponseTransformer.toFile(Path)는 내부적으로
-        // Files.copy(InputStream, Path)를 REPLACE_EXISTING 옵션 없이 호출하기 때문에,
-        // 대상 파일이 이미 존재하면(createTempFile이 만들어 놓은 빈 파일) FileAlreadyExistsException을
-        // 던진다. 그래서 경로만 얻고 파일 자체는 SDK가 쓰기 전에 지운다.
+        // createTempFile은 고유한 경로를 얻는 데만 쓴다. ResponseTransformer.toFile은 대상 파일이 이미 있으면
+        // FileAlreadyExistsException을 던지므로 빈 파일은 SDK가 쓰기 전에 지운다.
         val tempFile = Files.createTempFile("indexing-download-", ".tmp")
         Files.delete(tempFile)
         return try {
