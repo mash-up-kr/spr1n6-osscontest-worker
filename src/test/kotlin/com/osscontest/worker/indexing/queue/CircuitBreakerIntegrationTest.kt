@@ -13,7 +13,6 @@ import org.mockito.kotlin.*
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Import
-import org.springframework.core.io.ClassPathResource
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.jdbc.datasource.DriverManagerDataSource
@@ -23,6 +22,7 @@ import org.springframework.test.context.junit.jupiter.SpringJUnitConfig
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.annotation.EnableTransactionManagement
 import org.springframework.transaction.support.TransactionTemplate
+import java.nio.file.Path
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -78,7 +78,7 @@ class CircuitBreakerIntegrationTest(
             lease_until TIMESTAMPTZ,next_retry_at TIMESTAMPTZ,updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
             started_at TIMESTAMPTZ,completed_at TIMESTAMPTZ,trace_id TEXT,phase TEXT,outcome TEXT,
             last_error_code TEXT,last_error_message TEXT)""")
-        val migration = ClassPathResource("db/worker_migrations/20261012_worker_queue_and_circuit.sql").inputStream.bufferedReader().use { it.readText() }
+        val migration = Path.of("sql/20261012_worker_queue_and_circuit.sql").toFile().readText()
         val ddl = migration.substringAfter("-- CIRCUIT SCHEMA BEGIN").substringBefore("-- CIRCUIT SCHEMA END")
         jdbc.execute(ddl)
     }
