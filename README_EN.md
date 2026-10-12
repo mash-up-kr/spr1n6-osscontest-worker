@@ -30,10 +30,11 @@ The Server owns uploads, permissions, search, and the shared schema. Producers m
 `INDEX` or `DELETE` Jobs in the document mutation transaction. The Worker executes existing
 Jobs; removing source objects remains the Server's responsibility.
 
-**Deployment dependencies:** The [DB queue contract SQL](docs/sql/DB_JOB_QUEUE_CONTRACT.sql)
-is a proposal for the schema owner; the Worker does not execute it automatically. Existing queue deployments
-require the [retry upgrade SQL](docs/sql/DB_JOB_RETRY_MIGRATION.sql). Database schedulers must call
-recover_expired_indexing_jobs(max_attempts, base_delay_ms) with the same settings as the Worker.
+**Deployment dependencies:** The physical schema and migrations follow the Server. The Worker assumes
+a shared schema migrated by the Server and never changes it (`ddl-auto: none`).
+The queue and circuit breaker schema the Worker needs is collected in the
+[Worker migration proposal](sql/20261012_worker_queue_and_circuit.sql). The Server migration is written from this file; this repository never applies it.
+Recovering `PROCESSING` Jobs with expired leases is also outside the Worker.
 Durable Job production and restrictions on historical version retries must be implemented
 and verified in the Server repository. Worker changes do not migrate the Server.
 
@@ -47,9 +48,11 @@ Related repositories: [Server](https://github.com/mash-up-kr/spr1n6-osscontest-s
 - Ownership uses `job_id + worker_id + execution_epoch` and a lease. Heartbeats run on a separate thread.
 - Database connection failures wait at the failed database call. Transactions finish before periodic `SELECT 1` probes; temporary files and computed results remain available.
 - Once a database outage is detected, new claims and subsequent external calls wait. Requests already in progress may complete.
-- After recovery, the same owner resumes at the suspended point. An expired lease may be renewed conditionally; if recovery invalidates ownership first, the current execution exits.
+- After a database recovery, the same owner resumes at the suspended point. An expired lease is renewed while ownership is unchanged; if an external recovery procedure clears ownership first, the current execution exits.
 - Chunk UPSERT, version completion, searchable pointer promotion, and Job completion share one transaction. Replaying a save checks whether the same execution already completed before writing again.
 - Ordinary errors and 429 persist RETRY_WAIT with a database-time deadline or FAILED, atomically release worker/lease, and return the slot. Linear backoff has ±20% jitter; valid Retry-After is a minimum. The next claim runs the same Job as a new execution.
+- Consecutive transient embedding failures (five by default) open a DB-shared circuit breaker. Quota exhaustion (429 `insufficient_quota`) and authentication/permission errors (401/403) affect every call, so they open it immediately.
+- While the breaker is open, new INDEX claims and embedding calls stop. `DELETE` Jobs and `INDEX` Jobs for deleted documents, which do not call the embedding API, are still claimed. After the open period (60 seconds by default), one INDEX Job makes a probe call.
 - A `DELETE` Job removes chunks for a deleted document.
 
 ```mermaid
@@ -60,11 +63,10 @@ stateDiagram-v2
     RETRY_WAIT --> PROCESSING: new claim after due / increment attempts and epoch
     PROCESSING --> COMPLETED: atomic result save
     PROCESSING --> FAILED: permanent error or budget exhausted
-    PROCESSING --> RETRY_WAIT: lease expired / attempts remaining
 ```
 
-Recovery preserves retry deadlines. Losing ownership or restarting a Worker can cause the
-entire pipeline to run again under a new claim. Repeated external API costs are accepted.
+The Worker never claims a `PROCESSING` Job whose lease expired. After an external recovery procedure
+clears ownership, the next claim runs the entire pipeline again. Repeated external API costs are accepted.
 
 ## Document pipeline
 
@@ -139,9 +141,9 @@ the health check tests Java PID 1 liveness.
 ./gradlew integrationTest
 ```
 
-Unit tests cover parsers, chunking, queue capacity, database waits, ownership, and API retries
-without external services. Integration tests require a dedicated PostgreSQL/pgvector database,
-the shared schema, and the queue contract. Its name must contain `test` or `integration`.
+Unit tests cover parsers, chunking, queue capacity, database waits, ownership, and the circuit breaker
+without external services. Integration tests require a dedicated PostgreSQL/pgvector database
+with the shared schema and the Worker migration applied. Its name must contain `test` or `integration`.
 Configure `INTEGRATION_*` settings from `.env.example`. Live embedding tests run only when
 the key conditions in their test code are met.
 

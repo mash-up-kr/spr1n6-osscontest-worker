@@ -4,15 +4,17 @@
 
 ## Claims and execution slots
 
-`DbJobWorker` has one claim/recovery thread, one heartbeat thread, and a fixed execution pool
-sized by `indexing.queue.concurrency`. It reserves a free slot before claiming one Job.
+`DbJobWorker` uses a timer thread that wakes claim loops, a heartbeat timer with a renewal pool,
+and an execution pool of up to `indexing.queue.concurrency` threads. It reserves a free slot before claiming one Job.
+A loop that claims a Job wakes one more loop while processing, up to the limit, and returns its thread to the pool when no Job is claimable.
 Database outage waits retain the slot. Ordinary failures and 429 persist a retry and exit, releasing the slot. Claims do not prefetch batches.
 
 A claim uses a short `FOR UPDATE SKIP LOCKED` transaction. Candidates are unowned `PENDING`
 or due `RETRY_WAIT` Jobs below the attempt limit. An earlier active Job for the same document
 blocks its successors, including a RETRY_WAIT predecessor whose deadline is still in the future. Candidates are ordered by enqueue_seq.
 Claim locks the Job and document, increments the document epoch, copies it to the Job, increments the attempt count,
-issues a lease, and clears next_retry_at. The older IndexingJobQueueRepository delegates claims to the same transaction.
+issues a lease, and clears next_retry_at. A `PROCESSING` Job with an expired lease still has an owner and is not claimable;
+an external procedure recovers it.
 
 ```mermaid
 sequenceDiagram
@@ -20,7 +22,6 @@ sequenceDiagram
     participant DB as OpenSQL
     participant E as Execution thread
     participant H as Heartbeat thread
-    C->>DB: Recover expired leases / terminate ineligible Jobs
     C->>C: Reserve free slot
     C->>DB: Claim one Job / issue token and lease
     C->>E: ClaimedJob
@@ -56,12 +57,11 @@ the full pipeline. Successful embedding batches in memory are not transferred to
 ## Heartbeat and leases
 
 Heartbeats run independently of processing and claims. Renewal matches the token and PROCESSING state.
-An expired lease can still renew if ownership has not changed. Renewal and recovery compete through
-conditional updates on the same row; predicates are rechecked after the winning update. There is no recovery grace period.
+An expired lease can still renew if ownership has not changed. The Worker does not recover expired leases;
+if an external procedure clears the owner and lease, renewal fails and the current execution exits.
 
 Lost ownership terminates processing. Same-execution completion or a released failure permits normal cleanup.
-Recovery records RETRY_WAIT or FAILED according to the attempt budget and clears the worker and lease.
-Failures and recovery do not increment attempts or epoch; the next claim issues the new generation.
+Failure records do not increment attempts or epoch; the next claim issues the new generation.
 
 ## Durable retries and 429
 
@@ -76,7 +76,7 @@ The execution exits and releases its slot so other documents can run. next_retry
 claim eligibility time, not a guaranteed execution time. There is no global retry admission block or
 retry request serialization. Consecutive transient embedding failures are handled by a DB-shared circuit breaker:
 while it is open, INDEX claims and embedding calls stop and DELETE Jobs are still claimed ([Failure Handling](FAILURE_HANDLING_EN.md)).
-Quota exhaustion (429 insufficient_quota) counts as a breaker failure instead of using the 429 retry above.
+Quota exhaustion (429 insufficient_quota) and authentication/permission errors open the breaker immediately, regardless of the failure count.
 
 ## DELETE processing
 

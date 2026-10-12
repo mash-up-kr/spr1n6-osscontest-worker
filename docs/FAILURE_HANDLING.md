@@ -28,7 +28,7 @@ flowchart TD
 
 claim·heartbeat·phase·실패 기록·결과 저장·삭제 모두 DB 경계에서 이 대기를 사용합니다.
 감지 이후 신규 claim과 다음 외부 API 호출을 보류합니다. 이미 진행 중인 요청은 완료될 수 있습니다.
-프로세스가 죽으면 보관한 메모리는 사라지며 회수 후 새 실행이 전체 파이프라인을 다시 계산합니다.
+프로세스가 죽으면 보관한 메모리는 사라지며 외부 회수 절차가 소유권을 비운 뒤 새 실행이 전체 파이프라인을 다시 계산합니다.
 
 ## 실행권과 조건부 lease 갱신
 
@@ -38,13 +38,9 @@ Job 상태가 `PROCESSING`이고 lease가 존재해야 소유한 실행으로 �
 
 만료됐어도 같은 토큰이면 `renew()`를 시도합니다. 갱신 조건은 Job ID, Worker ID, epoch,
 소유 상태, lease 존재입니다. 만료 시각이 미래라는 조건은 갱신에 넣지 않습니다.
-갱신 이후 상태와 lease를 다시 확인합니다. 회수 UPDATE는 만료 조건을 확인해 소유자·lease를 비우고
-epoch는 유지합니다. 새 epoch는 다음 claim에서 발급합니다. 같은 행 잠금 아래에서 먼저 반영된 UPDATE의 결과로 나머지 조건이 재평가됩니다.
-
-- 갱신이 먼저 성공하면 회수 UPDATE의 만료 조건이 거짓이 됩니다.
-- 회수가 먼저 성공하면 갱신의 소유자·epoch 조건이 거짓이 됩니다.
-
-회수 스케줄을 늦추거나 복구 유예를 추가하지 않습니다. heartbeat도 같은 조건부 갱신을 사용합니다.
+갱신 이후 상태와 lease를 다시 확인합니다. Worker는 만료 lease를 회수하지 않습니다.
+외부 회수 절차가 소유자·lease를 비우면 갱신의 소유자·epoch 조건이 거짓이 되어 현재 실행을 종료합니다.
+새 epoch는 다음 claim에서 발급합니다. heartbeat도 같은 조건부 갱신을 사용합니다.
 결과 저장 중 lease가 만료되어 완료 UPDATE가 0건이면 전체 저장 트랜잭션을 롤백합니다.
 트랜잭션 밖에서 갱신과 재확인을 수행한 뒤 보관된 결과로 저장을 재호출합니다.
 
@@ -81,16 +77,13 @@ SDK 자동 재시도는 비활성화합니다. 일반 오류와 429는 runner의
 ### 임베딩 API circuit breaker
 
 임베딩 호출의 일시 실패(5xx, 타임아웃, 연결 오류)가 연속 5회 쌓이면 DB(`external_circuit_breaker`)에 OPEN을 기록해
-모든 Worker가 공유합니다. 429는 위의 DB 예약 재시도 경로를 쓰며 횟수에 넣지 않습니다. 단, 결제 한도 초과
-(429 `insufficient_quota`)는 충전 전까지 계속 실패하므로 일시 실패로 세어 breaker로 대기합니다.
-OPEN 동안에는 임베딩을 호출하지 않고 대기하므로 Job의 시도 횟수가 소비되지 않습니다. 신규 claim은 임베딩을 쓰지 않는
-DELETE Job만 허용하고 INDEX Job은 멈춥니다.
-60초 뒤 한 Worker만 시험 호출을 하며 성공하면 닫고 실패하면 다시 엽니다.
-시험 호출을 할 Job이 필요한 시점에는 poll마다 Job을 1건만 claim합니다.
-
-만료 복구 함수도 같은 시도 한도·선형 지터 설정을 사용합니다. 만료 `PROCESSING`은 잔여 횟수가 있으면
-`RETRY_WAIT`, 소진이면 `FAILED`가 됩니다. 기존 `RETRY_WAIT`의 deadline은 보존하며 시도 횟수·epoch는 증가시키지 않습니다.
-DB 스케줄러도 Worker와 같은 `max_attempts`, `base_delay_ms`를 전달해야 합니다.
+모든 Worker가 공유합니다. 429는 위의 DB 예약 재시도 경로를 쓰며 횟수에 넣지 않습니다.
+결제 한도 초과(429 `insufficient_quota`)와 인증·권한 오류(401·403)는 모든 호출에 공통이므로 횟수와 관계없이 바로 엽니다.
+이 오류를 받은 Job은 재시도 가능한 실패로 기록되어 시도 횟수를 1회 소비합니다.
+OPEN 동안 이미 실행 중인 Job은 임베딩을 호출하지 않고 대기하므로 시도 횟수가 소비되지 않습니다. 신규 claim은 임베딩을 쓰지 않는
+DELETE Job과 삭제된 문서의 INDEX Job만 허용하고 나머지 INDEX Job은 멈춥니다.
+열림 기한(기본 60초)이 지나면 INDEX Job 하나가 시험 호출을 예약하고, 결과가 나올 때까지 다른 INDEX claim은 막힙니다.
+시험 호출이 성공하면 닫고, 실패하면 다시 엽니다.
 
 해시 불일치, 미지원 MIME, 손상 파일, 크기·청크·토큰 한도 초과, 잘못된 임베딩과 거절된 요청은 영구 오류입니다.
 Core의 업로드 성공 후 INDEX Job 등록 계약을 확인한 배포에서만 `INDEXING_JOB_AFTER_UPLOAD_CONFIRMED=true`로 설정합니다.
@@ -100,17 +93,16 @@ Core의 업로드 성공 후 INDEX Job 등록 계약을 확인한 배포에서�
 ## 삭제와 버전 보호
 
 삭제는 DELETE Job에서 청크 삭제와 Job 완료를 원자적으로 처리합니다.
-삭제된 문서의 INDEX Job은 오류가 아니라 정상 종결로 처리합니다. 실행 전 확인, 결과 저장 시점,
-회수 루프 세 경로 모두 `COMPLETED` + `outcome = SKIPPED_DOCUMENT_DELETED`로 끝나며 청크를 다시 만들지 않고 재시도하지 않습니다.
+삭제된 문서의 INDEX Job은 오류가 아니라 정상 종결로 처리합니다. 실행 전 확인, breaker 대기 중 확인, 결과 저장 시점
+세 경로 모두 `COMPLETED` + `outcome = SKIPPED_DOCUMENT_DELETED`로 끝나며 청크를 다시 만들지 않고 재시도하지 않습니다.
 완료 사유는 `outcome`에 기록합니다(`INDEXED`, `DELETED`, `SKIPPED_DOCUMENT_DELETED`).
 
-INDEX Job이 `FAILED`나 `RETRY_WAIT`으로 남으면 같은 문서의 DELETE Job을 영구히 막는다. 시도 횟수와 무관하게
-SKIPPED로 종결해야 DELETE Job이 진행된다. 회수 루프(`recover`)는 이 이유로 삭제 정리를
-시도 횟수 초과·부적합 Job 정리보다 먼저 실행한다.
+같은 문서의 앞선 Job이 `PENDING`·`PROCESSING`·`RETRY_WAIT`이면 뒤 DELETE Job을 claim하지 않습니다.
+삭제된 문서의 INDEX Job은 breaker가 열려 있어도 claim되어 SKIPPED로 끝나므로 DELETE Job을 계속 막지 않습니다.
 
 `execution_epoch` fencing과 검색 버전 `version_no` 역행 방지는 서로 다른 조건입니다.
-Server의 과거 버전 재시도 제한은 외부 의존성이며, Worker는 문서-버전 불일치와 과거 버전 INDEX를
-회수 루프에서 `FAILED` / `DOCUMENT_INELIGIBLE`로 종결합니다.
+Server의 과거 버전 재시도 제한은 외부 의존성입니다. 문서-버전 불일치는 `DOCUMENT_MISMATCH` 영구 오류로 `FAILED`가 되고,
+과거 버전 INDEX는 청크와 버전 완료를 저장하되 검색 포인터를 과거 버전으로 되돌리지 않습니다.
 
 ## 검증
 
@@ -119,22 +111,20 @@ Server의 과거 버전 재시도 제한은 외부 의존성이며, Worker는 �
 | 다운로드 후 phase DB 실패 | 파일을 유지하고 phase 호출부터 재개 |
 | heartbeat DB 실패 | 별도 스레드 대기, 신규 claim·다음 외부 호출 보류 |
 | 오래된 헬스 조회 성공과 새 장애 경쟁 | 새 장애 상태 유지 |
-| lease 갱신과 회수 경쟁의 양쪽 순서 | 같은 토큰만 재개, 회수된 토큰 쓰기 거절 |
+| 외부 회수 뒤 이전 실행의 갱신·쓰기 | 소유권 조건이 거짓이 되어 갱신·쓰기 거절 |
 | 청크 UPSERT 후 검증 실패 | 청크와 완료 상태 모두 롤백 |
 | 저장 커밋 후 응답 유실 | 같은 실행 완료 확인, 재저장·외부 호출 반복 방지 |
 | claim 커밋 응답 유실 | 예정 토큰으로 기존 claim 확인 |
 | 여러 임베딩 배치 중 429 | DB 재시도 예약 후 슬롯 반환, 다음 claim에서 전체 처리 |
 | 실패 커밋 응답 유실 | 같은 epoch의 해제 상태 확인, deadline·횟수 변경 없음 |
 | 선행 Job의 재시도 시각이 미래 | 같은 문서 후속 Job 차단, 다른 문서 실행 가능 |
-| 재시도 중 Worker 종료 | 회수 시 deadline 유지, 새 실행은 전체 처리 가능 |
 | DELETE 완료 재호출·오래된 INDEX 저장 | 멱등 완료 및 실행권 거절 |
 | 임베딩 중 문서 삭제 감지 (실행 전·저장 시점) | COMPLETED + SKIPPED_DOCUMENT_DELETED, 청크 저장 없음 |
-| lease 만료 회수 시 삭제된 문서 INDEX Job | 시도 횟수 무관하게 FAILED 아닌 COMPLETED + SKIPPED |
-| breaker OPEN 중 INDEX·DELETE 대기 | DELETE만 claim, INDEX는 대기 |
-| 결제 한도 초과(429 `insufficient_quota`) | rate limit 재시도가 아닌 breaker 실패로 계산, 열리면 시도 횟수 소비 없이 대기 |
+| breaker OPEN 중 INDEX·DELETE 대기 | DELETE와 삭제된 문서의 INDEX만 claim, 나머지 INDEX는 대기 |
+| 결제 한도 초과(429 `insufficient_quota`) | rate limit 재시도가 아니라 breaker를 바로 열고, 열린 동안 시도 횟수 소비 없이 대기 |
 
 일반 테스트와 실제 PostgreSQL 통합 테스트를 구분합니다. SQL 경쟁·롤백 검증은
-전용 DB에 공용 스키마와 [큐 계약](sql/DB_JOB_QUEUE_CONTRACT.sql)을 적용한 뒤 실행해야 합니다.
+전용 DB에 공용 스키마와 [Worker 마이그레이션](../sql/20261012_worker_queue_and_circuit.sql)을 적용한 뒤 실행해야 합니다.
 이 문서는 운영 DB 적용이나 통합 테스트 실행 완료를 의미하지 않습니다.
 
 메트릭: `indexing_db_wait_total`, `indexing_retry_scheduled_total{errorCode}`,
