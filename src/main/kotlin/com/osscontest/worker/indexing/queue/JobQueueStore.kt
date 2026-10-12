@@ -93,7 +93,7 @@ class JobQueueStore(
             """
             INSERT INTO indexing_job (source_event_id, document_id, document_version_id, job_type, status,
                 attempt_count, execution_epoch, updated_at, trace_id)
-            VALUES (:eventId, :documentId, :documentVersionId, :type, 'PENDING', 0, 0, $UTC_NOW,
+            VALUES (:eventId, :documentId, :documentVersionId, :type, 'PENDING', 0, 0, clock_timestamp(),
                 :traceId) ON CONFLICT DO NOTHING
             """.trimIndent(), mapOf("eventId" to sourceEventId, "documentId" to documentId, "documentVersionId" to documentVersionId,
                 "type" to type.name, "traceId" to traceId),
@@ -104,7 +104,6 @@ class JobQueueStore(
         // Job 행만 잠그는 과거 Writer와 겹칠 때 후보 재시도를 끝내는 상한이다. 정상 Writer는 문서를 먼저 잠근다.
         // 넘으면 이번 claim은 빈손으로 끝나고 다음 poll에서 다시 찾는다. 짧은 트랜잭션 반복이 끝없이 이어지지 않게 하는 값이다.
         private const val CLAIM_CANDIDATE_LIMIT = 32
-        const val UTC_NOW = "clock_timestamp()"
         fun ExecutionToken.params(): Map<String, Any> = mapOf("id" to jobId, "workerId" to workerId, "epoch" to epoch)
     }
 }
