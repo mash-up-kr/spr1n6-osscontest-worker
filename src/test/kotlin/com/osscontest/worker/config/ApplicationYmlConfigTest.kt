@@ -1,5 +1,8 @@
 package com.osscontest.worker.config
 
+import com.osscontest.worker.indexing.embedding.config.EmbeddingClientConfiguration.Companion.EMBEDDING_DIMENSIONS
+import com.osscontest.worker.indexing.publication.entity.DocumentChunkEntity
+import jakarta.persistence.Column
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.config.YamlPropertiesFactoryBean
@@ -7,13 +10,12 @@ import org.springframework.core.io.ClassPathResource
 
 class ApplicationYmlConfigTest {
     @Test
-    fun `임베딩 차원은 DB vector 타입과 같은 1536으로 고정한다`() {
-        val factory = YamlPropertiesFactoryBean()
-        factory.setResources(ClassPathResource("application.yml"))
-        val props = factory.getObject()!!
+    fun `임베딩 요청과 응답 검증이 쓰는 차원은 청크 컬럼의 vector 차원과 같은 1536이다`() {
+        val column = DocumentChunkEntity::class.java.getDeclaredField("embedding")
+            .getAnnotation(Column::class.java)
 
-        assertThat(props.getProperty("spring.ai.openai.embedding.dimensions"))
-            .isEqualTo("1536")
+        assertThat(EMBEDDING_DIMENSIONS).isEqualTo(1536)
+        assertThat(column.columnDefinition).isEqualTo("vector($EMBEDDING_DIMENSIONS)")
     }
 
     @Test

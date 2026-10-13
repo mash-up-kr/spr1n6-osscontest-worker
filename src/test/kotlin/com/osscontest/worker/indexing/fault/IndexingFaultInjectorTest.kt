@@ -41,7 +41,7 @@ class IndexingFaultInjectorTest {
     }
 
     @Test
-    fun `설정한 document version과 phase에서는 thread를 block한다`() {
+    fun `설정한 phase에서는 thread를 block한다`() {
         val injector =
             IndexingFaultInjector(
                 FaultInjectionProperties(

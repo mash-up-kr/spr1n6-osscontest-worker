@@ -159,6 +159,7 @@ class IndexingPipelineRunnerTest {
         runner.run(job)
         assertThat(processor.calls).hasSize(1)
         verify(download).download("key")
+        verify(failures).recordFailure(eq(testToken), eq("RuntimeException"), any(), eq(false), eq(5), any(), anyOrNull())
     }
 
     @Test

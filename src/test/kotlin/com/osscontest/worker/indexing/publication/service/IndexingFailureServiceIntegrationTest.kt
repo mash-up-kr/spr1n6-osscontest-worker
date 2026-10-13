@@ -187,7 +187,7 @@ class IndexingFailureServiceIntegrationTest(
     }
 
     @Test
-    fun `recordFailure는 PROCESSING이 아니면 조용히 무시한다`() {
+    fun `같은 실행이 완료된 뒤의 실패 기록은 상태를 바꾸지 않고 COMPLETED를 돌려준다`() {
         val jobId = seedJob(status = IndexingJobStatus.COMPLETED, attemptCount = 1)
         val failedAt = indexingJobRepository.currentDbTimestamp()
 
