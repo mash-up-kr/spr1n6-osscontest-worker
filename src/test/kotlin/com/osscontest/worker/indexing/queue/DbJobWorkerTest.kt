@@ -106,7 +106,7 @@ class DbJobWorkerTest {
                 null
             }
             h.worker.start(); await(first); h.worker.stop()
-            h.worker.start(); wake(h.worker); await(second)
+            h.worker.start(); wake(h.worker, second); await(second)
             val ids = owners.toList()
             assertThat(ids.map { it.substringBeforeLast('-') }.toSet()).hasSize(1)
             assertThat(ids.map { it.substringAfterLast('-').toLong() }).isSorted().doesNotHaveDuplicates()
@@ -184,7 +184,7 @@ class DbJobWorkerTest {
                     check(System.nanoTime() < until) { "Thread did not return to the idle pool" }
                     Thread.sleep(1)
                 }
-                wake(h.worker)
+                wake(h.worker, started)
                 await(started)
             } finally { h.worker.stop(); finish.countDown() }
         }
@@ -212,7 +212,7 @@ class DbJobWorkerTest {
                 await(empty)
                 firstThread.get().join(3000)
                 assertThat(firstThread.get().isAlive).isFalse()
-                wake(h.worker); await(started)
+                wake(h.worker, started); await(started)
             } finally { h.worker.stop(); finish.countDown() }
         }
     }
@@ -338,7 +338,7 @@ class DbJobWorkerTest {
             h.worker.start()
             try {
                 await(resolved); verifyNoInteractions(h.runner)
-                wake(h.worker); await(started)
+                wake(h.worker, started); await(started)
                 verify(h.store, times(1)).resolveClaim(testToken)
                 verify(h.store, times(2)).claim(any(), any(), any())
                 verify(h.runner).run(job(2))
@@ -438,7 +438,7 @@ class DbJobWorkerTest {
             h.worker.start()
             try {
                 await(first); h.worker.heartbeat(); await(renewing)
-                h.worker.stop(); h.worker.start(); wake(h.worker); await(next)
+                h.worker.stop(); h.worker.start(); wake(h.worker, next); await(next)
                 assertThat(h.worker.heartbeat()).isEmpty()
                 verify(h.store, never()).renew(job(2).token)
                 release.countDown()
@@ -648,7 +648,7 @@ class DbJobWorkerTest {
                 h.worker.start(); h.worker.start()
                 assertThat(h.worker.probe()).isFalse()
                 assertThat(count.get()).isEqualTo(1)
-                returnClaim.countDown(); wake(h.worker); await(started)
+                returnClaim.countDown(); wake(h.worker, started); await(started)
                 verify(h.runner, never()).run(job())
                 verify(h.runner, times(1)).run(job(2))
                 verify(h.store, times(2)).claim(any(), any(), any())
@@ -693,9 +693,13 @@ class DbJobWorkerTest {
 
     private fun await(latch: CountDownLatch) { check(latch.await(3, TimeUnit.SECONDS)) { "Worker did not reach expected state" } }
 
-    private fun wake(worker: DbJobWorker) {
+    /**
+     * 루프 하나를 깨운다. probe 타이머도 같은 슬롯을 노리므로, 타이머가 먼저 깨운 루프가 [reached]에 닿았으면
+     * 그것으로 충분하다. 그 루프가 슬롯을 쥐고 있으면 이 probe는 계속 실패한다.
+     */
+    private fun wake(worker: DbJobWorker, reached: CountDownLatch) {
         val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
-        while (!worker.probe()) {
+        while (reached.count > 0 && !worker.probe()) {
             check(System.nanoTime() < until) { "Worker did not release its loop reservation" }
             Thread.sleep(1)
         }

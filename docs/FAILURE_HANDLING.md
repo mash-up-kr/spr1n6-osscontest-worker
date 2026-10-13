@@ -90,12 +90,33 @@ Core의 업로드 성공 후 INDEX Job 등록 계약을 확인한 배포에서�
 이때 명시적인 `NoSuchKey`를 영구 오류로 분류합니다. 일반 404나 스토리지 오류 전체를 영구 오류로 취급하지 않습니다.
 기본 시도 한도는 5회입니다. DB 장애 대기·헬스 조회는 처리 시도 횟수를 소비하지 않습니다.
 
+실패하면 `last_error_code`에 아래 코드를 기록합니다. 기준은 `IndexingErrorClassifier`입니다.
+
+| 코드 | 재시도 | 원인 |
+|---|---|---|
+| `HASH_MISMATCH` | 아니오 | 원문 SHA-256이 버전의 `content_hash`와 다름 |
+| `FILE_TOO_LARGE` | 아니오 | 파일 크기가 `INDEXING_MAX_FILE_SIZE_BYTES` 초과 |
+| `UNSUPPORTED_MIME_TYPE` | 아니오 | 등록된 파서가 없는 MIME |
+| `CORRUPTED_FILE` | 아니오 | 파싱 중 I/O 오류 |
+| `EMPTY_EXTRACTION` | 아니오 | 파싱 결과 청크 없음 |
+| `CHUNK_LIMIT_EXCEEDED` | 아니오 | 청크 수가 `INDEXING_MAX_CHUNKS` 초과 |
+| `TOTAL_TOKEN_LIMIT_EXCEEDED` | 아니오 | 총 토큰이 `INDEXING_MAX_TOTAL_TOKENS` 초과 |
+| `EMBEDDING_REQUEST_REJECTED` | 아니오 | 임베딩 API 400 |
+| `INVALID_EMBEDDING` | 아니오 | 임베딩 결과의 개수·차원·값이 잘못됨 |
+| `DOCUMENT_VERSION_NOT_FOUND`, `DOCUMENT_MISMATCH`, `MISSING_DOCUMENT_VERSION_ID` | 아니오 | Job이 가리키는 버전이 없거나 다른 문서의 버전 |
+| `NoSuchKey` | 아니오 | `INDEXING_JOB_AFTER_UPLOAD_CONFIRMED=true`일 때 명시적 NoSuchKey. false면 `NoSuchKeyException` 등 S3 예외 클래스 이름으로 기록하고 재시도 |
+| `PARSE_TIMEOUT`, `PARSE_CAPACITY` | 예 | 파싱 제한 시간 초과, 파서 포화 |
+| `RATE_LIMITED` | 예 | 임베딩 API 429. `Retry-After`를 재시도 시각의 하한으로 씀 |
+| `EMBEDDING_QUOTA_EXCEEDED`, `EMBEDDING_AUTHENTICATION_FAILED`, `EMBEDDING_PERMISSION_DENIED` | 예 | quota 초과, 401, 403. breaker를 바로 엶 |
+| 그 밖의 예외 | 예 | 예외 클래스 이름을 코드로 기록 |
+
 ## 삭제와 버전 보호
 
 삭제는 DELETE Job에서 청크 삭제와 Job 완료를 원자적으로 처리합니다.
 삭제된 문서의 INDEX Job은 오류가 아니라 정상 종결로 처리합니다. 실행 전 확인, breaker 대기 중 확인, 결과 저장 시점
 세 경로 모두 `COMPLETED` + `outcome = SKIPPED_DOCUMENT_DELETED`로 끝나며 청크를 다시 만들지 않고 재시도하지 않습니다.
 완료 사유는 `outcome`에 기록합니다(`INDEXED`, `DELETED`, `SKIPPED_DOCUMENT_DELETED`).
+실패 기록도 `outcome`을 남깁니다. 재시도를 예약하면 `RETRY_SCHEDULED`, 최종 실패면 `FAILED_PROCESSING`입니다.
 
 같은 문서의 앞선 Job이 `PENDING`·`PROCESSING`·`RETRY_WAIT`이면 뒤 DELETE Job을 claim하지 않습니다.
 삭제된 문서의 INDEX Job은 breaker가 열려 있어도 claim되어 SKIPPED로 끝나므로 DELETE Job을 계속 막지 않습니다.
@@ -121,7 +142,7 @@ Server의 과거 버전 재시도 제한은 외부 의존성입니다. 문서-�
 | DELETE 완료 재호출·오래된 INDEX 저장 | 멱등 완료 및 실행권 거절 |
 | 임베딩 중 문서 삭제 감지 (실행 전·저장 시점) | COMPLETED + SKIPPED_DOCUMENT_DELETED, 청크 저장 없음 |
 | breaker OPEN 중 INDEX·DELETE 대기 | DELETE와 삭제된 문서의 INDEX만 claim, 나머지 INDEX는 대기 |
-| 결제 한도 초과(429 `insufficient_quota`) | rate limit 재시도가 아니라 breaker를 바로 열고, 열린 동안 시도 횟수 소비 없이 대기 |
+| 결제 한도 초과(429 `insufficient_quota`) | breaker 즉시 OPEN. 오류를 받은 Job은 시도 1회를 쓰고 한도가 남았으면 `RETRY_WAIT`, 열린 동안 다른 INDEX Job은 시도 횟수 소비 없이 대기 |
 
 일반 테스트와 실제 PostgreSQL 통합 테스트를 구분합니다. SQL 경쟁·롤백 검증은
 전용 DB에 Server 마이그레이션([`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql) 포함)을 모두 적용한 뒤 실행해야 합니다.
@@ -129,6 +150,6 @@ Server의 과거 버전 재시도 제한은 외부 의존성입니다. 문서-�
 
 메트릭: `indexing_db_wait_total`, `indexing_retry_scheduled_total{errorCode}`,
 `indexing_job_failed_total{errorCode}`, `indexing_job_duration_seconds{phase=total}`,
-`parse_timeout_total`.
+`parse_timeout_total`, `external_circuit_breaker_open`(breaker가 CLOSED면 0, 그 밖은 1).
 
 [아키텍처](ARCHITECTURE.md) · [처리 모델](PROCESSING_MODEL.md)

@@ -16,6 +16,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 @org.junit.jupiter.api.Tag("database")
@@ -155,6 +156,39 @@ class DatabaseOperationsTest {
         } finally {
             releaseOld.countDown()
             releaseNew.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `한 경로가 감지한 DB 장애는 다른 경로의 다음 작업을 복구 확인 전까지 보류한다`() {
+        val waits = AtomicInteger()
+        val firstWait = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val database = DatabaseOperations(JdbcTemplate(source), RetryWaiter {
+            waits.incrementAndGet(); firstWait.countDown(); check(release.await(5, TimeUnit.SECONDS))
+        }, properties(), SimpleMeterRegistry())
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            // heartbeat 경로의 연결 장애 감지
+            val heartbeat = pool.submit<Int> {
+                var calls = 0
+                database.execute { if (++calls == 1) throw SQLException("heartbeat connection lost", "08006"); calls }
+            }
+            check(firstWait.await(5, TimeUnit.SECONDS))
+            // claim 경로의 작업 전 대기 확인
+            val claimed = AtomicBoolean()
+            val claim = pool.submit<Int> { database.execute { claimed.set(true); 1 } }
+            val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            while (waits.get() < 2) { check(System.nanoTime() < until) { "claim did not wait" }; Thread.sleep(1) }
+            assertThat(claimed.get()).isFalse()
+            // 복구 확인 뒤 두 경로 모두 진행
+            release.countDown()
+            assertThat(heartbeat.get(5, TimeUnit.SECONDS)).isEqualTo(2)
+            assertThat(claim.get(5, TimeUnit.SECONDS)).isEqualTo(1)
+            assertThat(claimed.get()).isTrue()
+        } finally {
+            release.countDown()
             pool.shutdownNow()
         }
     }

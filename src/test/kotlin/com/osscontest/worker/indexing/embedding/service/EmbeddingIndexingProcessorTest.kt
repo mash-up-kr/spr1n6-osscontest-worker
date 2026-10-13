@@ -127,6 +127,53 @@ class EmbeddingIndexingProcessorTest {
         assertThat(captor.firstValue.map { it.embedding[0] }).containsExactly(0.1f, 0.2f, 0.3f)
     }
 
+    @Test
+    fun `두 번째 배치의 429는 저장 없이 전파하고 다음 실행은 첫 배치부터 다시 임베딩한다`() {
+        val chunks = listOf(chunkWithTokens(no = 0, tokens = 200), chunkWithTokens(no = 1, tokens = 200))
+        val rateLimited = EmbeddingRateLimitedException("10", RuntimeException("429"))
+        whenever(embeddingUseCase.embed(listOf("content-0"))).thenReturn(listOf(embedding(0.1f)))
+        whenever(embeddingUseCase.embed(listOf("content-1"))).thenThrow(rateLimited).thenReturn(listOf(embedding(0.2f)))
+
+        assertThatThrownBy { processor.process(context(), chunks) }.isSameAs(rateLimited)
+        verify(publicationService, never()).publish(any(), any())
+
+        processor.process(context(), chunks)
+        verify(embeddingUseCase, times(2)).embed(listOf("content-0"))
+        verify(publicationService, times(1)).publish(any(), any())
+    }
+
+    @Test
+    fun `잘못된 청크 입력은 임베딩을 호출하지 않고 거절한다`() {
+        val invalid = listOf(
+            "청크 번호 불연속" to listOf(chunk(no = 0), chunk(no = 2)),
+            "0이 아닌 시작 번호" to listOf(chunk(no = 1)),
+            "빈 본문" to listOf(chunk(no = 0).copy(content = " ")),
+            "빈 해시" to listOf(chunk(no = 0).copy(contentHash = "")),
+        )
+        invalid.forEach { (case, chunks) ->
+            assertThatThrownBy { processor.process(context(), chunks) }.describedAs(case)
+                .isInstanceOf(InvalidEmbeddingException::class.java)
+        }
+        verify(embeddingUseCase, never()).embed(any())
+        verify(publicationService, never()).publish(any(), any())
+    }
+
+    @Test
+    fun `임베딩 결과의 개수가 다르거나 유한하지 않은 값이 있으면 저장하지 않는다`() {
+        val chunks = listOf(chunk(no = 0), chunk(no = 1))
+        val results = listOf(
+            "결과 개수 불일치" to listOf(embedding(0.1f)),
+            "NaN 값" to listOf(embedding(0.1f), FloatArray(1536) { Float.NaN }),
+            "무한대 값" to listOf(embedding(0.1f), FloatArray(1536) { Float.POSITIVE_INFINITY }),
+        )
+        results.forEach { (case, embeddings) ->
+            whenever(embeddingUseCase.embed(chunks.map(Chunk::content))).thenReturn(embeddings)
+            assertThatThrownBy { processor.process(context(), chunks) }.describedAs(case)
+                .isInstanceOf(InvalidEmbeddingException::class.java)
+        }
+        verify(publicationService, never()).publish(any(), any())
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = [false, true])
     fun `배치 사이 DB 대기에는 다음 외부 호출을 시작하지 않고 복구 뒤 실행권부터 확인한다`(lost: Boolean) {
