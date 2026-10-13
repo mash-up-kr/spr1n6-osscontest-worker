@@ -1,5 +1,8 @@
 package com.osscontest.worker.indexing.pipeline.service
 
+import com.osscontest.worker.indexing.embedding.service.EmbeddingConfigurationException
+import com.osscontest.worker.indexing.embedding.service.EmbeddingQuotaExceededException
+import com.osscontest.worker.indexing.embedding.service.EmbeddingRateLimitedException
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import software.amazon.awssdk.awscore.exception.AwsErrorDetails
@@ -53,6 +56,20 @@ class IndexingErrorClassifierTest {
         )
         cases.forEach { (error, code) ->
             assertThat(IndexingErrorClassifier.classify(error)).isEqualTo(IndexingError(code, retryable = true))
+        }
+    }
+
+    @Test
+    fun `임베딩 rate limit quota 인증 권한 오류는 정해진 코드의 재시도 가능 오류다`() {
+        val cause = RuntimeException("provider error")
+        val cases = listOf(
+            EmbeddingRateLimitedException("10", cause) to "RATE_LIMITED",
+            EmbeddingQuotaExceededException(cause) to "EMBEDDING_QUOTA_EXCEEDED",
+            EmbeddingConfigurationException("EMBEDDING_AUTHENTICATION_FAILED", cause) to "EMBEDDING_AUTHENTICATION_FAILED",
+            EmbeddingConfigurationException("EMBEDDING_PERMISSION_DENIED", cause) to "EMBEDDING_PERMISSION_DENIED",
+        )
+        cases.forEach { (error, code) ->
+            assertThat(IndexingErrorClassifier.classify(error)).describedAs(code).isEqualTo(IndexingError(code, retryable = true))
         }
     }
 }

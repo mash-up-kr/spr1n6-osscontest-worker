@@ -110,6 +110,16 @@ class CircuitBreakerIntegrationTest(
         assertThat(record(acquire(), CircuitOutcome.FAILURE)).isEqualTo(BreakerState.OPEN)
         assertThat(store.snapshot(name).openedUntil).isAfter(store.snapshot(name).now)
     }
+    @Test fun `CONFIGURATION 결과는 실패 0회인 CLOSED에서도 바로 OPEN하고 같은 조건의 일반 실패는 CLOSED를 유지한다`() {
+        assertThat(record(acquire(), CircuitOutcome.FAILURE)).isEqualTo(BreakerState.CLOSED)
+        record(acquire(), CircuitOutcome.SUCCESS)
+        assertThat(row()["consecutive_failures"]).isEqualTo(0)
+
+        assertThat(record(acquire(), CircuitOutcome.CONFIGURATION)).isEqualTo(BreakerState.OPEN)
+        val snapshot = store.snapshot(name)
+        assertThat(snapshot.openedUntil).isAfter(snapshot.now)
+        assertThat(breaker.admission()).isEqualTo(ClaimAdmission.BLOCKED)
+    }
     @Test fun `정상 성공은 연속 실패 카운트를 초기화하고 같은 영수증 재전달은 변경하지 않는다`() {
         failures(3)
         val permit = acquire()

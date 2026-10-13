@@ -14,7 +14,12 @@ import org.mockito.kotlin.*
 import org.springframework.dao.DataAccessResourceFailureException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DriverManagerDataSource
+import java.sql.SQLException
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class ExternalApiOperationsTest {
     private val permit = CircuitPermit("embedding-api", 1, "call")
@@ -137,6 +142,41 @@ class ExternalApiOperationsTest {
     private fun database(waiter: RetryWaiter) = DatabaseOperations(
         JdbcTemplate(DriverManagerDataSource("jdbc:h2:mem:circuit-recovery;DB_CLOSE_DELAY=-1", "sa", "")),
         waiter, DatabaseWaitProperties(), SimpleMeterRegistry())
+
+    @Test
+    fun `다른 경로가 DB 장애를 감지하면 외부 호출을 시작하지 않고 복구 뒤 한 번 호출한다`() {
+        val waits = AtomicInteger()
+        val firstWait = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val database = database(RetryWaiter {
+            waits.incrementAndGet(); firstWait.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+        })
+        val breaker = closedCircuitBreaker()
+        val action: () -> String = mock { on { invoke() } doReturn "ok" }
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            // heartbeat 경로의 연결 장애 감지
+            val heartbeat = pool.submit<Int> {
+                var calls = 0
+                database.execute { if (++calls == 1) throw SQLException("heartbeat connection lost", "08006"); calls }
+            }
+            check(firstWait.await(5, TimeUnit.SECONDS))
+            val call = pool.submit<String> { api(breaker, database = database).execute(testToken, action = action) }
+            val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            while (waits.get() < 2) { check(System.nanoTime() < until) { "external call did not wait" }; Thread.sleep(1) }
+            verifyNoInteractions(action)
+            verify(breaker, never()).acquire(any(), any())
+            // 복구 확인 뒤 호출
+            release.countDown()
+            assertThat(call.get(5, TimeUnit.SECONDS)).isEqualTo("ok")
+            assertThat(heartbeat.get(5, TimeUnit.SECONDS)).isEqualTo(2)
+            verify(action).invoke()
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(strings = ["expired", "RETRY_WAIT", "FAILED", "epoch", "worker"])
