@@ -88,12 +88,33 @@ requests are permanent. Set INDEXING_JOB_AFTER_UPLOAD_CONFIRMED=true only after 
 INDEX Jobs after successful object upload. Only then is explicit NoSuchKey permanent; general 404 and storage
 errors are not treated as permanent together. The default budget is five attempts. DB waits do not consume attempts.
 
+Failures record one of the following codes in `last_error_code`, as classified by `IndexingErrorClassifier`.
+
+| Code | Retry | Cause |
+|---|---|---|
+| `HASH_MISMATCH` | No | Source SHA-256 differs from the version's `content_hash` |
+| `FILE_TOO_LARGE` | No | File size exceeds `INDEXING_MAX_FILE_SIZE_BYTES` |
+| `UNSUPPORTED_MIME_TYPE` | No | No parser is registered for the MIME type |
+| `CORRUPTED_FILE` | No | I/O failure while parsing |
+| `EMPTY_EXTRACTION` | No | Parsing produced no chunks |
+| `CHUNK_LIMIT_EXCEEDED` | No | Chunk count exceeds `INDEXING_MAX_CHUNKS` |
+| `TOTAL_TOKEN_LIMIT_EXCEEDED` | No | Total tokens exceed `INDEXING_MAX_TOTAL_TOKENS` |
+| `EMBEDDING_REQUEST_REJECTED` | No | Embedding API returned 400 |
+| `INVALID_EMBEDDING` | No | Embedding count, dimensions, or values are invalid |
+| `DOCUMENT_VERSION_NOT_FOUND`, `DOCUMENT_MISMATCH`, `MISSING_DOCUMENT_VERSION_ID` | No | The Job's version is missing or belongs to another document |
+| `NoSuchKey` | No | Explicit NoSuchKey when `INDEXING_JOB_AFTER_UPLOAD_CONFIRMED=true`. When false, the S3 exception class name such as `NoSuchKeyException` is recorded and retried |
+| `PARSE_TIMEOUT`, `PARSE_CAPACITY` | Yes | Parsing timed out or the parser pool is saturated |
+| `RATE_LIMITED` | Yes | Embedding API 429. `Retry-After` is the lower bound of the retry time |
+| `EMBEDDING_QUOTA_EXCEEDED`, `EMBEDDING_AUTHENTICATION_FAILED`, `EMBEDDING_PERMISSION_DENIED` | Yes | Quota exhaustion, 401, 403. Opens the breaker immediately |
+| Any other exception | Yes | The exception class name is recorded as the code |
+
 ## Deletion and version safety
 
 A DELETE Job atomically removes chunks and completes. An INDEX Job for a deleted document is a normal
 termination, not an error: the pre-execution check, the check during breaker waits, and result publication all end it as
 `COMPLETED` with `outcome = SKIPPED_DOCUMENT_DELETED`, without creating chunks or retrying. The completion
 reason is recorded in `outcome` (`INDEXED`, `DELETED`, `SKIPPED_DOCUMENT_DELETED`).
+Failure records set `outcome` too: `RETRY_SCHEDULED` when a retry is scheduled and `FAILED_PROCESSING` on final failure.
 
 A `PENDING`, `PROCESSING`, or `RETRY_WAIT` predecessor blocks a later DELETE Job for the same document.
 INDEX Jobs for deleted documents are claimed even while the breaker is open and end as SKIPPED, so they do not keep DELETE blocked.
@@ -120,13 +141,14 @@ the searchable pointer back.
 | DELETE replay or stale INDEX publication | Idempotent completion and ownership rejection |
 | Deleted document detected during indexing (pre-run or at publication) | COMPLETED + SKIPPED_DOCUMENT_DELETED, no chunks written |
 | INDEX and DELETE waiting while the breaker is OPEN | Claim DELETE and deleted-document INDEX only; other INDEX waits |
-| Quota exhaustion (429 insufficient_quota) | Opens the breaker immediately instead of a rate-limit retry; wait without consuming attempts while open |
+| Quota exhaustion (429 insufficient_quota) | Opens the breaker immediately. The Job that received it spends one attempt and moves to `RETRY_WAIT` if attempts remain; other INDEX Jobs wait without consuming attempts while open |
 
 Unit and PostgreSQL integration tests are distinct. Validate SQL races and rollbacks against a dedicated
 database with all Server migrations applied, including [`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql).
 This document does not claim that production migrations or integration tests have been completed.
 
 Metrics: `indexing_db_wait_total`, `indexing_retry_scheduled_total{errorCode}`,
-`indexing_job_failed_total{errorCode}`, `indexing_job_duration_seconds{phase=total}`, and `parse_timeout_total`.
+`indexing_job_failed_total{errorCode}`, `indexing_job_duration_seconds{phase=total}`, `parse_timeout_total`, and
+`external_circuit_breaker_open` (0 when the breaker is CLOSED, otherwise 1).
 
 [Architecture](ARCHITECTURE_EN.md) · [Processing model](PROCESSING_MODEL_EN.md)
