@@ -145,13 +145,14 @@ class EmbeddingIndexingProcessorTest {
     @Test
     fun `잘못된 청크 입력은 임베딩을 호출하지 않고 거절한다`() {
         val invalid = listOf(
-            listOf(chunk(no = 0), chunk(no = 2)),
-            listOf(chunk(no = 1)),
-            listOf(chunk(no = 0).copy(content = " ")),
-            listOf(chunk(no = 0).copy(contentHash = "")),
+            "청크 번호 불연속" to listOf(chunk(no = 0), chunk(no = 2)),
+            "0이 아닌 시작 번호" to listOf(chunk(no = 1)),
+            "빈 본문" to listOf(chunk(no = 0).copy(content = " ")),
+            "빈 해시" to listOf(chunk(no = 0).copy(contentHash = "")),
         )
-        invalid.forEach { chunks ->
-            assertThatThrownBy { processor.process(context(), chunks) }.isInstanceOf(InvalidEmbeddingException::class.java)
+        invalid.forEach { (case, chunks) ->
+            assertThatThrownBy { processor.process(context(), chunks) }.describedAs(case)
+                .isInstanceOf(InvalidEmbeddingException::class.java)
         }
         verify(embeddingUseCase, never()).embed(any())
         verify(publicationService, never()).publish(any(), any())
@@ -161,13 +162,14 @@ class EmbeddingIndexingProcessorTest {
     fun `임베딩 결과의 개수가 다르거나 유한하지 않은 값이 있으면 저장하지 않는다`() {
         val chunks = listOf(chunk(no = 0), chunk(no = 1))
         val results = listOf(
-            listOf(embedding(0.1f)),
-            listOf(embedding(0.1f), FloatArray(1536) { Float.NaN }),
-            listOf(embedding(0.1f), FloatArray(1536) { Float.POSITIVE_INFINITY }),
+            "결과 개수 불일치" to listOf(embedding(0.1f)),
+            "NaN 값" to listOf(embedding(0.1f), FloatArray(1536) { Float.NaN }),
+            "무한대 값" to listOf(embedding(0.1f), FloatArray(1536) { Float.POSITIVE_INFINITY }),
         )
-        results.forEach { embeddings ->
+        results.forEach { (case, embeddings) ->
             whenever(embeddingUseCase.embed(chunks.map(Chunk::content))).thenReturn(embeddings)
-            assertThatThrownBy { processor.process(context(), chunks) }.isInstanceOf(InvalidEmbeddingException::class.java)
+            assertThatThrownBy { processor.process(context(), chunks) }.describedAs(case)
+                .isInstanceOf(InvalidEmbeddingException::class.java)
         }
         verify(publicationService, never()).publish(any(), any())
     }

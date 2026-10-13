@@ -176,7 +176,7 @@ class DatabaseOperationsTest {
                 database.execute { if (++calls == 1) throw SQLException("heartbeat connection lost", "08006"); calls }
             }
             check(firstWait.await(5, TimeUnit.SECONDS))
-            // claim 경로는 장애 상태를 보고 작업 전에 기다린다
+            // claim 경로의 작업 전 대기 확인
             val claimed = AtomicBoolean()
             val claim = pool.submit<Int> { database.execute { claimed.set(true); 1 } }
             val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)

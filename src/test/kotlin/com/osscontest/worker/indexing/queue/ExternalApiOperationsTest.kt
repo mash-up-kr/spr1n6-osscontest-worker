@@ -162,6 +162,7 @@ class ExternalApiOperationsTest {
                 database.execute { if (++calls == 1) throw SQLException("heartbeat connection lost", "08006"); calls }
             }
             check(firstWait.await(5, TimeUnit.SECONDS))
+            // 외부 호출 경로의 호출 전 대기 확인
             val call = pool.submit<String> { api(breaker, database = database).execute(testToken, action = action) }
             val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
             while (waits.get() < 2) { check(System.nanoTime() < until) { "external call did not wait" }; Thread.sleep(1) }
