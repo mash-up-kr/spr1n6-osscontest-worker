@@ -8,13 +8,16 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import kotlin.random.Random
 
+// 같은 시각에 실패한 Job들이 한꺼번에 다시 claim되지 않도록 지연을 ±20% 흩는다.
+private val JITTER_RANGE = 0.8..1.2
+
 fun interface RetryJitter {
     fun factor(): Double
 }
 
 @Component
 class RandomRetryJitter : RetryJitter {
-    override fun factor(): Double = Random.nextDouble(0.8, 1.2)
+    override fun factor(): Double = Random.nextDouble(JITTER_RANGE.start, JITTER_RANGE.endInclusive)
 }
 
 data class FailureDecision(val status: IndexingJobStatus, val nextRetryAt: Instant?)
@@ -35,11 +38,11 @@ class RetryPolicy(private val jitter: RetryJitter) {
             return FailureDecision(IndexingJobStatus.FAILED, null)
         }
         val factor = jitter.factor()
-        require(factor in 0.8..1.2)
+        require(factor in JITTER_RANGE)
         val delayMillis = (baseDelay.toMillis().toDouble() * attemptCount.coerceAtLeast(1) * factor)
             .toLong().coerceAtLeast(1)
         val linearDeadline = dbNow.plusMillis(delayMillis)
-        // Retry-After is a provider minimum; it must not shorten the Job backoff.
+        // Retry-After는 공급자가 정한 최소 대기다. Job backoff를 줄이는 데 쓰지 않는다.
         val providerDeadline = retryAfterDeadline(retryAfter, dbNow)
         return FailureDecision(IndexingJobStatus.RETRY_WAIT,
             providerDeadline?.let { maxOf(linearDeadline, it) } ?: linearDeadline)

@@ -45,7 +45,10 @@ data class JobSnapshot(
     fun identifies(job: ClaimedJob) = ExecutionIdentity(job).matches(this)
 }
 
-/** Both locked writes and read-only receipts use the same execution rules. */
+/**
+ * 잠근 쓰기와 읽기 전용 완료 확인이 같은 실행권 규칙을 쓰도록 엔티티를 스냅샷으로 바꾼다.
+ * [now]를 넘기지 않으면 updatedAt을 현재 시각으로 쓰므로 그 결과로 lease 만료([JobSnapshot.canWrite])를 판단하지 않는다.
+ */
 internal fun IndexingJobEntity.snapshot(documentEpoch: Long? = null, now: Instant = updatedAt) =
     JobSnapshot(workerId, executionEpoch, status, leaseUntil, nextRetryAt, now, documentEpoch,
         outcome, jobType, documentId, documentVersionId, lastErrorCode, lastErrorMessage)

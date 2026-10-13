@@ -36,10 +36,10 @@ class DbJobWorker(
 
     private val lifecycle = Any()
     @Volatile private var current: Generation? = null
-    // Reservations include claim/DB waits and survive stop/start until old loops actually exit.
+    // 루프 슬롯은 claim과 DB 대기 동안에도 잡혀 있다. stop/start 뒤에도 이전 루프가 실제로 끝나야 반납된다.
     private val slots = Semaphore(properties.concurrency)
     private val heartbeatSlots = Semaphore(properties.concurrency)
-    // A configured instance label may survive a restart; the boot ID must not.
+    // 설정한 workerId는 재시작 뒤에도 같을 수 있어 부팅마다 새 UUID를 붙인다.
     private val instanceId = "${properties.workerId}.${UUID.randomUUID()}"
     private val claimIds = AtomicLong()
     private class RunningExecution(private val thread: Thread, val job: ClaimedJob) {
@@ -55,6 +55,7 @@ class DbJobWorker(
         @Synchronized fun heartbeatFinished(task: ManagedTask<Unit>) { if (heartbeat === task) heartbeat = null }
         @Synchronized fun revoke() { if (!closed) thread.interrupt() }
     }
+    /** start 한 번에 만든 스레드풀 묶음. 이전 generation의 루프는 자기 generation이 멈춘 것을 보고 끝난다. */
     private class Generation(properties: QueueProperties) {
         val running = AtomicBoolean(true)
         val active = ConcurrentHashMap<ExecutionToken, RunningExecution>()
@@ -95,7 +96,7 @@ class DbJobWorker(
         generation.workers.shutdownNow()
     }
 
-    /** Wake at most one loop. Claiming happens only after the pool accepts and starts it. */
+    /** 루프를 최대 하나 깨운다. claim은 풀이 작업을 받아 실행을 시작한 뒤에만 한다. */
     internal fun probe(): Boolean = current?.let { activate(it) } ?: false
 
     private fun activate(generation: Generation): Boolean = synchronized(lifecycle) {
@@ -104,7 +105,7 @@ class DbJobWorker(
             generation.workers.execute { runLoop(generation) }
             true
         } catch (_: RejectedExecutionException) {
-            // A retiring pool thread can still be returning after its reservation was released.
+            // 종료 중인 풀 스레드가 예약을 반납한 뒤에도 잠시 풀에 남아 있어 거절될 수 있다.
             slots.release()
             false
         } catch (error: Exception) {
@@ -125,7 +126,7 @@ class DbJobWorker(
                     log.error("Job claim failed", error)
                     waiter.waitFor(properties.pollInterval)
                     continue
-                } ?: return // Return this thread to the pool; the probe timer discovers new work.
+                } ?: return // 할 일이 없으면 스레드를 풀에 돌려준다. 새 작업은 probe 타이머가 찾는다.
                 runJob(generation, job)
             }
         } catch (_: InterruptedException) {
@@ -156,7 +157,7 @@ class DbJobWorker(
         try {
             if (!generation.running.get()) return
             DatabaseOperations.checkInterrupted()
-            // More work may exist. Expand up to N while this loop processes its committed claim.
+            // 할 일이 더 있을 수 있다. 이 루프가 Job을 처리하는 동안 concurrency까지 루프를 늘린다.
             try {
                 activate(generation)
             } catch (error: Exception) {
@@ -179,7 +180,7 @@ class DbJobWorker(
             generation.active.remove(job.token, handle)
             results.forget(job.token)
             MDC.remove("traceId")
-            // Job cancellation must not poison the next claim. A stopped generation never resumes.
+            // Job 취소로 남은 인터럽트가 다음 claim을 막지 않게 지운다. 멈춘 generation은 다시 시작하지 않는다.
             if (generation.running.get()) Thread.interrupted()
         }
     }
@@ -212,6 +213,8 @@ class DbJobWorker(
             checkActive()
             store.renew(token)
         }
+        // 갱신이 0건이면 실행권을 잃은 것이다.
+        // 이미 완료했거나 스스로 실패를 기록한 실행이 아니면 실행 스레드를 중단한다.
         if (renewed == 0) {
             val snapshot = database.execute {
                 checkActive()

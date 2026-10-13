@@ -31,7 +31,10 @@ class IndexingPublicationService(
     private val ownership: JobOwnershipGuard,
     private val state: PublicationStateReader,
 ) {
-    /** true means there is no INDEX work left; the caller leaves this transaction before external calls. */
+    /**
+     * 남은 INDEX 작업이 없으면 true를 돌려준다. 이미 완료했거나 삭제된 문서라 생략 완료한 경우다.
+     * 호출자는 외부 호출 전에 이 트랜잭션을 끝낸다.
+     */
     @Transactional(isolation = Isolation.READ_COMMITTED)
     fun preflight(claim: ClaimedJob): Boolean {
         check(claim.type == JobType.INDEX)
@@ -42,7 +45,10 @@ class IndexingPublicationService(
         return finishDeleted(execution, claim.token)
     }
 
-    /** Reused during circuit waits, under the same document -> Job locks and write guard. */
+    /**
+     * 외부 API 호출 전과 DB 복구 뒤마다 다시 확인한다. 같은 문서 → Job 잠금과 쓰기 검증을 거친다.
+     * 그 사이 문서가 삭제됐으면 생략 완료하고 true를 돌려준다.
+     */
     @Transactional(isolation = Isolation.READ_COMMITTED)
     fun preflight(token: ExecutionToken): Boolean = finishDeleted(ownership.lockForResult(token), token)
 

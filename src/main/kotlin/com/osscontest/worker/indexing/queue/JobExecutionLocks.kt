@@ -13,9 +13,10 @@ import java.util.UUID
 
 data class LockedJobExecution(val job: IndexingJobEntity, val documentEpoch: Long, val now: Instant)
 
-/** JDBC projections avoid reusing a stale entity from the persistence context after a lock wait. */
+/** 잠금 대기 뒤 영속성 컨텍스트의 낡은 엔티티를 재사용하지 않도록 JDBC로 직접 조회한다. */
 @Component
 class JobExecutionLocks(private val jdbc: NamedParameterJdbcTemplate) {
+    /** 문서 → Job 순서로 잠근다. Job이나 문서가 없거나, 잠그는 사이 Job의 document_id가 바뀌었으면 null을 돌려준다. */
     fun lock(jobId: Long): LockedJobExecution? {
         requireTransaction()
         val documentId = jdbc.query("SELECT document_id FROM indexing_job WHERE id = :id", mapOf("id" to jobId)) {

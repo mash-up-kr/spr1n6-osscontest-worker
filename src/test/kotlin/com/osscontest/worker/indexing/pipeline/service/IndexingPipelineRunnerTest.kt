@@ -77,7 +77,7 @@ class IndexingPipelineRunnerTest {
         whenever(failures.recordFailure(any(), any(), any(), any(), any(), any(), anyOrNull()))
             .thenReturn(IndexingJobStatus.RETRY_WAIT)
         runner.run(job)
-        verify(failures).recordFailure(eq(testToken), eq("ParseCapacityException"), any(), eq(false), eq(5), any(), anyOrNull())
+        verify(failures).recordFailure(eq(testToken), eq("PARSE_CAPACITY"), any(), eq(false), eq(5), any(), anyOrNull())
         val source = argumentCaptor<com.osscontest.worker.indexing.retrieval.TemporaryDocumentFile>()
         verify(parse).parse(any(), source.capture(), any())
         assertThat(Files.exists(source.firstValue.path)).isFalse()

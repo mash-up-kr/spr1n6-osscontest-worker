@@ -8,6 +8,10 @@ import org.springframework.stereotype.Component
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * 임베딩 API breaker 상태를 external_circuit_breaker 행 하나에 두어 모든 Worker 인스턴스가 공유한다.
+ * [acquire]로 받은 허가는 [record]나 [release]로 반드시 끝내야 한다.
+ */
 @Component
 class CircuitBreaker(
     private val store: CircuitBreakerStore,
@@ -19,6 +23,7 @@ class CircuitBreaker(
 ) {
     private val open = AtomicInteger(0)
     init {
+        // 시험 호출 TTL이 임베딩 타임아웃보다 짧으면 정상 응답이 오기 전에 시험 호출이 만료된다.
         require(properties.callDuration > timeout) { "Circuit call TTL must exceed the embedding timeout" }
         meters.gauge("external_circuit_breaker_open", open)
     }
@@ -40,6 +45,7 @@ class CircuitBreaker(
     fun release(token: ExecutionToken, callId: String) = store.release(properties.name, token, callId)
     fun record(permit: CircuitPermit, result: CircuitResult) {
         observe(store.record(permit, result, properties.failureThreshold, properties.openDuration.toMillis()) { now ->
+            // rate limit 대기 시각만 계산한다. 시도 한도를 두지 않아 항상 RETRY_WAIT 기한이 나온다.
             retryPolicy.decideFailure(false, result.attempt, Int.MAX_VALUE, baseDelay, now, result.retryAfter).nextRetryAt!!
         })
     }

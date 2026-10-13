@@ -10,8 +10,10 @@ import com.osscontest.worker.indexing.publication.repository.DocumentChunkReposi
 import com.osscontest.worker.indexing.publication.repository.DocumentRepository
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Isolation
 import org.springframework.transaction.annotation.Transactional
 
+/** DELETE Job을 처리한다. 문서가 삭제됐는지 확인하고 청크 삭제와 Job 완료를 한 트랜잭션에 저장한다. */
 @Service
 class DocumentDeletionService(
     private val indexingJobRepository: IndexingJobRepository,
@@ -19,7 +21,7 @@ class DocumentDeletionService(
     private val documentRepository: DocumentRepository,
     private val ownership: JobOwnershipGuard,
 ) {
-    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     fun delete(job: ClaimedJob): IndexingJobStatus {
         require(job.type == JobType.DELETE)
         val owned = ownership.lock(job.token)

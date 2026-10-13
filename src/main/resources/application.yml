@@ -30,12 +30,14 @@ indexing:
   queue:
     enabled: ${INDEXING_DB_QUEUE_ENABLED:true}
     worker-id: ${INDEXING_WORKER_ID:${random.uuid}}
-    # Worker 인스턴스별 최대 활동 루프 수. 작업이 있을 때만 최대치까지 늘어난다.
+    # Worker 인스턴스별 최대 claim·처리 루프 수. 작업이 있을 때만 최대치까지 늘어난다.
     concurrency: ${INDEXING_QUEUE_CONCURRENCY:5}
     # idle 워커의 새 작업 탐색 간격. 처리 중인 워커는 완료 직후 다음 claim을 한다.
     poll-interval: ${INDEXING_QUEUE_POLL_INTERVAL:PT1S}
     # idle 스레드를 1분 동안 재사용한 뒤 해제한다. 새 작업이 오면 다시 생성된다.
     worker-idle-timeout: ${INDEXING_WORKER_IDLE_TIMEOUT:PT60S}
+    # heartbeat 간격의 두 배보다 길어야 시작된다. heartbeat가 한 번 늦어도 lease가 끝나지 않게 한다.
+    # 기본값은 heartbeat 간격의 6배라 heartbeat가 다섯 번 연달아 실패해도 lease가 남는다.
     lease-duration: ${INDEXING_LEASE_DURATION:PT60S}
     heartbeat-interval: ${INDEXING_HEARTBEAT_INTERVAL:PT10S}
   circuit-breaker:
@@ -44,12 +46,15 @@ indexing:
     failure-threshold: ${INDEXING_CIRCUIT_BREAKER_FAILURE_THRESHOLD:5}
     # 열린 뒤 이 시간이 지나면 한 Worker가 시험 호출을 한다.
     open-duration: ${INDEXING_CIRCUIT_BREAKER_OPEN_DURATION:PT60S}
-    # Actual probe TTL; must exceed spring.ai.openai.embedding.timeout (default 60s).
+    # 실제 시험 호출의 TTL. spring.ai.openai.embedding.timeout(기본 60초)보다 길어야 시작된다.
     call-duration: ${INDEXING_CIRCUIT_BREAKER_CALL_DURATION:PT90S}
   database:
+    # DB 장애 중 SELECT 1로 복구를 확인하는 간격이다.
     check-interval: ${INDEXING_DB_CHECK_INTERVAL:PT5S}
+    # 복구 확인용 SELECT 1에만 거는 제한 시간이다. 일반 쿼리에는 적용하지 않는다.
     query-timeout: ${INDEXING_DB_QUERY_TIMEOUT:PT3S}
     connect-timeout-seconds: ${INDEXING_DB_CONNECT_TIMEOUT_SECONDS:3}
+    # Worker는 일반 쿼리에 시간 제한을 걸지 않으므로 응답 없는 연결은 이 값으로 끊는다. 정상 쿼리를 끊지 않도록 넉넉히 둔다.
     socket-timeout-seconds: ${INDEXING_DB_SOCKET_TIMEOUT_SECONDS:15}
   limits:
     # 시연 환경 메모리와 임시 디스크 용량을 고려해 원문을 200 MiB로 제한한다.

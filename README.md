@@ -30,10 +30,12 @@ Server는 업로드·권한·검색과 공용 DB 스키마를 소유합니다. �
 `INDEX` 또는 `DELETE` Job 등록은 생산자 측의 동일 트랜잭션에서 처리해야 합니다.
 Worker는 이미 등록된 Job을 실행하며 원본 Object Storage 삭제는 담당하지 않습니다.
 
-**배포 의존성:** [DB 큐 계약 SQL](docs/sql/DB_JOB_QUEUE_CONTRACT.sql)은 스키마 소유자가 적용할
-변경안이며 Worker가 자동 실행하지 않습니다. 기존 큐 계약을 적용한 DB는 [재시도 전환 SQL](docs/sql/DB_JOB_RETRY_MIGRATION.sql)이 필요합니다.
-DB 스케줄러도 `recover_expired_indexing_jobs(max_attempts, base_delay_ms)`에 Worker와 같은 설정을 전달해야 합니다. Server의 Job 생산 경로와 과거 버전 재시도 제한도
-별도 저장소에서 구현·검증해야 합니다. 이 저장소의 수정으로 Server가 전환되지는 않습니다.
+**배포 의존성:** 물리 스키마와 마이그레이션은 Server를 따릅니다. Worker는 Server 마이그레이션이 적용된
+공용 스키마를 전제로 동작하며 스키마를 변경하지 않습니다(`ddl-auto: none`).
+Worker가 요구하는 큐·circuit breaker 스키마는 Server 마이그레이션 [`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql)에 있습니다.
+이 저장소는 마이그레이션을 적용하지 않습니다. lease가 만료된 `PROCESSING` Job의 회수도 Worker 범위 밖입니다.
+Server의 Job 생산 경로와 과거 버전 재시도 제한도 별도 저장소에서 구현·검증해야 합니다.
+이 저장소의 수정으로 Server가 전환되지는 않습니다.
 
 관련 저장소: [Server](https://github.com/mash-up-kr/spr1n6-osscontest-server),
 [Web](https://github.com/mash-up-kr/spr1n6-osscontest-web).
@@ -45,9 +47,11 @@ DB 스케줄러도 `recover_expired_indexing_jobs(max_attempts, base_delay_ms)`�
 - `job_id + worker_id + execution_epoch`와 lease로 실행권을 확인합니다. heartbeat는 별도 스레드에서 수행합니다.
 - DB 연결 장애는 실패한 DB 호출 위치에서 대기합니다. 트랜잭션을 끝내고 주기적으로 `SELECT 1`을 실행하며 임시 파일과 결과를 메모리에 유지합니다.
 - 장애 감지 이후 신규 claim과 다음 외부 호출을 보류합니다. 이미 진행 중인 외부 호출은 완료될 수 있습니다.
-- 복구 후 같은 실행권이면 중단한 위치에서 재개합니다. 만료 lease는 동일 소유권 조건으로 갱신을 시도하고, 회수 절차가 먼저 이기면 현재 실행을 종료합니다.
+- 복구 후 같은 실행권이면 중단한 위치에서 재개합니다. 만료된 lease도 소유권이 그대로면 갱신하고, 외부 회수 절차가 먼저 소유권을 비웠으면 현재 실행을 종료합니다.
 - 청크 UPSERT·버전 완료·검색 포인터 승격·Job 완료를 한 트랜잭션에서 저장합니다. 커밋 응답 유실 시 같은 실행의 완료 상태를 확인해 중복 저장을 건너뜁니다.
-- 일반 오류와 429는 `RETRY_WAIT`·DB 기준 `next_retry_at` 또는 `FAILED`를 기록하고 Worker·lease를 해제한 뒤 슬롯을 반환합니다. 선형 backoff에 ±20% 지터를 적용하고 유효한 `Retry-After`를 하한으로 존중합니다. 다음 claim은 같은 Job을 새 실행으로 처리합니다. 결제 한도 초과(429 `insufficient_quota`)는 예외로 circuit breaker 실패로 셉니다.
+- 일반 오류와 429는 `RETRY_WAIT`·DB 기준 `next_retry_at` 또는 `FAILED`를 기록하고 Worker·lease를 해제한 뒤 슬롯을 반환합니다. 선형 backoff에 ±20% 지터를 적용하고 유효한 `Retry-After`를 하한으로 존중합니다. 다음 claim은 같은 Job을 새 실행으로 처리합니다.
+- 임베딩 API의 연속 일시 실패(기본 5회)는 DB에 공유하는 circuit breaker를 엽니다. 결제 한도 초과(429 `insufficient_quota`)와 인증·권한 오류(401·403)는 모든 호출에 공통이므로 횟수와 관계없이 바로 엽니다.
+- breaker가 열려 있는 동안 신규 INDEX claim과 임베딩 호출을 멈춥니다. 임베딩을 쓰지 않는 `DELETE` Job과 삭제된 문서의 `INDEX` Job은 계속 claim합니다. 열림 기한(기본 60초)이 지나면 INDEX Job 하나가 시험 호출을 합니다.
 - 삭제된 문서의 청크는 `DELETE` Job 실행 시 삭제합니다.
 
 ```mermaid
@@ -58,11 +62,10 @@ stateDiagram-v2
     RETRY_WAIT --> PROCESSING: due 이후 새 claim / 횟수·epoch 증가
     PROCESSING --> COMPLETED: 원자적 결과 저장
     PROCESSING --> FAILED: 영구 실패 또는 한도 초과
-    PROCESSING --> RETRY_WAIT: lease 만료 / 잔여 횟수 있음
 ```
 
-회수된 재시도 Job은 저장된 대기 시각을 유지합니다. 소유권을 잃거나 Worker가 종료되면
-새 claim으로 전체 처리를 다시 수행할 수 있습니다. 외부 API의 중복 실행 비용은 허용합니다.
+Worker는 lease가 만료된 `PROCESSING` Job을 다시 claim하지 않습니다. 외부 회수 절차가 소유권을 비운 뒤
+다음 claim이 전체 처리를 다시 수행합니다. 외부 API의 중복 실행 비용은 허용합니다.
 
 ## 문서 처리
 
@@ -99,6 +102,7 @@ set +a
 | `INDEXING_WORKER_ID` | 실행 시 UUID 생성; 활성 프로세스별로 고유하게 설정 |
 | `INDEXING_QUEUE_CONCURRENCY` | `5`; 파싱 executor 크기도 함께 설정 |
 | `INDEXING_QUEUE_POLL_INTERVAL` | `PT1S` |
+| `INDEXING_WORKER_IDLE_TIMEOUT` | `PT60S`; idle 실행 스레드를 해제하기까지의 시간 |
 | `INDEXING_LEASE_DURATION` | `PT60S` |
 | `INDEXING_HEARTBEAT_INTERVAL` | `PT10S` |
 | `INDEXING_DB_CHECK_INTERVAL` | `PT5S` |
@@ -108,6 +112,7 @@ set +a
 | `INDEXING_DB_SOCKET_TIMEOUT_SECONDS` | `15`; PostgreSQL 소켓 읽기 제한 |
 | `INDEXING_MAX_ATTEMPTS`, `INDEXING_RETRY_BASE_DELAY` | `5`, `PT30S` |
 | `INDEXING_CIRCUIT_BREAKER_FAILURE_THRESHOLD`, `INDEXING_CIRCUIT_BREAKER_OPEN_DURATION` | `5`, `PT60S`; 임베딩 API circuit breaker |
+| `INDEXING_CIRCUIT_BREAKER_CALL_DURATION` | `PT90S`; 시험 호출 TTL, 임베딩 타임아웃(60초)보다 길어야 함 |
 | `INDEXING_CHUNKING_STRATEGY` | `FIXED_TOKEN` |
 | `INDEXING_MAX_TOKENS_PER_CHUNK`, `INDEXING_OVERLAP_TOKENS` | `512`, `64` |
 | `INDEXING_MAX_CHUNKS`, `INDEXING_MAX_TOTAL_TOKENS` | `5000`, `2000000` |
@@ -142,8 +147,9 @@ docker run --rm --name aidocs-worker --env-file .env osscontest-indexing-worker
 ./gradlew integrationTest
 ```
 
-일반 테스트는 외부 서비스 없이 파서·청킹·큐 슬롯·DB 대기·실행권·API 재시도를 검증합니다.
-통합 테스트는 전용 PostgreSQL/pgvector와 공용 스키마 및 DB 큐 계약이 필요합니다.
+일반 테스트는 외부 서비스 없이 파서·청킹·큐 슬롯·DB 대기·실행권·circuit breaker를 검증합니다.
+통합 테스트는 Server 마이그레이션을 모두 적용한 전용 PostgreSQL/pgvector가 필요합니다.
+Server는 `pgcrypto` 확장을 마이그레이션 밖에서 설치하므로 적용 전에 먼저 만듭니다.
 DB 이름에 `test` 또는 `integration`이 포함되어야 하며 `.env.example`의 `INTEGRATION_*`를 설정합니다.
 실제 임베딩 연동 테스트는 테스트 코드의 API key 조건을 충족할 때만 실행됩니다.
 

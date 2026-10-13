@@ -28,7 +28,7 @@ transaction. It does not retain and reuse a failed transaction object.
 
 Claims, heartbeats, phase writes, failure records, publication, and deletion use these database
 boundaries. Detected outages hold fresh claims and subsequent external requests. In-flight requests
-may complete. Process termination loses retained memory; a new claim recomputes the pipeline.
+may complete. Process termination loses retained memory; after an external procedure clears ownership, a new claim recomputes the pipeline.
 
 ## Ownership and conditional lease renewal
 
@@ -37,13 +37,9 @@ The execution token is `job_id + worker_id + execution_epoch`. Ownership require
 
 An expired lease can conditionally renew under the same token. Renewal matches Job ID, Worker ID,
 epoch, owned state, and lease presence; it does not require the old lease to remain in the future.
-State and lease are checked again afterward. Recovery matches expiry, clears ownership and lease,
-and retains epoch until the next claim. Competing updates lock the same row and recheck conditions after the winner:
-
-- If renewal wins, the recovery expiry predicate fails.
-- If recovery wins, renewal's owner/epoch predicate fails.
-
-There is no recovery grace period or delayed recovery scheduling. Heartbeat uses the same renewal.
+State and lease are checked again afterward. The Worker does not recover expired leases.
+If an external procedure clears the owner and lease, renewal's owner/epoch predicate fails and the current execution exits.
+The next claim issues a new epoch. Heartbeat uses the same renewal.
 If lease expiry makes the final completion UPDATE affect zero rows during publication, all result
 writes roll back. Renewal and revalidation occur outside that transaction before retrying retained results.
 
@@ -79,16 +75,13 @@ for the same document, while other documents can run. Successful batches in memo
 ### Embedding API circuit breaker
 
 When 5 consecutive transient embedding failures (5xx, timeout, connection error) accumulate, OPEN is recorded in the DB
-(`external_circuit_breaker`) and shared by all Workers. 429 uses the durable retry path above and is not counted, except
-quota exhaustion (429 `insufficient_quota`), which keeps failing until credit is added and is therefore counted.
-While OPEN, the embedding API is not called and callers wait, so Job attempts are not consumed. New claims are limited
-to DELETE Jobs, which do not call the embedding API; INDEX claims stop.
-After 60 seconds a single Worker makes a probe call: success closes the breaker, failure reopens it.
-While a probe Job is needed, each poll claims at most one Job.
-
-Expired PROCESSING recovery uses the same attempt budget and jittered linear backoff. It selects RETRY_WAIT
-with attempts remaining and FAILED otherwise. Existing RETRY_WAIT deadlines are preserved; recovery does not
-increment attempts or epoch. A database scheduler must pass the Worker's actual max_attempts and base_delay_ms.
+(`external_circuit_breaker`) and shared by all Workers. 429 uses the durable retry path above and is not counted.
+Quota exhaustion (429 `insufficient_quota`) and authentication/permission errors (401/403) affect every call and open
+the breaker immediately; the Job that received the error records a retryable failure and consumes one attempt.
+While OPEN, running Jobs wait instead of calling the embedding API, so their attempts are not consumed. New claims are
+limited to DELETE Jobs and INDEX Jobs for deleted documents; other INDEX claims stop.
+After the open period (60 seconds by default) one INDEX Job reserves the probe call and other INDEX claims wait for its result.
+A successful probe closes the breaker; a failed probe reopens it.
 
 Hash mismatch, unsupported MIME, corrupted files, size/chunk/token limits, invalid embeddings, and rejected
 requests are permanent. Set INDEXING_JOB_AFTER_UPLOAD_CONFIRMED=true only after confirming that Core registers
@@ -98,17 +91,17 @@ errors are not treated as permanent together. The default budget is five attempt
 ## Deletion and version safety
 
 A DELETE Job atomically removes chunks and completes. An INDEX Job for a deleted document is a normal
-termination, not an error: the pre-execution check, result publication, and the recovery loop all end it as
+termination, not an error: the pre-execution check, the check during breaker waits, and result publication all end it as
 `COMPLETED` with `outcome = SKIPPED_DOCUMENT_DELETED`, without creating chunks or retrying. The completion
 reason is recorded in `outcome` (`INDEXED`, `DELETED`, `SKIPPED_DOCUMENT_DELETED`).
 
-An INDEX Job left as `FAILED` or `RETRY_WAIT` permanently blocks the DELETE Job for the same document.
-Terminating it as SKIPPED regardless of attempt count lets the DELETE Job proceed. The recovery loop
-(`recover`) runs deleted-document cleanup before attempt-exhaustion and ineligible-job cleanup for this reason.
+A `PENDING`, `PROCESSING`, or `RETRY_WAIT` predecessor blocks a later DELETE Job for the same document.
+INDEX Jobs for deleted documents are claimed even while the breaker is open and end as SKIPPED, so they do not keep DELETE blocked.
 
 Execution-epoch fencing and document `version_no` pointer regression protection serve different purposes.
-Server restrictions on historical retries remain an external dependency; the Worker terminates document/version
-mismatches and stale-version INDEX Jobs during recovery as `FAILED` / `DOCUMENT_INELIGIBLE`.
+Server restrictions on historical retries remain an external dependency. A document/version mismatch fails
+permanently as `DOCUMENT_MISMATCH`; a stale-version INDEX saves its chunks and version completion but never moves
+the searchable pointer back.
 
 ## Validation
 
@@ -117,22 +110,20 @@ mismatches and stale-version INDEX Jobs during recovery as `FAILED` / `DOCUMENT_
 | Phase write fails after download | Retain file and resume the phase call |
 | Heartbeat database failure | Separate thread waits; fresh claims and subsequent external calls hold |
 | Old successful health probe races a new outage | Preserve the newer outage |
-| Renewal/recovery in either winning order | Resume only valid token; reject recovered owner's writes |
+| Renewal or writes after external recovery | Owner predicate fails; renewal and writes are rejected |
 | Validation fails after chunk UPSERT | Roll back chunks and completion together |
 | Save commits but response is lost | Recognize same-token completion; avoid repeated save and external processing |
 | Claim response is lost | Resolve the previously captured token |
 | One embedding batch returns 429 | Persist retry and release the slot; next claim runs the full pipeline |
 | Failure commit response is lost | Resolve same-epoch released state without moving deadline or attempts |
 | Predecessor retry deadline is in the future | Block successors for the same document; allow other documents |
-| Worker dies during retry | Preserve deadline on recovery; new execution may recompute |
 | DELETE replay or stale INDEX publication | Idempotent completion and ownership rejection |
 | Deleted document detected during indexing (pre-run or at publication) | COMPLETED + SKIPPED_DOCUMENT_DELETED, no chunks written |
-| Expired INDEX Job recovered for a deleted document | COMPLETED + SKIPPED regardless of attempt count, never FAILED |
-| INDEX and DELETE waiting while the breaker is OPEN | Claim DELETE only; INDEX waits |
-| Quota exhaustion (429 insufficient_quota) | Counted as a breaker failure, not a rate-limit retry; once open, wait without consuming attempts |
+| INDEX and DELETE waiting while the breaker is OPEN | Claim DELETE and deleted-document INDEX only; other INDEX waits |
+| Quota exhaustion (429 insufficient_quota) | Opens the breaker immediately instead of a rate-limit retry; wait without consuming attempts while open |
 
 Unit and PostgreSQL integration tests are distinct. Validate SQL races and rollbacks against a dedicated
-database with the shared schema and [queue contract](sql/DB_JOB_QUEUE_CONTRACT.sql) applied.
+database with all Server migrations applied, including [`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql).
 This document does not claim that production migrations or integration tests have been completed.
 
 Metrics: `indexing_db_wait_total`, `indexing_retry_scheduled_total{errorCode}`,

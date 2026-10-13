@@ -6,7 +6,7 @@ import org.springframework.stereotype.Repository
 data class PublicationDocument(val deleted: Boolean, val searchableVersionId: Long?)
 data class PublicationVersion(val documentId: Long, val versionNo: Long)
 
-/** Fresh projections under the document/Job locks; never reuse a managed entity read before locking. */
+/** 문서·Job 잠금 아래에서 새로 조회한다. 잠금 전에 읽은 관리 엔티티를 재사용하지 않는다. */
 @Repository
 class PublicationStateReader(private val jdbc: NamedParameterJdbcTemplate) {
     fun document(id: Long): PublicationDocument = jdbc.query(

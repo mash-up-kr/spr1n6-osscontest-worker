@@ -5,7 +5,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Deletes after the runner closes and every parser has actually stopped using the file. */
+/** 파이프라인이 닫고 이 파일을 쓰는 모든 파서가 실제로 멈춘 뒤에 삭제한다. */
 class TemporaryDocumentFile(val path: Path) : AutoCloseable {
     private var users = 1
     private var closed = false

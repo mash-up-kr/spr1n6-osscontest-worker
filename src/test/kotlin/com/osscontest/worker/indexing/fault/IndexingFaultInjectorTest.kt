@@ -3,6 +3,8 @@ package com.osscontest.worker.indexing.fault
 import com.osscontest.worker.indexing.queue.ExecutionToken
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertTimeoutPreemptively
+import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -20,7 +22,8 @@ class IndexingFaultInjectorTest {
     fun `비활성 상태에서는 block하지 않는다`() {
         val injector = IndexingFaultInjector(FaultInjectionProperties(enabled = false))
 
-        injector.blockIfNeeded(5001L, "EMBEDDING", context)
+        // block되면 테스트가 멈추지 않고 실패하도록 시간을 제한한다.
+        assertTimeoutPreemptively(Duration.ofSeconds(1)) { injector.blockIfNeeded(5001L, "EMBEDDING", context) }
     }
 
     @Test
@@ -33,7 +36,8 @@ class IndexingFaultInjectorTest {
                 ),
             )
 
-        injector.blockIfNeeded(5001L, "PARSING", context)
+        // block되면 테스트가 멈추지 않고 실패하도록 시간을 제한한다.
+        assertTimeoutPreemptively(Duration.ofSeconds(1)) { injector.blockIfNeeded(5001L, "PARSING", context) }
     }
 
     @Test

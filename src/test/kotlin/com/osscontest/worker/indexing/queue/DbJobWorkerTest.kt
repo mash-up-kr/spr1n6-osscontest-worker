@@ -703,11 +703,11 @@ class DbJobWorkerTest {
 
     private fun awaitIgnoringInterrupt(latch: CountDownLatch) {
         while (true) {
-            try { latch.await(); return } catch (_: InterruptedException) { /* Model a JDBC call returning after stop. */ }
+            try { latch.await(); return } catch (_: InterruptedException) { /* stop 뒤에도 JDBC 호출이 끝나 돌아오는 상황을 흉내 낸다. */ }
         }
     }
 
-    /** No database is used: emulate execute's retry to test the Worker's prepared-token orchestration. */
+    /** DB 없이 execute의 재시도만 흉내 내 Worker의 준비 토큰 처리를 검증한다. */
     private fun retryDatabase(beforeRetry: () -> Unit): DatabaseOperations = mock<DatabaseOperations>().apply {
         whenever(execute<Any?>(any(), any())).thenAnswer {
             retryAction(it.getArgument(1), beforeRetry)

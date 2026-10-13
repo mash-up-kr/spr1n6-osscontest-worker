@@ -69,7 +69,7 @@
 | 담당 | 필요한 계약·변경 |
 |---|---|
 | claim | 두 저장소의 실제 사용 경로 통합. `PENDING` 또는 due인 `RETRY_WAIT`을 `enqueue_seq` 순서로 선택. 선행 미종결 Job 검사에는 미래의 `RETRY_WAIT`도 포함. 다른 문서까지 막는 전역 재시도 차단·재시도 우선 정렬 제거. 횟수·epoch는 다음 claim에서 증가 |
-| Core·스키마 | `docs/sql/DB_JOB_QUEUE_CONTRACT.sql`과 실제 Core 마이그레이션 정렬. `enqueue_seq`·문서 epoch·시각 타입 계약 보완. 정상 실패와 만료 복구에 같은 시도 한도·backoff·지터 설정 적용 |
+| Core·스키마 | `sql/20261012_worker_queue_and_circuit.sql`과 실제 Core 마이그레이션 정렬. `enqueue_seq`·문서 epoch·시각 타입 계약 보완. 정상 실패와 만료 복구에 같은 시도 한도·backoff·지터 설정 적용 |
 | Core 만료 복구 | 만료 `PROCESSING`을 일시 실패로 보고 잔여 횟수에 따라 `RETRY_WAIT`/`FAILED` 결정. Worker·lease를 함께 해제. 기존 `RETRY_WAIT`의 저장된 deadline 보존. 시도 횟수를 추가 소비하지 않고, 현재 회수 시 epoch 증가도 다음 claim에서 증가하는 계약과 정렬 |
 | Core 생산자 | 객체 업로드 성공 후 Job 등록, 문서 변경과 Job 등록의 트랜잭션 계약, 문서별 등록 순서·`enqueue_seq` 발급 확인 |
 | 1번 작업 | 소유권 해제 후 실패 커밋 응답 유실 확인 방식 연결. 기존 DB 대기·조건부 lease 갱신·회수 경쟁·재개 흐름 회귀 방지 |
@@ -115,6 +115,6 @@ Core의 기존 `DocumentService`는 동기 `objectStorage.put()` 성공 후 `doc
 
 - 429의 `Retry-After`는 선형 지터 deadline의 하한으로 처리한다.
 - 실패 커밋 응답 유실은 같은 epoch의 해제 상태를 확인하는 별도 실패 경계로 처리한다.
-- 기존 큐 DB용 전환 SQL은 `docs/sql/DB_JOB_RETRY_MIGRATION.sql`에 작성했다. Worker가 자동 적용하지 않는다.
+- Worker가 요구하는 스키마는 `sql/20261012_worker_queue_and_circuit.sql`에 정리했다. Server 마이그레이션은 이 파일을 기준으로 작성하며 Worker는 적용하지 않는다.
 - Core 생산자 계약은 새 Job 경로에서 추가 확인이 필요하다. `INDEXING_JOB_AFTER_UPLOAD_CONFIRMED`는 기본 false이며 확인 후 활성화한다.
 - Docker 실행 승인 요청이 중단되어 실제 PostgreSQL 통합 검증은 실행하지 못했다.

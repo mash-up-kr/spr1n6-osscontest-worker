@@ -10,10 +10,10 @@ import org.junit.jupiter.api.*
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
 import org.mockito.kotlin.*
+import org.springframework.boot.convert.ApplicationConversionService
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Import
-import org.springframework.core.io.ClassPathResource
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.jdbc.datasource.DriverManagerDataSource
@@ -23,6 +23,7 @@ import org.springframework.test.context.junit.jupiter.SpringJUnitConfig
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.annotation.EnableTransactionManagement
 import org.springframework.transaction.support.TransactionTemplate
+import java.nio.file.Path
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -30,7 +31,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import javax.sql.DataSource
 
-/** Private PG schema, real Spring transaction proxies and the pending migration's circuit DDL. */
+/** 전용 PostgreSQL 스키마에서 실제 Spring 트랜잭션 프록시와 마이그레이션 제안의 breaker DDL로 검증한다. */
 @Tag("integration")
 @SpringJUnitConfig(CircuitBreakerIntegrationTest.Config::class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -55,11 +56,15 @@ class CircuitBreakerIntegrationTest(
             val password = System.getenv("INTEGRATION_DB_PASSWORD").orEmpty()
             val base = DriverManagerDataSource(url, user, password)
             assertDedicatedIntegrationDatabase(JdbcTemplate(base))
+            // 이전 실행이 컨텍스트 생성 중 실패하면 스키마가 남으므로 먼저 지운다.
+            JdbcTemplate(base).execute("DROP SCHEMA IF EXISTS worker_circuit CASCADE")
             JdbcTemplate(base).execute("CREATE SCHEMA worker_circuit")
             return CommitResponseLossDataSource(DriverManagerDataSource(url + (if ('?' in url) "&" else "?") +
                 "currentSchema=worker_circuit", user, password))
         }
         @Bean fun jdbc(source: DataSource) = JdbcTemplate(source)
+        // Boot 없이 띄운 컨텍스트라 @Value의 "PT30S" 같은 Duration 문자열을 바꿀 변환기를 직접 등록한다.
+        @Bean fun conversionService() = ApplicationConversionService.getSharedInstance()
         @Bean fun namedJdbc(jdbc: JdbcTemplate) = NamedParameterJdbcTemplate(jdbc)
         @Bean fun transactionManager(source: DataSource) = DataSourceTransactionManager(source)
         @Bean fun queueProperties() = QueueProperties()
@@ -78,7 +83,7 @@ class CircuitBreakerIntegrationTest(
             lease_until TIMESTAMPTZ,next_retry_at TIMESTAMPTZ,updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
             started_at TIMESTAMPTZ,completed_at TIMESTAMPTZ,trace_id TEXT,phase TEXT,outcome TEXT,
             last_error_code TEXT,last_error_message TEXT)""")
-        val migration = ClassPathResource("db/worker_migrations/20261012_worker_queue_and_circuit.sql").inputStream.bufferedReader().use { it.readText() }
+        val migration = Path.of("sql/20261012_worker_queue_and_circuit.sql").toFile().readText()
         val ddl = migration.substringAfter("-- CIRCUIT SCHEMA BEGIN").substringBefore("-- CIRCUIT SCHEMA END")
         jdbc.execute(ddl)
     }
@@ -214,7 +219,7 @@ class CircuitBreakerIntegrationTest(
         assertThat(store.snapshot(name).probeOwner).isEqualTo(jobs.single().token.workerId)
         assertThat(queue.claim(5,"extra")).isNull()
         queue.enqueue(UUID.randomUUID(), 8, null, JobType.DELETE, null)
-        // Earlier INDEX on document 8 still blocks its DELETE.
+        // 문서 8에 먼저 등록된 INDEX가 남아 있어 DELETE는 claim되지 않는다.
         assertThat(queue.claim(5,"delete-blocked")).isNull()
         jdbc.update("INSERT INTO document(id) VALUES(9),(10)")
         queue.enqueue(UUID.randomUUID(),9,null,JobType.DELETE,null)

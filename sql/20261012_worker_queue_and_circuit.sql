@@ -1,8 +1,9 @@
--- PENDING / NOT APPLIED. API/DB owner applies manually, never the Worker.
--- Cumulative Worker contract since efb3eb7; also supports already-applied older queue proposals.
--- Stop old unfenced/circuit Writers, drain or externally recover PROCESSING Jobs first.
--- Existing naive Job timestamps must represent UTC. Do not run the older queue/retry proposals afterwards.
--- Recovery procedure/scheduler/HA implementation is intentionally excluded.
+-- Server 마이그레이션 V20261012_001__add_db_queue_schema.sql로 반영된 제안이다. 이 저장소는 적용하지 않는다.
+-- CircuitBreakerIntegrationTest가 CIRCUIT SCHEMA 구간의 breaker DDL을 읽어 테스트 스키마를 만든다.
+-- efb3eb7 이후 Worker 계약을 누적한 것이며, 이전 큐 제안을 이미 적용한 DB에도 실행할 수 있다.
+-- 적용 전에 실행권 확인이 없는 이전 Writer와 breaker Writer를 멈추고 PROCESSING Job을 비우거나 외부에서 회수한다.
+-- 기존 Job의 timezone 없는 시각은 UTC여야 한다. 적용 뒤에는 이전 큐·재시도 제안을 실행하지 않는다.
+-- 만료 Job 회수 절차, 스케줄러, HA 구성은 이 파일에 넣지 않는다.
 BEGIN;
 DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM indexing_job WHERE status='PROCESSING') THEN
@@ -49,9 +50,9 @@ ALTER TABLE indexing_job ALTER COLUMN execution_epoch TYPE BIGINT,
     ALTER COLUMN enqueue_seq SET NOT NULL;
 UPDATE document d SET execution_epoch=GREATEST(d.execution_epoch,h.epoch)
 FROM (SELECT document_id,MAX(execution_epoch) AS epoch FROM indexing_job GROUP BY document_id) h WHERE d.id=h.document_id;
--- Release legacy metadata only. No terminal state is reset and no recovery decision is made here.
+-- 남은 소유자·lease 값만 비운다. 종결 상태를 되돌리거나 회수 판단을 하지 않는다.
 UPDATE indexing_job SET worker_id=NULL,lease_until=NULL WHERE status<>'PROCESSING';
--- Reuse equivalent valid non-partial UNIQUE indexes regardless of the Core constraint name.
+-- Core 제약 이름과 관계없이 같은 열의 유효한 비부분 UNIQUE 인덱스가 있으면 재사용한다.
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_index WHERE indrelid='indexing_job'::regclass AND indisunique
         AND indisvalid AND indpred IS NULL AND indexprs IS NULL AND indnkeyatts=1
@@ -98,8 +99,8 @@ END $$;
 ALTER TABLE indexing_job ADD CONSTRAINT ck_indexing_job_lease CHECK(
     (status='PROCESSING' AND worker_id IS NOT NULL AND lease_until IS NOT NULL) OR
     (status IN ('PENDING','RETRY_WAIT','COMPLETED','FAILED') AND worker_id IS NULL AND lease_until IS NULL));
--- document_version.embedding_version_no and document.latest_embedding_version_no remain shared Core metadata.
--- The Worker no longer maps the former; removing an ORM property is not a DROP COLUMN authorization.
+-- document_version.embedding_version_no와 document.latest_embedding_version_no는 Core 공용 메타데이터로 남는다.
+-- Worker가 앞 컬럼을 더 이상 매핑하지 않아도 DROP COLUMN 대상이 아니다.
 
 -- CIRCUIT SCHEMA BEGIN
 CREATE TABLE IF NOT EXISTS external_circuit_breaker (
@@ -117,7 +118,7 @@ ALTER TABLE external_circuit_breaker
     ADD COLUMN IF NOT EXISTS probe_reserved_until TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS probe_call_id TEXT,
     ADD COLUMN IF NOT EXISTS probe_call_until TIMESTAMPTZ;
--- Old HALF_OPEN had no owner/generation. Old callers must already be stopped.
+-- 이전 HALF_OPEN 행에는 소유자·generation이 없어 OPEN으로 되돌린다. 이전 호출자는 이미 멈춰 있어야 한다.
 UPDATE external_circuit_breaker SET state='OPEN',generation=generation+1,
     opened_until=clock_timestamp() WHERE state='HALF_OPEN' AND probe_owner IS NULL;
 ALTER TABLE external_circuit_breaker DROP CONSTRAINT IF EXISTS ck_external_circuit_breaker_open;
@@ -148,4 +149,4 @@ CREATE INDEX IF NOT EXISTS idx_circuit_result_generation ON external_circuit_res
 INSERT INTO external_circuit_breaker(name) VALUES('embedding-api') ON CONFLICT(name) DO NOTHING;
 -- CIRCUIT SCHEMA END
 COMMIT;
--- No receipt cleanup/recovery/scheduler is installed. Existing Core constraints/FKs/pgvector remain required.
+-- 결과 기록 정리, 회수, 스케줄러는 설치하지 않는다. 기존 Core 제약·FK·pgvector는 그대로 필요하다.

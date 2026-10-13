@@ -1,6 +1,7 @@
 package com.osscontest.worker.indexing.embedding.service
 
 import com.osscontest.worker.indexing.chunking.domain.Chunk
+import com.osscontest.worker.indexing.embedding.config.EmbeddingClientConfiguration.Companion.EMBEDDING_DIMENSIONS
 import com.osscontest.worker.indexing.embedding.usecase.EmbeddingUseCase
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
@@ -182,10 +183,6 @@ class EmbeddingIndexingProcessor(
             embedding = embedding,
             embeddedAt = embeddedAt,
         )
-
-    private companion object {
-        const val EMBEDDING_DIMENSIONS = 1536
-    }
 
     private fun elapsedMillis(startedAt: Long): Long =
         (System.nanoTime() - startedAt) / 1_000_000

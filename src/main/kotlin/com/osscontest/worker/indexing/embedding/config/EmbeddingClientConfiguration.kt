@@ -19,7 +19,12 @@ class EmbeddingClientConfiguration {
         @Value("\${spring.ai.openai.embedding.timeout:PT60S}") timeout: Duration,
         observations: ObservationRegistry,
     ): EmbeddingModel = OpenAiEmbeddingModel.builder().options(
-        OpenAiEmbeddingOptions.builder().apiKey(apiKey).baseUrl(baseUrl).model(model).dimensions(1536)
+        OpenAiEmbeddingOptions.builder().apiKey(apiKey).baseUrl(baseUrl).model(model).dimensions(EMBEDDING_DIMENSIONS)
             .encodingFormat(OpenAiEmbeddingOptions.EncodingFormat.FLOAT).timeout(timeout).maxRetries(0).build(),
     ).observationRegistry(observations).build()
+
+    companion object {
+        // Server 스키마의 document_chunk.embedding vector(1536)에 맞춘다. 요청 차원과 응답 검증이 같은 값을 쓴다.
+        const val EMBEDDING_DIMENSIONS = 1536
+    }
 }

@@ -23,7 +23,7 @@ sealed interface CallAdmission {
     data class Blocked(val delay: Duration) : CallAdmission
 }
 
-/** The same object/deadline survives rollback and lost commit acknowledgements. */
+/** 롤백이나 커밋 응답 유실 뒤 같은 객체로 다시 기록하므로, 한 번 계산한 [retryAt]이 바뀌지 않는다. */
 class CircuitResult(val outcome: CircuitOutcome, val attempt: Int = 1, val retryAfter: String? = null) {
     var retryAt: Instant? = null
 }

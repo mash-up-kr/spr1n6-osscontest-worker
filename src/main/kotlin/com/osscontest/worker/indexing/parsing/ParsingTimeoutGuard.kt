@@ -31,6 +31,8 @@ class ParsingTimeoutGuard(
     init { require(concurrency > 0 && parseTimeout.toMillis() > 0) }
     private val lifecycle = Any()
     private val tasks = ConcurrentHashMap.newKeySet<ManagedTask<List<ParsedBlock>>>()
+    // 제한 시간 뒤에도 끝나지 않은 파서가 스레드를 잡고 있을 수 있어 슬롯 수만큼만 대기시킨다.
+    // 그 이상은 ParseCapacityException으로 돌려보내 다음 claim에서 다시 시도한다.
     private val parseExecutor = ThreadPoolExecutor(concurrency, concurrency, 0, TimeUnit.MILLISECONDS,
         ArrayBlockingQueue(concurrency))
 
@@ -89,4 +91,6 @@ class ParsingTimeoutGuard(
     }
 }
 
-class ParseCapacityException(cause: Throwable) : RuntimeException("Parser capacity exhausted", cause)
+class ParseCapacityException(cause: Throwable) : RuntimeException("Parser capacity exhausted", cause) {
+    val code: String = "PARSE_CAPACITY"
+}

@@ -44,7 +44,9 @@ class DbJobQueueIntegrationTest(
         assertDedicatedIntegrationDatabase(jdbc)
         jdbc.update("INSERT INTO tenant (id, name) VALUES (800001, 'queue-integration')")
         for (id in 800001L..800002L) {
-            jdbc.update("INSERT INTO document (id, tenant_id, owner_principal_id, title) VALUES (?, 800001, 'test', 'queue')", id)
+            // 버전 1을 업로드한 상태로 둔다. Server 제약상 임베딩 버전은 업로드 버전을 넘을 수 없다.
+            jdbc.update("INSERT INTO document (id, tenant_id, owner_principal_id, title, latest_upload_version_no) " +
+                "VALUES (?, 800001, 'test', 'queue', 1)", id)
             jdbc.update("""
                 INSERT INTO document_version (id, document_id, version_no, embedding_version_no,
                     source_object_key, original_filename, mime_type, file_size, content_hash, created_by_principal_id)
@@ -73,8 +75,8 @@ class DbJobQueueIntegrationTest(
         jdbc.update("UPDATE indexing_job SET lease_until = clock_timestamp() - INTERVAL '1 second' WHERE id = ?", job.token.jobId)
     }
 
-    // Recovery procedure scheduling, jitter and heartbeat/recovery lock races belong to the DB owner.
-    // Worker tests prepare released state and verify active Worker APIs, without calling that procedure.
+    // 회수 절차의 스케줄링·지터와 heartbeat·회수 간 잠금 경쟁은 DB 소유자의 범위다.
+    // Worker 테스트는 해제된 상태를 직접 만들고 회수 절차 없이 Worker API만 검증한다.
     @Test
     fun `외부 회수 뒤 재claim 전 이전 실행은 heartbeat와 publish 결과를 쓰지 못한다`() {
         val job = claim()
@@ -90,7 +92,7 @@ class DbJobQueueIntegrationTest(
     @Test
     fun `청크 UPSERT 후 완료 실패는 청크 버전 Job을 모두 롤백한다`() {
         val job = claim()
-        // Duplicate chunk numbers pass UPSERT but fail stored-count validation after writing.
+        // 중복 청크 번호는 UPSERT를 통과하지만 저장 뒤 개수 검증에서 실패한다.
         assertThatThrownBy { publication.publish(context(job), listOf(chunk(0), chunk(0))) }
             .isInstanceOf(IllegalStateException::class.java)
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM document_chunk WHERE document_id = 800001", Long::class.java)).isZero()
@@ -103,7 +105,7 @@ class DbJobQueueIntegrationTest(
         val job = claim()
         publication.publish(context(job), listOf(chunk(0)))
         val completed = jdbc.queryForObject("SELECT completed_at FROM indexing_job WHERE id = ?", java.sql.Timestamp::class.java, job.token.jobId)
-        // The caller did not observe the previous return value; replay with changed inputs.
+        // 호출자가 이전 반환값을 받지 못한 상황이다. 입력을 바꿔 다시 호출한다.
         publication.publish(context(job), listOf(chunk(0).copy(content = "must not overwrite")))
         assertThat(jdbc.queryForObject("SELECT content FROM document_chunk WHERE document_id = 800001", String::class.java)).isEqualTo("saved")
         assertThat(jdbc.queryForObject("SELECT completed_at FROM indexing_job WHERE id = ?", java.sql.Timestamp::class.java, job.token.jobId)).isEqualTo(completed)
@@ -135,7 +137,7 @@ class DbJobQueueIntegrationTest(
         val job = checkNotNull(queue.claimFixture(5) {})
         execution.completion(job.token, ExecutionIdentity(job), completed = {}) { deletion.delete(job); Unit }
         execution.completion(job.token, ExecutionIdentity(job), completed = {}) { error("Completed DELETE must not replay") }
-        publication.publish(context(old), listOf(chunk(0))) // old completion is acknowledged without writes
+        publication.publish(context(old), listOf(chunk(0))) // 이전 완료는 쓰기 없이 확인
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM document_chunk WHERE document_id = 800001", Long::class.java)).isZero()
         assertThat(queue.snapshot(job.token)!!.status).isEqualTo(IndexingJobStatus.COMPLETED)
     }

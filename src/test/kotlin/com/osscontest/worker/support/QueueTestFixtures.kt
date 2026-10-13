@@ -8,6 +8,8 @@ import com.osscontest.worker.indexing.queue.ExecutionToken
 import com.osscontest.worker.indexing.queue.LockedJobExecution
 import com.osscontest.worker.indexing.queue.JobQueueStore
 import org.mockito.kotlin.any
+import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 import java.time.Instant
@@ -19,7 +21,7 @@ val testToken = ExecutionToken(1, "worker", 1)
 
 private val fixtureClaimIds = AtomicLong()
 
-/** Fixture convenience only; every claim still uses the production API and a distinct owner. */
+/** fixture 편의 함수다. 모든 claim은 운영 API와 서로 다른 owner를 쓴다. */
 fun JobQueueStore.claimFixture(maxAttempts: Int = 5, prepared: (ExecutionToken) -> Unit = {}) =
     claim(maxAttempts, "fixture-${fixtureClaimIds.updateAndGet { Math.incrementExact(it) }}", prepared)
 
@@ -35,7 +37,7 @@ fun directDatabase(): DatabaseOperations = mock<DatabaseOperations>().apply {
     whenever(execute<Any?>(any(), any())).thenAnswer { it.getArgument<() -> Any?>(1)() }
 }
 
-/** Retry orchestration without opening even an embedded DB; not a commit simulation. */
+/** 내장 DB 없이 재시도 흐름만 실행한다. 커밋을 흉내 내지 않는다. */
 fun retryingDatabase(): DatabaseOperations = mock<DatabaseOperations>().apply {
     whenever(execute<Any?>(any(), any())).thenAnswer {
         val action = it.getArgument<() -> Any?>(1)
@@ -58,16 +60,17 @@ fun directExecution(): ExecutionOperations = mock<ExecutionOperations>().apply {
 fun lockedJob(job: IndexingJobEntity = processingJob(), documentEpoch: Long = job.executionEpoch,
               now: Instant = testNow) = LockedJobExecution(job, documentEpoch, now)
 
-/** Closed circuit for tests whose subject is the queue/pipeline, not shared circuit SQL. */
+/** 공유 breaker SQL이 아니라 큐·파이프라인을 검증하는 테스트용 닫힌 breaker다. */
 fun closedCircuitBreaker() = mock<com.osscontest.worker.indexing.queue.CircuitBreaker>().also { allowCircuitCalls(it) }
 
 fun allowCircuitCalls(breaker: com.osscontest.worker.indexing.queue.CircuitBreaker) {
-    whenever(breaker.admission()).thenReturn(com.osscontest.worker.indexing.queue.ClaimAdmission.NORMAL)
-    whenever(breaker.lockForClaim()).thenReturn(com.osscontest.worker.indexing.queue.BreakerSnapshot(
-        com.osscontest.worker.indexing.queue.BreakerState.CLOSED, null, testNow))
-    whenever(breaker.acquire(any(), any())).thenAnswer {
+    // 공유 mock은 다른 스레드가 호출하는 중에도 스텁하므로 메서드를 호출하지 않는 doReturn 형태를 쓴다.
+    doReturn(com.osscontest.worker.indexing.queue.ClaimAdmission.NORMAL).whenever(breaker).admission()
+    doReturn(com.osscontest.worker.indexing.queue.BreakerSnapshot(
+        com.osscontest.worker.indexing.queue.BreakerState.CLOSED, null, testNow)).whenever(breaker).lockForClaim()
+    doAnswer {
         com.osscontest.worker.indexing.queue.CallAdmission.Allowed(com.osscontest.worker.indexing.queue.CircuitPermit(
             "embedding-api", 0, it.getArgument<String>(1)))
-    }
-    whenever(breaker.valid(any())).thenReturn(true)
+    }.whenever(breaker).acquire(any(), any())
+    doReturn(true).whenever(breaker).valid(any())
 }

@@ -46,13 +46,11 @@ internal class IndexingAttemptProcessor(
         documentVersion: DocumentVersionEntity,
         faultInjectionContext: FaultInjectionContext,
         attemptCount: Int = 1,
-        onStageStarted: (String) -> Unit,
     ) {
         if (documentVersion.fileSize > maxFileSizeBytes) {
             throw FileTooLargeException(documentVersion.fileSize, maxFileSizeBytes)
         }
 
-        onStageStarted("DOWNLOADING")
         val downloadStartedAt = System.nanoTime()
         log.info(
             "indexing stage started: stage=DOWNLOADING jobId={} documentId={} documentVersionId={}",
@@ -70,7 +68,6 @@ internal class IndexingAttemptProcessor(
                 Files.size(tempFile),
                 elapsedMillis(downloadStartedAt),
             )
-            onStageStarted("VERIFYING_CONTENT")
             val verificationStartedAt = System.nanoTime()
             log.info("indexing stage started: stage=VERIFYING_CONTENT jobId={}", jobId)
             val actualHash = "sha256:" + sha256HexOf(tempFile)
@@ -83,7 +80,6 @@ internal class IndexingAttemptProcessor(
                 elapsedMillis(verificationStartedAt),
             )
 
-            onStageStarted("PARSING")
             val parsingStartedAt = System.nanoTime()
             log.info(
                 "indexing stage started: stage=PARSING jobId={} mimeType={}",
@@ -100,7 +96,6 @@ internal class IndexingAttemptProcessor(
                 elapsedMillis(parsingStartedAt),
             )
 
-            onStageStarted("CHUNKING")
             val chunkingStartedAt = System.nanoTime()
             log.info(
                 "indexing stage started: stage=CHUNKING jobId={} strategy={} blockCount={}",
@@ -130,7 +125,6 @@ internal class IndexingAttemptProcessor(
                     attemptCount = attemptCount,
                 )
 
-            onStageStarted("EMBEDDING")
             log.info(
                 "indexing stage started: stage=EMBEDDING jobId={} chunkCount={}",
                 jobId,

@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.sql.DataSource
 
-/** Commits on PostgreSQL first, then loses only the acknowledgement. No simulated rollback. */
+/** PostgreSQL에 먼저 커밋한 뒤 응답만 잃는다. 롤백은 흉내 내지 않는다. */
 class CommitResponseLossDataSource(target: DataSource) : DelegatingDataSource(target) {
     val loseNextCommit = AtomicBoolean()
     val openConnections = AtomicInteger()
