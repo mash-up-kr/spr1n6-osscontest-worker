@@ -66,9 +66,9 @@ class JobFencingIntegrationTest(
     class Config {
         @Bean fun circuitBreaker() = com.osscontest.worker.support.closedCircuitBreaker()
         @Bean fun dataSource(): CommitResponseLossDataSource {
-            val url = requireNotNull(System.getenv("INTEGRATION_DB_URL"))
-            val user = requireNotNull(System.getenv("INTEGRATION_DB_USERNAME"))
-            val password = System.getenv("INTEGRATION_DB_PASSWORD").orEmpty()
+            val url = requireNotNull(System.getenv("DB_URL"))
+            val user = requireNotNull(System.getenv("DB_USERNAME"))
+            val password = System.getenv("DB_PASSWORD").orEmpty()
             val base = DriverManagerDataSource(url, user, password)
             assertDedicatedIntegrationDatabase(JdbcTemplate(base))
             // 이전 실행이 컨텍스트 생성 중 실패하면 스키마가 남으므로 먼저 지운다.

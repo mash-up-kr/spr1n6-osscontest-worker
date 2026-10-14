@@ -2,7 +2,6 @@ package com.osscontest.worker.indexing.pipeline.service
 
 import com.osscontest.worker.support.claimFixture
 import com.osscontest.worker.indexing.queue.JobQueueStore
-import com.osscontest.worker.indexing.queue.JobType
 import com.osscontest.worker.indexing.pipeline.domain.IndexingJobStatus
 import com.osscontest.worker.indexing.publication.repository.IndexingJobRepository
 import com.osscontest.worker.indexing.retrieval.DocumentDownloadClient
@@ -75,7 +74,6 @@ class IndexingPipelineRunnerIntegrationTest(
     fun cleanUp() {
         jdbcTemplate.update("DELETE FROM indexing_job")
         jdbcTemplate.update("DELETE FROM document_chunk")
-        jdbcTemplate.update("DELETE FROM outbox_event")
         jdbcTemplate.update("DELETE FROM document_version")
         jdbcTemplate.update("DELETE FROM document")
         jdbcTemplate.update("DELETE FROM tenant")
@@ -103,8 +101,7 @@ class IndexingPipelineRunnerIntegrationTest(
             Files.createTempFile("integration-test-", ".tmp")
                 .also { Files.write(it, "hello world".toByteArray()) }
         }
-        val sourceEventId = UUID.randomUUID()
-        queue.enqueue(sourceEventId, 900001L, 900001L, JobType.INDEX, null)
+        val sourceEventId = enqueuedSourceEventId(900001L)
 
         // 처음 두 번은 실패(재시도 가능한 RuntimeException), 세 번째는 성공하도록 설정.
         fakeIndexingProcessor.failuresBeforeSuccess = 2
@@ -137,8 +134,7 @@ class IndexingPipelineRunnerIntegrationTest(
             Files.createTempFile("integration-test-", ".tmp")
                 .also { Files.write(it, "hello world".toByteArray()) }
         }
-        val sourceEventId = UUID.randomUUID()
-        queue.enqueue(sourceEventId, 900002L, 900002L, JobType.INDEX, null)
+        val sourceEventId = enqueuedSourceEventId(900002L)
 
         fakeIndexingProcessor.failuresBeforeSuccess = Int.MAX_VALUE // 계속 실패
 
@@ -171,8 +167,7 @@ class IndexingPipelineRunnerIntegrationTest(
             Files.createTempFile("integration-test-", ".tmp")
                 .also { Files.write(it, "different content".toByteArray()) }
         }
-        val sourceEventId = UUID.randomUUID()
-        queue.enqueue(sourceEventId, 900003L, 900003L, JobType.INDEX, null)
+        val sourceEventId = enqueuedSourceEventId(900003L)
 
         pipelineRunner.run(checkNotNull(queue.claimFixture(5) {}))
 
@@ -182,6 +177,12 @@ class IndexingPipelineRunnerIntegrationTest(
         assertThat(job.attemptCount).isEqualTo(1) // 재시도 없이 1회 시도만에 종결
         assertThat(job.lastErrorCode).isEqualTo("HASH_MISMATCH")
     }
+
+    // Server 트리거가 문서 버전 INSERT와 같은 트랜잭션에서 등록한 Job을 사용한다.
+    private fun enqueuedSourceEventId(documentVersionId: Long): UUID = checkNotNull(
+        jdbcTemplate.queryForObject("SELECT source_event_id FROM indexing_job WHERE document_version_id = ?",
+            UUID::class.java, documentVersionId),
+    )
 
     private fun executeAttempts(event: UUID, count: Int, terminal: IndexingJobStatus) {
         var original: Map<String, Any?>? = null

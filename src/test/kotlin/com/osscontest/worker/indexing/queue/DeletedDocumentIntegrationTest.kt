@@ -59,13 +59,14 @@ class DeletedDocumentIntegrationTest(
                 versionId, documentId, versionNo, versionNo, "test.txt".toByteArray(),
             )
         }
+        // 구버전·신버전 Job을 각 시나리오에서 직접 등록한다.
+        jdbc.update("DELETE FROM indexing_job WHERE document_id = ?", documentId)
     }
 
     @AfterEach
     fun cleanup() {
         jdbc.update("DELETE FROM indexing_job WHERE document_id = ?", documentId)
         jdbc.update("DELETE FROM document_chunk WHERE document_id = ?", documentId)
-        jdbc.update("DELETE FROM outbox_event WHERE document_id = ?", documentId)
         jdbc.update("UPDATE document SET searchable_version_id = NULL WHERE id = ?", documentId)
         jdbc.update("DELETE FROM document_version WHERE document_id = ?", documentId)
         jdbc.update("DELETE FROM document WHERE id = ?", documentId)
@@ -148,7 +149,6 @@ class DeletedDocumentIntegrationTest(
     @Test
     fun `DELETE Job 완료는 outcome DELETED를 기록한다`() {
         deleteDocument()
-        queue.enqueue(UUID.randomUUID(), documentId, null, JobType.DELETE, null)
         val job = checkNotNull(queue.claimFixture(5) {})
 
         deletion.delete(job)
@@ -160,7 +160,6 @@ class DeletedDocumentIntegrationTest(
     fun `소유한 삭제 INDEX를 preflight로 종결한 뒤 후속 DELETE가 진행된다`() {
         val job = claimIndex()
         deleteDocument()
-        queue.enqueue(UUID.randomUUID(), documentId, null, JobType.DELETE, null)
         // 선행 INDEX가 미종결이라 DELETE는 아직 claim되지 않는다.
         assertThat(queue.claimFixture(5) {}).isNull()
 

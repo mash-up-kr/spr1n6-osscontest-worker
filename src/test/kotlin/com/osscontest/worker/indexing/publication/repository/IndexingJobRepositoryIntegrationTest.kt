@@ -54,6 +54,8 @@ class IndexingJobRepositoryIntegrationTest(
             """,
             "test.pdf".toByteArray(),
         )
+        // 이 클래스는 enqueue와 완료 연산을 검증하므로 Job을 테스트에서 직접 등록한다.
+        jdbcTemplate.update("DELETE FROM indexing_job WHERE document_id = 1")
     }
 
     @Test

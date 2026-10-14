@@ -53,13 +53,14 @@ class DbJobQueueIntegrationTest(
                 VALUES (?, ?, 1, 1, 'test', ?, 'text/plain', 1, 'hash', 'test')
             """.trimIndent(), id, id, "test.txt".toByteArray())
         }
+        // 아래 테스트는 Job을 직접 등록해 상태를 제어하므로 Server 트리거가 만든 초기 Job을 비운다.
+        jdbc.update("DELETE FROM indexing_job WHERE document_id IN (800001,800002)")
     }
 
     @AfterEach
     fun cleanup() {
         jdbc.update("DELETE FROM indexing_job WHERE document_id IN (800001,800002)")
         jdbc.update("DELETE FROM document_chunk WHERE document_id IN (800001,800002)")
-        jdbc.update("DELETE FROM outbox_event WHERE document_id IN (800001,800002)")
         jdbc.update("UPDATE document SET searchable_version_id = NULL WHERE id IN (800001,800002)")
         jdbc.update("DELETE FROM document_version WHERE document_id IN (800001,800002)")
         jdbc.update("DELETE FROM document WHERE id IN (800001,800002)")
@@ -133,7 +134,6 @@ class DbJobQueueIntegrationTest(
         val old = claim()
         publication.publish(context(old), listOf(chunk(0)))
         jdbc.update("UPDATE document SET deleted_at = clock_timestamp() WHERE id = 800001")
-        queue.enqueue(UUID.randomUUID(), 800001, null, JobType.DELETE, null)
         val job = checkNotNull(queue.claimFixture(5) {})
         execution.completion(job.token, ExecutionIdentity(job), completed = {}) { deletion.delete(job); Unit }
         execution.completion(job.token, ExecutionIdentity(job), completed = {}) { error("Completed DELETE must not replay") }

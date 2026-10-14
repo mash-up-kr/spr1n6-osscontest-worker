@@ -143,9 +143,24 @@ the health check tests Java PID 1 liveness.
 
 Unit tests cover parsers, chunking, queue capacity, database waits, ownership, and the circuit breaker
 without external services. Integration tests require a dedicated PostgreSQL/pgvector database
-with all Server migrations applied. The Server installs the `pgcrypto` extension outside its migrations,
-so create it first. Its name must contain `test` or `integration`.
-Configure `INTEGRATION_*` settings from `.env.example`. Live embedding tests run only when
+with all Server migrations applied. The Server installs `pgcrypto` and `pg_cron` outside its migrations,
+so create them first. Add `pg_cron` to `shared_preload_libraries`, set `cron.database_name` to the test
+database, and restart PostgreSQL. CI prepares this in its `Prepare PostgreSQL extensions` workflow step.
+The database name must contain `test` or `integration`.
+Integration tests read the same environment variables as the application: `DB_URL`, `DB_USERNAME`,
+`DB_PASSWORD`, `INDEXING_STORAGE_*`, and `OPENAI_API_KEY`. Load a `.env` configured for the test database
+into the shell before running:
+
+```bash
+set -a
+source .env
+set +a
+./gradlew integrationTest --tests "IndexingPipelineRunnerIntegrationTest"
+```
+
+Test cleanup deletes table contents, so use a dedicated database.
+The integration profile disables the OpenProxy connection initialization SQL for PostgreSQL.
+Live embedding tests run only when
 the key conditions in their test code are met.
 
 | Document | Contents |
