@@ -51,14 +51,13 @@ class IndexingFailureServiceIntegrationTest(
             """,
             "test.pdf".toByteArray(),
         )
+        // 실패 전이의 초기 상태를 seedJob에서 직접 구성한다.
+        jdbcTemplate.update("DELETE FROM indexing_job WHERE document_id = 1")
     }
 
     @AfterEach
     fun cleanUp() {
-        // document_version에 INSERT 트리거(trg_document_version_outbox)가 걸려 있어
-        // outbox_event에도 행이 생긴다 — document_version을 지우려면 먼저 지워야 한다.
         jdbcTemplate.update("DELETE FROM indexing_job")
-        jdbcTemplate.update("DELETE FROM outbox_event")
         jdbcTemplate.update("DELETE FROM document_version")
         jdbcTemplate.update("DELETE FROM document")
         jdbcTemplate.update("DELETE FROM tenant")

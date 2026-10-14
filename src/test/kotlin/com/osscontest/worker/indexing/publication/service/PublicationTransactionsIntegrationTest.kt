@@ -100,9 +100,9 @@ class PublicationTransactionsIntegrationTest(
         // Boot 없이 띄운 컨텍스트라 @Value의 "PT30S" 같은 Duration 문자열을 바꿀 변환기를 직접 등록한다.
         @Bean fun conversionService() = ApplicationConversionService.getSharedInstance()
         @Bean fun dataSource(): CommitResponseLossDataSource {
-            val url = requireNotNull(System.getenv("INTEGRATION_DB_URL"))
-            val user = requireNotNull(System.getenv("INTEGRATION_DB_USERNAME"))
-            val password = System.getenv("INTEGRATION_DB_PASSWORD").orEmpty()
+            val url = requireNotNull(System.getenv("DB_URL"))
+            val user = requireNotNull(System.getenv("DB_USERNAME"))
+            val password = System.getenv("DB_PASSWORD").orEmpty()
             val base = DriverManagerDataSource(url, user, password)
             assertDedicatedIntegrationDatabase(JdbcTemplate(base))
             // 이전 실행이 컨텍스트 생성 중 실패하면 스키마가 남으므로 먼저 지운다.

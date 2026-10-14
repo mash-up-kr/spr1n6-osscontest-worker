@@ -149,8 +149,22 @@ docker run --rm --name aidocs-worker --env-file .env osscontest-indexing-worker
 
 일반 테스트는 외부 서비스 없이 파서·청킹·큐 슬롯·DB 대기·실행권·circuit breaker를 검증합니다.
 통합 테스트는 Server 마이그레이션을 모두 적용한 전용 PostgreSQL/pgvector가 필요합니다.
-Server는 `pgcrypto` 확장을 마이그레이션 밖에서 설치하므로 적용 전에 먼저 만듭니다.
-DB 이름에 `test` 또는 `integration`이 포함되어야 하며 `.env.example`의 `INTEGRATION_*`를 설정합니다.
+Server는 `pgcrypto`, `pg_cron` 확장을 마이그레이션 밖에서 설치하므로 적용 전에 먼저 만듭니다.
+`pg_cron`은 `shared_preload_libraries`에 추가하고 `cron.database_name`을 테스트 DB로 지정한 뒤
+PostgreSQL을 재시작해야 합니다. CI에서는 워크플로의 `Prepare PostgreSQL extensions` 단계에서 준비합니다.
+DB 이름에 `test` 또는 `integration`이 포함되어야 합니다. 통합 테스트도 애플리케이션과 같은
+`DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `INDEXING_STORAGE_*`, `OPENAI_API_KEY` 환경 변수를 직접 읽습니다.
+테스트 DB 접속 정보를 설정한 `.env`는 실행 전에 셸로 불러옵니다.
+
+```bash
+set -a
+source .env
+set +a
+./gradlew integrationTest --tests "IndexingPipelineRunnerIntegrationTest"
+```
+
+통합 테스트는 데이터 정리 과정에서 테이블의 데이터를 삭제하므로 일반 개발 DB를 사용하지 않습니다.
+일반 PostgreSQL 테스트에서는 OpenProxy 전용 연결 초기화 SQL을 실행하지 않습니다.
 실제 임베딩 연동 테스트는 테스트 코드의 API key 조건을 충족할 때만 실행됩니다.
 
 | 문서 | 내용 |

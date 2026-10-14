@@ -91,5 +91,7 @@ tasks.register<Test>("integrationTest") {
     useJUnitPlatform {
         includeTags("integration")
     }
+    // 외부 DB 상태를 반영하도록 매번 실행한다.
+    outputs.upToDateWhen { false }
     shouldRunAfter(tasks.test)
 }

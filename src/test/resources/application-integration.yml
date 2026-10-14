@@ -1,14 +1,18 @@
 spring:
   datasource:
-    url: ${INTEGRATION_DB_URL}
-    username: ${INTEGRATION_DB_USERNAME}
-    password: ${INTEGRATION_DB_PASSWORD}
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD:}
+    hikari:
+      # 전용 PostgreSQL 에서는 운영 OpenProxy 의 SET SERVER ROLE 을 실행하지 않는다.
+      connection-init-sql: ""
+      initialization-fail-timeout: 1
   ai:
     openai:
-      api-key: ${INTEGRATION_OPENAI_API_KEY}
+      api-key: ${OPENAI_API_KEY:unused}
 
 indexing:
   storage:
-    bucket: ${INTEGRATION_STORAGE_BUCKET}
-    endpoint: ${INTEGRATION_STORAGE_ENDPOINT:}
-    region: ${INTEGRATION_STORAGE_REGION:us-east-1}
+    bucket: ${INDEXING_STORAGE_BUCKET:integration-test}
+    endpoint: ${INDEXING_STORAGE_ENDPOINT:}
+    region: ${INDEXING_STORAGE_REGION:us-east-1}
