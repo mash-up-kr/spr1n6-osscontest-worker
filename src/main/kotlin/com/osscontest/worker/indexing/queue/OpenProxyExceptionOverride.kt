@@ -11,12 +11,15 @@ import java.sql.SQLException
  * - 58000: OpenProxy가 붙을 서버를 찾지 못했다(AllServersDown)
  *
  * HikariCP가 인자 없는 생성자로 만들므로 `exception-override-class-name`으로 지정한다.
+ * Server의 같은 이름 클래스와 규칙이 같아야 하며, 한쪽의 SQLSTATE 목록을 바꾸면 다른 쪽도 맞춘다.
  */
 class OpenProxyExceptionOverride : SQLExceptionOverride {
     override fun adjudicate(sqlException: SQLException): SQLExceptionOverride.Override =
         if (sqlException.sqlState in EVICT_SQL_STATES) {
             SQLExceptionOverride.Override.MUST_EVICT
         } else {
+            // CONTINUE_EVICT 는 버린다는 뜻이 아니라 Hikari 기본 판정을 이어서 적용한다는 뜻이다.
+            // DO_NOT_EVICT 를 돌려주면 연결 끊김 같은 기본 폐기까지 막힌다.
             SQLExceptionOverride.Override.CONTINUE_EVICT
         }
 

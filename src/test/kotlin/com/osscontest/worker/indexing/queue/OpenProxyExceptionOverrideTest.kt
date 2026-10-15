@@ -20,6 +20,7 @@ class OpenProxyExceptionOverrideTest {
 
     @Test
     fun `그 밖의 오류는 HikariCP 기본 판정에 맡긴다`() {
+        // DO_NOT_EVICT 가 되면 연결 끊김 같은 Hikari 기본 폐기까지 막히므로 CONTINUE_EVICT 여야 한다.
         assertThat(override.adjudicate(SQLException("unique violation", "23505"))).isEqualTo(Override.CONTINUE_EVICT)
         assertThat(override.adjudicate(SQLException("no state"))).isEqualTo(Override.CONTINUE_EVICT)
     }
