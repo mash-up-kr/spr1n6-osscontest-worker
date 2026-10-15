@@ -371,7 +371,7 @@ add_docs 7 7
 
 **왜 그렇게 되나:** 응답 본문의 `code`가 `insufficient_quota`이면 모든 호출에 공통인 문제로 보고 설정 오류(`CONFIGURATION`)로 분류한다. 속도 제한(`rate_limit_exceeded`)과 본문으로 구분한다.
 
-**확인 상태:** 코드로 확인했고 `curl` 응답까지 봤다. **Worker 전체 흐름은 아직 실행해 보지 못했다.**
+**확인 상태:** 작성자가 로컬 Worker로 직접 실행해 위 표와 같은 결과를 확인했다. 코드(`EmbeddingService`)와 `curl` 응답도 확인했다.
 
 ---
 
@@ -401,7 +401,7 @@ add_docs 8 8
 
 **왜 그렇게 되나:** 속도 제한(`RATE_LIMIT`)은 API 장애가 아니라 호출 속도 문제라서 실패 횟수에 더하지 않고 breaker 상태도 바꾸지 않는다. 호출 전체를 막는 대신 해당 Job의 다음 재시도 시각만 `Retry-After` 이상으로 미룬다. breaker가 열리는 경우는 `HALF_OPEN` 시험 호출이 429를 받았을 때뿐이다.
 
-**확인 상태:** 코드(`CircuitBreakerStore.kt`)와 `curl` 응답으로 확인했다. **Worker 전체 흐름은 아직 실행해 보지 못했다.** 실행했을 때 위 표와 다르면 알려 달라.
+**확인 상태:** 작성자가 로컬 Worker로 직접 실행해 위 표와 같은 결과를 확인했다. 코드(`CircuitBreakerStore.kt`)와 `curl` 응답도 확인했다.
 
 ---
 
@@ -466,6 +466,7 @@ docker run --rm -p 8081:8081 -v "$PWD/scripts/embedding-outage/embedding-stub.py
 | `5xx` | 임시 DB·MinIO + 로컬 Worker | `CLOSED → OPEN → … → CLOSED`, Job 5개 `COMPLETED/INDEXED`(시도 2회) |
 | `401` | 같은 환경 | 한 건으로 `OPEN`, `fail=1`, `EMBEDDING_AUTHENTICATION_FAILED`, `EMBEDDING_CALL_REJECTED` 로그 1회 |
 | `timeout` | 같은 환경, `PT5S` | 5건 실패 후 `OPEN`, `OpenAIIoException` |
-| `quota`, `429` | curl 응답만 확인 | Worker 전이는 아직 확인하지 않았다 |
-| `watch.py` | 임시 PostgreSQL(`watch`가 읽는 두 테이블만 만든 것) + 스텁 | 화면 갱신, 스텁 꺼짐·DB 오류·환경변수 누락 표시, Ctrl+C·SIGTERM 뒤 컨테이너 정리. 실제 Worker가 바꾸는 breaker 화면은 아직 확인하지 않았다 |
+| `quota`, `429` | 작성자가 로컬 Worker로 직접 실행 | 위 표와 같은 결과(`quota`는 한 건으로 `OPEN`, `429`는 breaker `CLOSED` 유지). 화면 값은 따로 기록하지 않았다 |
+| `watch.py` | 임시 PostgreSQL(`watch`가 읽는 두 테이블만 만든 것) + 스텁 | 화면 갱신, 스텁 꺼짐·DB 오류·환경변수 누락 표시, Ctrl+C·SIGTERM 뒤 컨테이너 정리 |
+| `watch.py` + 실제 Worker | README 3장 따라 하기 중 | `5xx`의 `OPEN` 카운트다운, 시험 호출 실패(`failures=6`), `CLOSED` 복구와 `INDEXED` 표시 |
 | 3장 따라 하기, 4장 초기화, `401` | 문서의 코드 블록을 그대로 추출해 실행(경로만 임시 폴더로 변경) | 준비부터 `5xx` 복구(`CLOSED`, Job 5개 `COMPLETED`)까지 문서 설명대로 동작. 초기화 뒤 `401`로 `OPEN`, `failures=1`, `EMBEDDING_AUTHENTICATION_FAILED` |
