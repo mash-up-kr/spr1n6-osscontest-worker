@@ -2,6 +2,7 @@ package com.osscontest.worker.indexing.queue
 
 import com.osscontest.worker.indexing.concurrent.ManagedTask
 import com.osscontest.worker.indexing.pipeline.service.IndexingPipelineRunner
+import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -99,6 +100,22 @@ class DbJobWorker(
         generation.active.values.forEach { it.close() }
         generation.heartbeatWorkers.shutdownNow()
         generation.workers.shutdownNow()
+    }
+
+    /** 공유 DB와 mock을 정리하기 전에 종료한 세대의 모든 호출이 끝났는지 확인한다. */
+    internal fun stopAndAwaitTermination(timeout: Duration) {
+        require(!timeout.isNegative && !timeout.isZero)
+        val generation = synchronized(lifecycle) {
+            current?.also { stop() }
+        } ?: return
+        // 루프의 finally도 lifecycle 잠금을 쓰므로 잠금 밖에서 기다린다.
+        val deadline = System.nanoTime() + timeout.toNanos()
+        for (executor in listOf(generation.probes, generation.heartbeats,
+            generation.heartbeatWorkers, generation.workers)) {
+            check(executor.awaitTermination((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)) {
+                "Worker did not terminate within $timeout"
+            }
+        }
     }
 
     /** 루프를 최대 하나 깨운다. claim은 풀이 작업을 받아 실행을 시작한 뒤에만 한다. */

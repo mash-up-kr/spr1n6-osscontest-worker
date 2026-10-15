@@ -746,6 +746,53 @@ class DbJobWorkerTest {
         }
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = ["claim", "runner", "heartbeat"])
+    fun `종료 대기는 인터럽트 뒤에도 남은 mock 호출이 끝나야 반환한다`(stage: String) {
+        Harness().use { h ->
+            val entered = CountDownLatch(1)
+            val interrupted = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val runnerStarted = CountDownLatch(1)
+            fun blocked() {
+                entered.countDown()
+                try { release.await() } catch (_: InterruptedException) {
+                    interrupted.countDown()
+                    awaitIgnoringInterrupt(release)
+                }
+            }
+            if (stage == "claim") {
+                whenever(h.store.claim(any(), any(), any())).thenAnswer { blocked(); null }
+            } else {
+                whenever(h.store.claim(any(), any(), any())).thenReturn(job(), null)
+                doAnswer {
+                    if (stage == "runner") blocked()
+                    else { runnerStarted.countDown(); release.await() }
+                    null
+                }.whenever(h.runner).run(job())
+                if (stage == "heartbeat") {
+                    whenever(h.store.renew(any())).thenAnswer { blocked(); 1 }
+                }
+            }
+            val stopper = Executors.newSingleThreadExecutor()
+            h.worker.start()
+            try {
+                if (stage == "heartbeat") { await(runnerStarted); h.worker.heartbeat() }
+                await(entered)
+                val stopping = stopper.submit { h.worker.stopAndAwaitTermination(Duration.ofSeconds(3)) }
+                await(interrupted)
+                assertThat(stopping.isDone).isFalse()
+                release.countDown()
+                stopping.get(3, TimeUnit.SECONDS)
+                assertThat(h.worker.isRunning).isFalse()
+                if (stage == "claim") verifyNoInteractions(h.runner)
+            } finally {
+                release.countDown()
+                stopper.shutdownNow()
+            }
+        }
+    }
+
     private fun job(id: Long = 1) = ClaimedJob(testToken.copy(jobId = id), JobType.INDEX,
         UUID.nameUUIDFromBytes("event-$id".toByteArray()), id + 10, id + 20, "trace-$id")
 
