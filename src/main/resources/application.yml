@@ -5,7 +5,7 @@ spring:
     password: ${DB_PASSWORD}
     hikari:
       # OpenProxy aidocs 풀 크기(10)를 넘지 않게 잡는다.
-      maximum-pool-size: 4
+      maximum-pool-size: 3
       # 장애 전환 중 25006·58000 을 받은 연결은 기본 판정으로 버려지지 않아 직접 버리게 한다.
       exception-override-class-name: com.osscontest.worker.indexing.queue.OpenProxyExceptionOverride
       connection-timeout: 5000
