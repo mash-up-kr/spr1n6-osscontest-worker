@@ -13,7 +13,6 @@
 5. [정리하기](#5-정리하기)
 6. [막혔을 때](#6-막혔을-때)
 7. [참고: 스텁 응답만 확인하기](#7-참고-스텁-응답만-확인하기)
-8. [확인 이력](#8-확인-이력)
 
 ---
 
@@ -281,7 +280,7 @@ SQL
 
 **왜 그렇게 되나:** 503은 "API가 지금 못 받는다"는 실패(`FAILURE`)로 분류되어 연속 실패 횟수(기본 5회)에 더해진다. 임계치에 닿으면 60초 동안 호출을 막아 이미 아픈 API를 더 두드리지 않는다.
 
-**확인 상태:** Worker로 확인했다. 전체 약 3분.
+**걸리는 시간:** 전체 약 3분.
 
 ---
 
@@ -317,7 +316,6 @@ SQL
 
 **왜 그렇게 되나:** 타임아웃은 매핑된 예외가 아니라서 일반 실패(`FAILURE`)로 분류되어 `5xx`처럼 횟수에 더해진다.
 
-**확인 상태:** Worker로 확인했다(`PT5S`에서 5건 실패 후 `OPEN`).
 
 ---
 
@@ -348,7 +346,6 @@ Worker 로그(터미널 B)에는 `EMBEDDING_CALL_REJECTED`가 한 번 남는다.
 
 **왜 그렇게 되나:** 401은 설정 오류(`CONFIGURATION`)로 분류되어 실패 횟수와 무관하게 바로 `OPEN`이 된다. 다만 Job은 영구 실패(`FAILED`)가 아니라 `RETRY_WAIT`이다. 키를 고치면 성공할 수 있어서 재시도 가능으로 본다.
 
-**확인 상태:** Worker로 확인했다.
 
 ---
 
@@ -371,7 +368,6 @@ add_docs 7 7
 
 **왜 그렇게 되나:** 응답 본문의 `code`가 `insufficient_quota`이면 모든 호출에 공통인 문제로 보고 설정 오류(`CONFIGURATION`)로 분류한다. 속도 제한(`rate_limit_exceeded`)과 본문으로 구분한다.
 
-**확인 상태:** 작성자가 로컬 Worker로 직접 실행해 위 표와 같은 결과를 확인했다. 코드(`EmbeddingService`)와 `curl` 응답도 확인했다.
 
 ---
 
@@ -401,7 +397,6 @@ add_docs 8 8
 
 **왜 그렇게 되나:** 속도 제한(`RATE_LIMIT`)은 API 장애가 아니라 호출 속도 문제라서 실패 횟수에 더하지 않고 breaker 상태도 바꾸지 않는다. 호출 전체를 막는 대신 해당 Job의 다음 재시도 시각만 `Retry-After` 이상으로 미룬다. breaker가 열리는 경우는 `HALF_OPEN` 시험 호출이 429를 받았을 때뿐이다.
 
-**확인 상태:** 작성자가 로컬 Worker로 직접 실행해 위 표와 같은 결과를 확인했다. 코드(`CircuitBreakerStore.kt`)와 `curl` 응답도 확인했다.
 
 ---
 
@@ -457,16 +452,3 @@ docker run --rm -p 8081:8081 -v "$PWD/scripts/embedding-outage/embedding-stub.py
 
 `watch.py` 옵션은 `--stub-url`(기본 `http://127.0.0.1:8081`, 환경변수 `STUB_URL`), `--interval`(2초), `--once`(한 번만 그리고 종료), `--no-color`다. Job 개수와 최근 Job은 시나리오로 만든 것만이 아니라 DB의 `indexing_job` 전체 기준이다. Ctrl+C나 SIGTERM으로 끝내면 임시 psql 컨테이너(`spr1n6-watch-psql`)가 지워지고, 강제 종료(SIGKILL)하면 남지만 다음 실행이 먼저 지운다.
 
----
-
-## 8. 확인 이력
-
-| 대상 | 확인 방법 | 결과 |
-|---|---|---|
-| `5xx` | 임시 DB·MinIO + 로컬 Worker | `CLOSED → OPEN → … → CLOSED`, Job 5개 `COMPLETED/INDEXED`(시도 2회) |
-| `401` | 같은 환경 | 한 건으로 `OPEN`, `fail=1`, `EMBEDDING_AUTHENTICATION_FAILED`, `EMBEDDING_CALL_REJECTED` 로그 1회 |
-| `timeout` | 같은 환경, `PT5S` | 5건 실패 후 `OPEN`, `OpenAIIoException` |
-| `quota`, `429` | 작성자가 로컬 Worker로 직접 실행 | 위 표와 같은 결과(`quota`는 한 건으로 `OPEN`, `429`는 breaker `CLOSED` 유지). 화면 값은 따로 기록하지 않았다 |
-| `watch.py` | 임시 PostgreSQL(`watch`가 읽는 두 테이블만 만든 것) + 스텁 | 화면 갱신, 스텁 꺼짐·DB 오류·환경변수 누락 표시, Ctrl+C·SIGTERM 뒤 컨테이너 정리 |
-| `watch.py` + 실제 Worker | README 3장 따라 하기 중 | `5xx`의 `OPEN` 카운트다운, 시험 호출 실패(`failures=6`), `CLOSED` 복구와 `INDEXED` 표시 |
-| 3장 따라 하기, 4장 초기화, `401` | 문서의 코드 블록을 그대로 추출해 실행(경로만 임시 폴더로 변경) | 준비부터 `5xx` 복구(`CLOSED`, Job 5개 `COMPLETED`)까지 문서 설명대로 동작. 초기화 뒤 `401`로 `OPEN`, `failures=1`, `EMBEDDING_AUTHENTICATION_FAILED` |
