@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (c) 2026 매쉬업스프링YB
+# SPDX-License-Identifier: MIT
 # OpenSQL 장애 시나리오. 실행 방법은 같은 폴더의 README.md에 있다.
 # 처리 중인 Job을 확인한 뒤 현재 Primary의 Patroni를 SIGKILL한다.
 # OpenProxy 접속 실패와 쓰기 경로 복구를 관측하고, 같은 Job의 COMPLETED를 기다린다.

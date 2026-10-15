@@ -198,3 +198,19 @@ jtokkit 1.1.0, Lucene Nori 9.11.1.
 
 [코드 규칙](docs/CODE_CONVENTIONS.md)과 공용 DB 계약을 확인하고 `./gradlew test`를 실행합니다.
 실제 DB 동작 변경은 전용 통합 DB에서 검증합니다. [MIT License](LICENSE)로 배포됩니다.
+
+### 사용된 오픈소스
+
+| 프로젝트 | 라이선스 |
+|---|---|
+| Spring Boot / Spring AI | Apache-2.0 |
+| Kotlin | Apache-2.0 |
+| Hibernate ORM (hibernate-vector) | Apache-2.0 |
+| PostgreSQL JDBC Driver | BSD-2-Clause |
+| AWS SDK for Java v2 | Apache-2.0 |
+| Apache PDFBox | Apache-2.0 |
+| Apache POI | Apache-2.0 |
+| hwplib | Apache-2.0 |
+| jtokkit | MIT |
+| Apache Lucene (Nori) | Apache-2.0 |
+| Jackson | Apache-2.0 |

@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 매쉬업스프링YB
+ * SPDX-License-Identifier: MIT
+ */
+
 package com.osscontest.worker.indexing.publication.service
 
 import com.osscontest.worker.indexing.pipeline.domain.IndexingContext
