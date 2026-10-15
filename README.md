@@ -92,6 +92,20 @@ set +a
 ./gradlew bootRun
 ```
 
+기본 연결 설정은 OpenProxy를 경유하며 연결마다 `SET SERVER ROLE TO 'default'`를 실행합니다.
+일반 PostgreSQL에 직접 연결할 때는 이 초기화 SQL을 비운 추가 설정으로 실행합니다.
+위에서 `.env`를 불러온 셸에서 다음 명령을 사용합니다.
+
+```bash
+cat > /tmp/worker-postgres.yml <<'EOF'
+spring:
+  datasource:
+    hikari:
+      connection-init-sql: ""
+EOF
+SPRING_CONFIG_ADDITIONAL_LOCATION=/tmp/worker-postgres.yml ./gradlew bootRun
+```
+
 | 환경 변수 | 기본값 또는 용도 |
 |---|---|
 | `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` | 필수 DB 연결 정보 |
@@ -110,7 +124,7 @@ set +a
 | `INDEXING_HEARTBEAT_INTERVAL` | `PT10S` |
 | `INDEXING_DB_CHECK_INTERVAL` | `PT5S` |
 | `INDEXING_DB_QUERY_TIMEOUT` | `PT3S`; DB 헬스 조회 제한 |
-| `INDEXING_DB_CONNECTION_TIMEOUT_MS` | `3000`; 커넥션 풀 획득 제한 |
+| `SPRING_DATASOURCE_HIKARI_CONNECTIONTIMEOUT` | `5000`ms; `spring.datasource.hikari.connection-timeout`을 재정의하는 커넥션 풀 획득 제한 |
 | `INDEXING_DB_CONNECT_TIMEOUT_SECONDS` | `3`; PostgreSQL 연결 제한 |
 | `INDEXING_DB_SOCKET_TIMEOUT_SECONDS` | `15`; PostgreSQL 소켓 읽기 제한 |
 | `INDEXING_MAX_ATTEMPTS`, `INDEXING_RETRY_BASE_DELAY` | `5`, `PT30S` |
@@ -147,10 +161,13 @@ docker run --rm --name aidocs-worker --env-file .env osscontest-indexing-worker
 
 ```bash
 ./gradlew test
+./gradlew databaseTest
 ./gradlew integrationTest
 ```
 
 일반 테스트는 외부 서비스 없이 파서·청킹·큐 슬롯·DB 대기·실행권·circuit breaker를 검증합니다.
+`databaseTest`는 내장 H2 DB로 애플리케이션 컨텍스트를 검증합니다.
+`database` 태그가 붙은 테스트는 `test`와 `integrationTest`에서 실행되지 않습니다.
 통합 테스트는 Server 마이그레이션을 모두 적용한 전용 PostgreSQL/pgvector가 필요합니다.
 Server는 `pgcrypto`, `pg_cron` 확장을 마이그레이션 밖에서 설치하므로 적용 전에 먼저 만듭니다.
 `pg_cron`은 `shared_preload_libraries`에 추가하고 `cron.database_name`을 테스트 DB로 지정한 뒤
@@ -175,6 +192,7 @@ set +a
 | [Architecture](docs/ARCHITECTURE.md) | 컴포넌트와 공용 DB 계약 |
 | [Processing Model](docs/PROCESSING_MODEL.md) | claim, 병렬 실행, heartbeat, 삭제 처리 |
 | [Failure Handling](docs/FAILURE_HANDLING.md) | DB 대기, lease 경쟁, 커밋 응답 유실, 429 |
+| [장애 재현 가이드](scripts/README.md) | 임베딩 API 장애, Worker 강제 종료, DB 장애 재현과 검증 |
 
 ```text
 src/main/kotlin/com/osscontest/worker/indexing
