@@ -9,6 +9,23 @@ and an execution pool of up to `indexing.queue.concurrency` threads. It reserves
 A loop that claims a Job wakes one more loop while processing, up to the limit, and returns its thread to the pool when no Job is claimable.
 Database outage waits retain the slot. Ordinary failures and 429 persist a retry and exit, releasing the slot. Claims do not prefetch batches.
 
+New work discovery runs on NOTIFY for `indexing_job` and an independent 30-second fallback timer.
+The API Server must execute `SELECT pg_notify('indexing_job', '')` in the same transaction as the Job INSERT.
+The payload is ignored; existing claim conditions select eligible Jobs. Active loops claim the next Job immediately
+after processing. Discovery requests arriving during an empty claim or loop exit are retained until a slot is available.
+Unexpected claim errors use a separate one-second delay.
+
+`JobNotificationListener` owns one physical connection and a receiving thread per Worker instance, separate from
+the work Hikari pool. It registers LISTEN with auto-commit, requests discovery immediately, and reuses the connection
+for notification waits and a `SELECT 1` health check every 30 seconds. Connection failures reconnect with a delay
+starting at one second and capped at 30 seconds, register LISTEN again, and request discovery. Shutdown closes the
+connection. Listener failures do not mark the work database unavailable or stop fallback discovery.
+
+The listener uses the work database URL, credentials, and Hikari initialization SQL directly.
+Proxies must preserve sessions and forward asynchronous notifications.
+Budget one additional database connection per Worker. Idle discovery of due retries and externally recovered Jobs
+without notifications can take approximately another 30 seconds. Disabling LISTEN retains fallback discovery.
+
 A claim uses a short `FOR UPDATE SKIP LOCKED` transaction. Candidates are unowned `PENDING`
 or due `RETRY_WAIT` Jobs below the attempt limit. An earlier active Job for the same document
 blocks its successors, including a RETRY_WAIT predecessor whose deadline is still in the future. Candidates are ordered by enqueue_seq.

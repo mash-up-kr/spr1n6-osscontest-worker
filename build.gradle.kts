@@ -30,7 +30,7 @@ dependencies {
     implementation("org.hibernate.orm:hibernate-vector")
     // Kotlin data class를 Jackson 3로 직렬화하고 역직렬화한다.
     implementation("tools.jackson.module:jackson-module-kotlin")
-    runtimeOnly("org.postgresql:postgresql")
+    implementation("org.postgresql:postgresql")
 
     // 원문 다운로드 (S3 호환 — MinIO 로컬 개발 포함)
     implementation(platform("software.amazon.awssdk:bom:2.46.7"))

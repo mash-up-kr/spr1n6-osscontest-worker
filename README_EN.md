@@ -101,7 +101,10 @@ set +a
 | `INDEXING_DB_QUEUE_ENABLED` | `true` |
 | `INDEXING_WORKER_ID` | Generated UUID; must be unique per active process |
 | `INDEXING_QUEUE_CONCURRENCY` | `5`; also sets parser pool size |
-| `INDEXING_QUEUE_POLL_INTERVAL` | `PT1S` |
+| `INDEXING_QUEUE_POLL_INTERVAL` | `PT30S`; fallback discovery independent of NOTIFY |
+| `INDEXING_QUEUE_CLAIM_ERROR_DELAY` | `PT1S`; wait after unexpected claim errors |
+| `INDEXING_QUEUE_NOTIFICATIONS_ENABLED` | `true`; enables the LISTEN connection |
+| `INDEXING_QUEUE_NOTIFICATION_CHANNEL` | `indexing_job`; must match the API Server |
 | `INDEXING_LEASE_DURATION`, `INDEXING_HEARTBEAT_INTERVAL` | `PT60S`, `PT10S` |
 | `INDEXING_DB_CHECK_INTERVAL`, `INDEXING_DB_QUERY_TIMEOUT` | `PT5S`, `PT3S` |
 | `INDEXING_DB_CONNECTION_TIMEOUT_MS` | `3000`; pool connection acquisition |

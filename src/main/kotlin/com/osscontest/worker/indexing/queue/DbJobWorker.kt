@@ -2,6 +2,7 @@ package com.osscontest.worker.indexing.queue
 
 import com.osscontest.worker.indexing.concurrent.ManagedTask
 import com.osscontest.worker.indexing.pipeline.service.IndexingPipelineRunner
+import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -58,6 +59,9 @@ class DbJobWorker(
     /** start 한 번에 만든 스레드풀 묶음. 이전 generation의 루프는 자기 generation이 멈춘 것을 보고 끝난다. */
     private class Generation(properties: QueueProperties) {
         val running = AtomicBoolean(true)
+        // lifecycle 잠금으로 보호한다. claim 시작 전에 접수한 요청은 그 claim이 확인한다.
+        var pollRequested = false
+        var pollRetryScheduled = false
         val active = ConcurrentHashMap<ExecutionToken, RunningExecution>()
         private val threadIds = AtomicInteger()
         val workers = ThreadPoolExecutor(0, properties.concurrency, properties.workerIdleTimeout.toMillis(),
@@ -74,11 +78,13 @@ class DbJobWorker(
 
     override fun isRunning() = current?.running?.get() == true
 
+    override fun getPhase() = 0
+
     override fun start() = synchronized(lifecycle) {
         if (isRunning()) return@synchronized
         val generation = Generation(properties)
         current = generation
-        generation.probes.scheduleWithFixedDelay({ guarded { activate(generation) } }, 0,
+        generation.probes.scheduleWithFixedDelay({ guarded { requestPoll(generation) } }, 0,
             properties.pollInterval.toMillis(), TimeUnit.MILLISECONDS)
         generation.heartbeats.scheduleWithFixedDelay({ guarded { heartbeat(generation) } },
             properties.heartbeatInterval.toMillis(), properties.heartbeatInterval.toMillis(), TimeUnit.MILLISECONDS)
@@ -96,8 +102,49 @@ class DbJobWorker(
         generation.workers.shutdownNow()
     }
 
+    /** 공유 DB와 mock을 정리하기 전에 종료한 세대의 모든 호출이 끝났는지 확인한다. */
+    internal fun stopAndAwaitTermination(timeout: Duration) {
+        require(!timeout.isNegative && !timeout.isZero)
+        val generation = synchronized(lifecycle) {
+            current?.also { stop() }
+        } ?: return
+        // 루프의 finally도 lifecycle 잠금을 쓰므로 잠금 밖에서 기다린다.
+        val deadline = System.nanoTime() + timeout.toNanos()
+        for (executor in listOf(generation.probes, generation.heartbeats,
+            generation.heartbeatWorkers, generation.workers)) {
+            check(executor.awaitTermination((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)) {
+                "Worker did not terminate within $timeout"
+            }
+        }
+    }
+
     /** 루프를 최대 하나 깨운다. claim은 풀이 작업을 받아 실행을 시작한 뒤에만 한다. */
     internal fun probe(): Boolean = current?.let { activate(it) } ?: false
+
+    /** 리스너가 시작한 세대에만 요청한다. 늦게 도착한 이전 연결의 알림은 재시작한 워커를 깨우지 않는다. */
+    internal fun pollRequester(): () -> Unit {
+        val generation = current
+        return { if (generation != null) requestPoll(generation) }
+    }
+
+    private fun requestPoll(generation: Generation) = synchronized(lifecycle) {
+        if (current !== generation || !generation.running.get()) return@synchronized
+        generation.pollRequested = true
+        activatePending(generation)
+    }
+
+    private fun activatePending(generation: Generation) {
+        if (!generation.pollRequested || !generation.running.get()) return
+        if (activate(generation) || slots.availablePermits() == 0 || generation.pollRetryScheduled) return
+        // 슬롯 반환 직후에도 실행 풀에는 종료 중인 스레드가 남는다. 풀 수용 거절로 알림을 버리지 않는다.
+        generation.pollRetryScheduled = true
+        generation.probes.schedule({ guarded {
+            synchronized(lifecycle) {
+                generation.pollRetryScheduled = false
+                if (current === generation) activatePending(generation)
+            }
+        } }, POLL_SUBMISSION_RETRY_MILLIS, TimeUnit.MILLISECONDS)
+    }
 
     private fun activate(generation: Generation): Boolean = synchronized(lifecycle) {
         if (current !== generation || !generation.running.get() || !slots.tryAcquire()) return@synchronized false
@@ -118,21 +165,25 @@ class DbJobWorker(
         try {
             while (generation.running.get()) {
                 DatabaseOperations.checkInterrupted()
+                synchronized(lifecycle) { generation.pollRequested = false }
                 val job = try {
                     claim(generation)
                 } catch (error: Exception) {
                     if (error is InterruptedException) throw error
                     if (!generation.running.get()) return
                     log.error("Job claim failed", error)
-                    waiter.waitFor(properties.pollInterval)
+                    waiter.waitFor(properties.claimErrorDelay)
                     continue
-                } ?: return // 할 일이 없으면 스레드를 풀에 돌려준다. 새 작업은 probe 타이머가 찾는다.
+                } ?: return // 할 일이 없으면 스레드를 풀에 돌려준다. 알림이나 폴백 타이머가 다시 깨운다.
                 runJob(generation, job)
             }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         } finally {
-            slots.release()
+            synchronized(lifecycle) {
+                slots.release()
+                current?.let { activatePending(it) }
+            }
         }
     }
 
@@ -236,5 +287,9 @@ class DbJobWorker(
         } catch (error: Exception) {
             log.error("DB queue loop failed", error)
         }
+    }
+
+    private companion object {
+        const val POLL_SUBMISSION_RETRY_MILLIS = 10L
     }
 }

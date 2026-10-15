@@ -688,7 +688,10 @@ class PublicationTransactionsIntegrationTest(
             assertThat(jdbc.queryForObject("SELECT attempt_count FROM indexing_job WHERE id=?", Int::class.java, owned.jobId)).isEqualTo(1)
             resume.countDown()
             waitUntil { queue.snapshot(owned)?.completed(owned) == true && pipeline.path.get()?.let { !Files.exists(it) } == true }
-        } finally { worker.stop(); resume.countDown() }
+        } finally {
+            resume.countDown()
+            worker.stopAndAwaitTermination(Duration.ofSeconds(10))
+        }
     }
 
     @ParameterizedTest @ValueSource(booleans = [false, true])
@@ -878,7 +881,7 @@ class PublicationTransactionsIntegrationTest(
             assertThat(row(job)["status"]).isEqualTo("RETRY_WAIT")
             assertThat(jdbc.queryForObject("SELECT status FROM indexing_job WHERE job_type='DELETE'",String::class.java)).isEqualTo("COMPLETED")
             verify(pipeline.embedding,times(1)).embed(any())
-        } finally { worker.stop() }
+        } finally { worker.stopAndAwaitTermination(Duration.ofSeconds(10)) }
     }
 
     private fun deleteFixture():ClaimedJob {
