@@ -101,7 +101,10 @@ set +a
 | `INDEXING_DB_QUEUE_ENABLED` | `true` |
 | `INDEXING_WORKER_ID` | 실행 시 UUID 생성; 활성 프로세스별로 고유하게 설정 |
 | `INDEXING_QUEUE_CONCURRENCY` | `5`; 파싱 executor 크기도 함께 설정 |
-| `INDEXING_QUEUE_POLL_INTERVAL` | `PT1S` |
+| `INDEXING_QUEUE_POLL_INTERVAL` | `PT30S`; NOTIFY와 독립적인 폴백 탐색 |
+| `INDEXING_QUEUE_CLAIM_ERROR_DELAY` | `PT1S`; 예상 밖 claim 오류 후 대기 |
+| `INDEXING_QUEUE_NOTIFICATIONS_ENABLED` | `true`; LISTEN 수신 사용 |
+| `INDEXING_QUEUE_NOTIFICATION_CHANNEL` | `indexing_job`; API Server와 같은 채널 |
 | `INDEXING_WORKER_IDLE_TIMEOUT` | `PT60S`; idle 실행 스레드를 해제하기까지의 시간 |
 | `INDEXING_LEASE_DURATION` | `PT60S` |
 | `INDEXING_HEARTBEAT_INTERVAL` | `PT10S` |

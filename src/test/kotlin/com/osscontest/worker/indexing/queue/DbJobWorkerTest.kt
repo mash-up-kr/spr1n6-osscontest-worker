@@ -25,6 +25,7 @@ class DbJobWorkerTest {
     private class Harness(
         concurrency: Int = 1,
         pollInterval: Duration = Duration.ofDays(1),
+        claimErrorDelay: Duration = Duration.ofSeconds(1),
         heartbeatInterval: Duration = Duration.ofSeconds(10),
         workerIdleTimeout: Duration = Duration.ofSeconds(60),
         database: DatabaseOperations = directDatabase(),
@@ -34,7 +35,8 @@ class DbJobWorkerTest {
         val runner: IndexingPipelineRunner = mock()
         val results = ExecutionResults()
         val worker = DbJobWorker(QueueProperties(workerId = testToken.workerId, concurrency = concurrency,
-            pollInterval = pollInterval, heartbeatInterval = heartbeatInterval, workerIdleTimeout = workerIdleTimeout),
+            pollInterval = pollInterval, claimErrorDelay = claimErrorDelay,
+            heartbeatInterval = heartbeatInterval, workerIdleTimeout = workerIdleTimeout),
             database, store, runner, waiter, 5, results)
         override fun close() { worker.stop() }
     }
@@ -236,6 +238,73 @@ class DbJobWorkerTest {
 
     enum class Exit { NORMAL, LOST, COMPLETED, UNEXPECTED, INTERRUPTED }
 
+    @Test
+    fun `빈 큐 조회 도중 받은 알림은 슬롯이 반환되면 폴백을 기다리지 않고 다시 탐색한다`() {
+        Harness().use { h ->
+            val claimingEmpty = CountDownLatch(1)
+            val returnEmpty = CountDownLatch(1)
+            val started = CountDownLatch(1)
+            val finish = CountDownLatch(1)
+            val claims = AtomicInteger()
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
+                if (claims.incrementAndGet() == 1) {
+                    claimingEmpty.countDown(); returnEmpty.await(); null
+                } else job()
+            }
+            doAnswer { started.countDown(); finish.await(); null }.whenever(h.runner).run(any<ClaimedJob>())
+            h.worker.start()
+            try {
+                await(claimingEmpty)
+                val notify = h.worker.pollRequester()
+                repeat(10) { notify() }
+                verify(h.store, times(1)).claim(any(), any(), any())
+                returnEmpty.countDown(); await(started)
+                assertThat(claims.get()).isEqualTo(2)
+            } finally { returnEmpty.countDown(); finish.countDown() }
+        }
+    }
+
+    @Test
+    fun `유휴 워커는 알림 한 번으로 폴백 전에 처리 루프를 재개한다`() {
+        Harness().use { h ->
+            val empty = CountDownLatch(1)
+            val started = CountDownLatch(1)
+            val finish = CountDownLatch(1)
+            val pending = AtomicReference<ClaimedJob?>()
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
+                pending.getAndSet(null).also { if (it == null) empty.countDown() }
+            }
+            doAnswer { started.countDown(); finish.await(); null }.whenever(h.runner).run(any<ClaimedJob>())
+            h.worker.start()
+            try {
+                await(empty); pending.set(job())
+                h.worker.pollRequester().invoke()
+                await(started)
+            } finally { finish.countDown() }
+        }
+    }
+
+    @Test
+    fun `이전 세대의 알림 콜백은 재시작한 워커를 깨우지 않는다`() {
+        Harness().use { h ->
+            val empty = CountDownLatch(1)
+            val thread = AtomicReference<Thread>()
+            val count = AtomicInteger()
+            whenever(h.store.claim(any(), any(), any())).thenAnswer {
+                thread.set(Thread.currentThread()); count.incrementAndGet(); empty.countDown(); null
+            }
+            h.worker.start(); await(empty)
+            val oldNotify = h.worker.pollRequester()
+            h.worker.stop(); h.worker.start()
+            until { count.get() == 2 && thread.get().state == Thread.State.TIMED_WAITING }
+            oldNotify()
+            assertThat(count.get()).isEqualTo(2)
+            h.worker.stop()
+            oldNotify()
+            assertThat(count.get()).isEqualTo(2)
+        }
+    }
+
     @ParameterizedTest
     @EnumSource(Exit::class)
     fun `실행 종료 뒤 같은 스레드가 대기 없이 다음 claim을 하며 MDC와 interrupt를 정리한다`(exit: Exit) {
@@ -350,8 +419,8 @@ class DbJobWorkerTest {
     fun `예상 밖 claim 오류는 지정 간격만큼 대기하고 같은 루프에서 재개한다`() {
         val waiting = CountDownLatch(1)
         val resume = CountDownLatch(1)
-        Harness(waiter = QueueLoopWaiter {
-            assertThat(it).isEqualTo(Duration.ofDays(1)); waiting.countDown(); resume.await()
+        Harness(claimErrorDelay = Duration.ofMillis(42), waiter = QueueLoopWaiter {
+            assertThat(it).isEqualTo(Duration.ofMillis(42)); waiting.countDown(); resume.await()
         }).use { h ->
             val started = CountDownLatch(1)
             val finish = CountDownLatch(1)
