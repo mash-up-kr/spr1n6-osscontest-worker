@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 매쉬업스프링YB
+# SPDX-License-Identifier: MIT
 # Worker 비정상 종료 시나리오. 실행 방법은 같은 폴더의 README.md에 있다.
 # 처리 중인 Worker 1을 SIGKILL하고, lease 만료 후 같은 Job을 Worker 2가 완료하는지 확인한다.
 # DB는 조회만 한다. lease·상태를 수정하거나 회수 프로시저를 직접 호출하지 않는다.

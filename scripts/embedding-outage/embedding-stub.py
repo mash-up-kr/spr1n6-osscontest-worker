@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 매쉬업스프링YB
+# SPDX-License-Identifier: MIT
 """임베딩 API 장애 시나리오용 스텁.
 
 기동 시각부터 --outage-seconds 동안은 --mode 에 맞는 오류를 돌려주고, 그 뒤에는 정상 임베딩을 돌려준다.

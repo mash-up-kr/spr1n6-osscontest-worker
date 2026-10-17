@@ -194,3 +194,19 @@ Apache POI 5.3.0, hwplib 1.1.9, jtokkit 1.1.0, and Lucene Nori 9.11.1.
 Follow the [code conventions](docs/CODE_CONVENTIONS_EN.md) and shared DB contract, then run
 `./gradlew test`. Validate actual database changes in a dedicated integration database.
 Distributed under the [MIT License](LICENSE).
+
+### Open-source software used
+
+| Project | License |
+|---|---|
+| Spring Boot / Spring AI | Apache-2.0 |
+| Kotlin | Apache-2.0 |
+| Hibernate ORM (hibernate-vector) | Apache-2.0 |
+| PostgreSQL JDBC Driver | BSD-2-Clause |
+| AWS SDK for Java v2 | Apache-2.0 |
+| Apache PDFBox | Apache-2.0 |
+| Apache POI | Apache-2.0 |
+| hwplib | Apache-2.0 |
+| jtokkit | MIT |
+| Apache Lucene (Nori) | Apache-2.0 |
+| Jackson | Apache-2.0 |
