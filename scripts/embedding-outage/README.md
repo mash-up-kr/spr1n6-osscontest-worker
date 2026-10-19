@@ -470,7 +470,7 @@ docker run --rm -p 8081:8081 -v "$PWD/scripts/embedding-outage/embedding-stub.py
 
 | 준비물 | 확인 |
 |---|---|
-| Python 3, `psql` | `python3 --version`, `psql --version` |
+| Python 3, `psql` | `python3 --version`, `psql --version`. macOS에서 `brew install libpq`로 설치한 `psql`은 PATH에 연결되지 않지만, 스크립트가 Homebrew 경로(`/opt/homebrew/opt/libpq/bin` 등)를 찾아 쓴다 |
 | `docker` | 스크립트를 실행하는 곳에서 `docker ps`로 기존 Worker 컨테이너(기본 `aidocs-dev-worker-1`, `aidocs-dev-worker-2`)가 보여야 한다. [`worker-crash`](../worker-crash/README.md)와 같은 방식이며 원격 Docker여도 된다. Worker는 사용자 정의 네트워크(compose 네트워크 등)에 연결돼 있어야 한다. 스텁용 이미지(기본 `python:3.12-slim`)는 Worker 이미지와 달리 서버에 없을 수 있다. 없으면 스크립트가 **Worker를 멈추기 전에** 한 번 받아 둔다(최대 10분). 이미지 저장소에 닿지 못하면 `--stub-image`로 서버에 이미 있는 Python 이미지를 지정한다 |
 | OpenProxy SSH 터널 | 기본 `localhost:15432`. `ssh -N -L 15432:<OpenProxy-VIP>:6432 ...`로 미리 연다. 스크립트는 터널을 열지 않는다 |
 | DB 비밀번호 | `~/.pgpass` 또는 `PGPASSWORD`. 스크립트에 적지 않는다 |

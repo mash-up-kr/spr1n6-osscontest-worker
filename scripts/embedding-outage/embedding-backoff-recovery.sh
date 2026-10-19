@@ -5,6 +5,12 @@
 # OpenProxy SSH 터널(localhost:15432)을 미리 열어 두고, 비밀번호는 ~/.pgpass 또는 PGPASSWORD 로 준비한다.
 set -euo pipefail
 command -v python3 >/dev/null 2>&1 || { echo 'python3가 필요합니다.' >&2; exit 1; }
+# Homebrew 의 libpq 는 PATH 에 연결되지 않으므로 psql 이 없으면 알려진 위치에서 찾아 PATH 에 더한다.
+if ! command -v psql >/dev/null 2>&1; then
+  for dir in /opt/homebrew/opt/libpq/bin /usr/local/opt/libpq/bin /opt/homebrew/opt/postgresql@*/bin /usr/local/opt/postgresql@*/bin; do
+    if [ -x "$dir/psql" ]; then export PATH="$dir:$PATH"; break; fi
+  done
+fi
 export EMBEDDING_OUTAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec python3 - "$@" <<'PYTHON'
 """임베딩 API 429·5xx 장애에서 Worker 의 백오프 재시도와 최종 완료를 확인한다.
@@ -421,9 +427,11 @@ def inspect_workers(runner, args):
         if not info.get("State", {}).get("Running"):
             raise StopTest(f"Worker {name} 가 실행 중이 아닙니다. 실행 중인 두 Worker 가 필요합니다.", 1)
         infos.append(info)
-    images = [info["Config"]["Image"] for info in infos]
+    # 태그(latest 등)는 컨테이너를 만든 뒤 pull 로 다른 이미지를 가리킬 수 있다. 실제로 쓰는 이미지 ID 로 맞춘다.
+    images = [info.get("Image") or info["Config"]["Image"] for info in infos]
     if images[0] != images[1]:
-        raise StopTest(f"두 Worker 의 이미지가 다릅니다: {images[0]} / {images[1]}", 1)
+        tags = [info["Config"]["Image"] for info in infos]
+        raise StopTest(f"두 Worker 의 이미지가 다릅니다: {tags[0]}({images[0][:19]}) / {tags[1]}({images[1][:19]})", 1)
     for info in infos:
         check_worker_settings(info["Config"].get("Env") or [], args)
     return images[0], infos[0]["Config"].get("Env") or [], pick_network(infos[0])
