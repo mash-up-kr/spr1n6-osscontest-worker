@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 매쉬업스프링YB
+# SPDX-License-Identifier: MIT
 """임베딩 장애 시나리오의 진행 상황을 터미널에 계속 그려 준다. DB 는 읽기만 한다.
 
 보여 주는 것: 스텁(모드·장애 구간 남은 시간·응답별 요청 수), breaker 상태, Job 상태별 개수, 최근 Job.
