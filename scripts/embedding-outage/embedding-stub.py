@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: MIT
 """임베딩 API 장애 시나리오용 스텁.
 
-기동 시각부터 --outage-seconds 동안은 --mode 에 맞는 오류를 돌려주고, 그 뒤에는 정상 임베딩을 돌려준다.
+장애 구간(--outage-seconds) 동안은 --mode 에 맞는 오류를 돌려주고, 그 뒤에는 정상 임베딩을 돌려준다.
+구간은 기본으로 기동 시각부터 세고, --outage-from first-request 이면 첫 임베딩 요청을 받은 시각부터 센다.
 POST /v1/embeddings 만 처리한다. GET /stats 는 모드, 장애 구간 남은 시간, 응답별 요청 수를 돌려준다.
 Worker 의 SPRING_AI_OPENAI_BASE_URL 을 http://127.0.0.1:<port>/v1 로 지정해 쓴다.
 """
@@ -19,6 +20,9 @@ DIMENSIONS = 1536
 MODES = ("5xx", "quota", "429", "timeout", "401")
 EMBEDDINGS_PATH = "/v1/embeddings"
 STATS_PATH = "/stats"
+OUTAGE_STARTS = ("start", "first-request")
+# 429 응답의 Retry-After 초. embedding-backoff-recovery.sh 가 같은 값을 기대한다.
+RATE_LIMIT_RETRY_AFTER_SECONDS = 30
 
 
 class Reply(NamedTuple):
@@ -44,10 +48,34 @@ class Stats:
             return dict(self._counts)
 
 
-def stats_payload(mode, outage_seconds, started, now, counts):
-    """GET /stats 응답 본문. started 와 now 는 같은 시계(time.monotonic)여야 한다."""
-    remaining = max(0.0, outage_seconds - (now - started))
-    return {"mode": mode, "outageSeconds": outage_seconds, "outageRemainingSeconds": remaining, "requests": counts}
+class OutageWindow:
+    """장애 구간 시계. started 가 None 이면 begin() 이 처음 불린 시각부터 센다. 시각은 모두 같은 시계(time.monotonic)다."""
+
+    def __init__(self, seconds, started=None):
+        self.seconds = seconds
+        self._started = started
+        self._lock = threading.Lock()
+
+    def begin(self, now):
+        with self._lock:
+            if self._started is None:
+                self._started = now
+
+    def active(self, now):
+        with self._lock:
+            return self._started is not None and now - self._started < self.seconds
+
+    def remaining(self, now):
+        with self._lock:
+            if self._started is None:
+                return self.seconds
+            return max(0.0, self.seconds - (now - self._started))
+
+
+def stats_payload(mode, window, now, counts):
+    """GET /stats 응답 본문. window 와 now 는 같은 시계(time.monotonic)를 쓴다."""
+    return {"mode": mode, "outageSeconds": window.seconds,
+            "outageRemainingSeconds": window.remaining(now), "requests": counts}
 
 
 def _error(status, err_type, code, message, headers=None):
@@ -85,7 +113,8 @@ def plan_reply(mode, in_outage, input_count, hang_seconds):
         return _error(429, "insufficient_quota", "insufficient_quota", "You exceeded your current quota (stub)")
     if mode == "429":
         # Worker 는 Retry-After 를 재시도 시각의 하한으로 읽는다. 30초는 기본 재시도 간격(30초)과 같다.
-        return _error(429, "requests", "rate_limit_exceeded", "Rate limit reached (stub)", {"Retry-After": "30"})
+        return _error(429, "requests", "rate_limit_exceeded", "Rate limit reached (stub)",
+                      {"Retry-After": str(RATE_LIMIT_RETRY_AFTER_SECONDS)})
     if mode == "401":
         return _error(401, "invalid_request_error", "invalid_api_key", "Incorrect API key provided (stub)")
     if mode == "timeout":
@@ -93,12 +122,12 @@ def plan_reply(mode, in_outage, input_count, hang_seconds):
     raise ValueError(f"알 수 없는 모드: {mode}")
 
 
-def make_handler(mode, outage_seconds, hang_seconds, started, stats):
+def make_handler(mode, window, hang_seconds, stats):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path.split("?")[0] != STATS_PATH:
                 return self._send(Reply(404, {}, b'{"error":{"message":"not found"}}', 0))
-            payload = stats_payload(mode, outage_seconds, started, time.monotonic(), stats.snapshot())
+            payload = stats_payload(mode, window, time.monotonic(), stats.snapshot())
             self._send(Reply(200, {}, json.dumps(payload).encode(), 0))
 
         def do_POST(self):
@@ -109,7 +138,9 @@ def make_handler(mode, outage_seconds, hang_seconds, started, stats):
                 count = count_inputs(json.loads(self.rfile.read(length) or b"{}"))
             except ValueError:  # JSONDecodeError 도 ValueError 의 하위 클래스다
                 return self._send(Reply(400, {}, b'{"error":{"message":"invalid request","type":"invalid_request_error"}}', 0))
-            in_outage = time.monotonic() - started < outage_seconds
+            now = time.monotonic()
+            window.begin(now)  # --outage-from first-request 이면 이 요청이 장애 구간의 시작이다
+            in_outage = window.active(now)
             reply = plan_reply(mode, in_outage, count, hang_seconds)
             result = "hang" if reply.status is None else reply.status
             stats.record(result)
@@ -146,9 +177,12 @@ def main():
     parser.add_argument("--outage-seconds", type=float, default=90)
     parser.add_argument("--mode", choices=MODES, default="5xx")
     parser.add_argument("--hang-seconds", type=float, default=10)
+    parser.add_argument("--outage-from", choices=OUTAGE_STARTS, default="start",
+                        help="start: 기동 시각부터, first-request: 첫 임베딩 요청을 받은 시각부터 장애 구간을 센다")
     args = parser.parse_args()
-    handler = make_handler(args.mode, args.outage_seconds, args.hang_seconds, time.monotonic(), Stats())
-    print(f"stub mode={args.mode} outage={args.outage_seconds}s port={args.port}", flush=True)
+    started = time.monotonic() if args.outage_from == "start" else None
+    handler = make_handler(args.mode, OutageWindow(args.outage_seconds, started), args.hang_seconds, Stats())
+    print(f"stub mode={args.mode} outage={args.outage_seconds}s from={args.outage_from} port={args.port}", flush=True)
     # Docker 로 띄울 때 포트 매핑이 닿으려면 모든 인터페이스에 바인딩해야 한다.
     ThreadingHTTPServer(("0.0.0.0", args.port), handler).serve_forever()
 

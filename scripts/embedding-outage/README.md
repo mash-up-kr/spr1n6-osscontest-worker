@@ -1,6 +1,6 @@
 # 임베딩 API 장애 시나리오
 
-외부 임베딩 API가 일시 장애일 때 Worker가 재시도하고 서킷 브레이커(breaker)가 열렸다 닫히는 모습을 로컬에서 직접 보는 방법이다. Worker가 호출하는 임베딩 API를 이 폴더의 가짜 서버(스텁)로 바꿔 끼워 장애를 만든다. 운영 코드는 바꾸지 않는다.
+외부 임베딩 API가 일시 장애일 때 Worker가 재시도하고 서킷 브레이커(breaker)가 열렸다 닫히는 모습을 로컬에서 직접 보는 방법이다. Worker가 호출하는 임베딩 API를 이 폴더의 가짜 서버(스텁)로 바꿔 끼워 장애를 만든다. 운영 코드는 바꾸지 않는다. 1~7장은 로컬 격리 환경에서 사람이 화면을 보며 하는 시험이고, [8장](#8-자동-시험-429와-5xx-백오프-복구)은 이미 떠 있는 시험 환경에 붙어 429·5xx 재시도와 최종 완료를 스크립트가 판정한다.
 
 [← scripts 목차](../README.md)
 
@@ -13,6 +13,7 @@
 5. [정리하기](#5-정리하기)
 6. [막혔을 때](#6-막혔을-때)
 7. [참고: 스텁 응답만 확인하기](#7-참고-스텁-응답만-확인하기)
+8. [자동 시험: 429와 5xx 백오프 복구](#8-자동-시험-429와-5xx-백오프-복구) — 시험 환경에 붙어 PASS/FAIL로 판정
 
 ---
 
@@ -198,7 +199,7 @@ DB_URL=jdbc:postgresql://localhost:55434/worker_integration_test DB_USERNAME=wor
 python3 scripts/embedding-outage/embedding-stub.py --port 18081 --mode 5xx --outage-seconds 90
 ```
 
-**기대 결과:** `stub mode=5xx outage=90.0s port=18081`가 나온다. 터미널 C의 스텁 줄이 `mode=5xx 장애 구간 ████ NNs 남음`으로 바뀐다.
+**기대 결과:** `stub mode=5xx outage=90.0s from=start port=18081`가 나온다. 터미널 C의 스텁 줄이 `mode=5xx 장애 구간 ████ NNs 남음`으로 바뀐다.
 
 ### 3-7. 문서 올리고 지켜보기 (터미널 A → C)
 
@@ -443,7 +444,7 @@ curl -s localhost:18081/stats                                                   
 kill %1
 ```
 
-스텁 옵션은 `--port`(8081), `--outage-seconds`(90), `--mode`(5xx), `--hang-seconds`(10)이다. `timeout` 모드는 `--hang-seconds` 동안 응답이 없다가 연결이 끊긴다. Docker로 띄우려면 아래처럼 한다.
+스텁 옵션은 `--port`(8081), `--outage-seconds`(90), `--mode`(5xx), `--hang-seconds`(10), `--outage-from`(start)이다. `--outage-from first-request`는 장애 구간을 기동 시각이 아니라 첫 임베딩 요청을 받은 시각부터 센다. `timeout` 모드는 `--hang-seconds` 동안 응답이 없다가 연결이 끊긴다. Docker로 띄우려면 아래처럼 한다.
 
 ```bash
 docker run --rm -p 8081:8081 -v "$PWD/scripts/embedding-outage/embedding-stub.py:/stub.py:ro" python:3-slim \
@@ -452,3 +453,80 @@ docker run --rm -p 8081:8081 -v "$PWD/scripts/embedding-outage/embedding-stub.py
 
 `watch.py` 옵션은 `--stub-url`(기본 `http://127.0.0.1:8081`, 환경변수 `STUB_URL`), `--interval`(2초), `--once`(한 번만 그리고 종료), `--no-color`다. Job 개수와 최근 Job은 시나리오로 만든 것만이 아니라 DB의 `indexing_job` 전체 기준이다. Ctrl+C나 SIGTERM으로 끝내면 임시 psql 컨테이너(`spr1n6-watch-psql`)가 지워지고, 강제 종료(SIGKILL)하면 남지만 다음 실행이 먼저 지운다.
 
+
+---
+
+## 8. 자동 시험: 429와 5xx 백오프 복구
+
+임베딩 API가 429·5xx를 돌려줘도 Worker가 백오프 정책대로 재시도하고, API가 정상화된 뒤 같은 Job을 최종 완료하는지를 스크립트 하나가 PASS/FAIL로 판정한다. 3~4장과 달리 **환경을 만들지 않는다.** [`db-outage`](../db-outage/README.md), [`worker-crash`](../worker-crash/README.md)처럼 이미 떠 있는 시험 환경에 붙어 DB를 **읽기만** 하고, `docker`로 기존 Worker 컨테이너를 직접 다룬다. 서버의 compose 파일과 Worker 설정은 바꾸지 않는다.
+
+동작 원리는 이렇다. 스크립트가 기존 Worker 두 대의 이미지·환경변수·네트워크를 `docker inspect`로 읽고, 두 대를 시험 동안 멈춘다. 같은 이미지와 환경변수로 **임시 Worker** 1개(`embedding-test-worker`)를 만들되 `SPRING_AI_OPENAI_BASE_URL`만 **임시 스텁**(`embedding-test-stub`)으로 돌린다. 스텁은 같은 사용자 정의 네트워크 안에서 컨테이너 이름으로 닿고, 스텁 소스는 base64 인자로 넘겨 호스트 파일 마운트와 published port를 쓰지 않으므로 원격 Docker에서도 된다. 스텁 이미지가 없으면 Worker를 멈추기 전에 먼저 받는다. 시험이 끝나면(오류·Ctrl+C 포함) 임시 컨테이너를 지우고 **멈췄던 기존 Worker만** 다시 시작한다.
+
+| 파일 | 하는 일 |
+|---|---|
+| [`embedding-backoff-recovery.sh`](embedding-backoff-recovery.sh) | 이 파일 하나로 실행한다(안에 파이썬 코드가 들어 있고, 스텁은 같은 폴더의 `embedding-stub.py`를 쓴다). 임시 스텁·임시 Worker를 띄우고, 사람이 올린 문서의 Job을 관측해 백오프·오류 코드·breaker·최종 완료를 판정한다 |
+
+### 준비
+
+| 준비물 | 확인 |
+|---|---|
+| Python 3, `psql` | `python3 --version`, `psql --version`. macOS에서 `brew install libpq`로 설치한 `psql`은 PATH에 연결되지 않지만, 스크립트가 Homebrew 경로(`/opt/homebrew/opt/libpq/bin` 등)를 찾아 쓴다 |
+| `docker` | 스크립트를 실행하는 곳에서 `docker ps`로 기존 Worker 컨테이너(기본 `aidocs-dev-worker-1`, `aidocs-dev-worker-2`)가 보여야 한다. [`worker-crash`](../worker-crash/README.md)와 같은 방식이며 원격 Docker여도 된다. Worker는 사용자 정의 네트워크(compose 네트워크 등)에 연결돼 있어야 한다. 스텁용 이미지(기본 `python:3.12-slim`)는 Worker 이미지와 달리 서버에 없을 수 있다. 없으면 스크립트가 **Worker를 멈추기 전에** 한 번 받아 둔다(최대 10분). 이미지 저장소에 닿지 못하면 `--stub-image`로 서버에 이미 있는 Python 이미지를 지정한다 |
+| OpenProxy SSH 터널 | 기본 `localhost:15432`. `ssh -N -L 15432:<OpenProxy-VIP>:6432 ...`로 미리 연다. 스크립트는 터널을 열지 않는다 |
+| DB 비밀번호 | `~/.pgpass` 또는 `PGPASSWORD`. 스크립트에 적지 않는다 |
+| 웹에서 문서 업로드 | API 서버·웹이 떠 있어야 한다 |
+
+접속 환경변수는 `DB_HOST`(localhost), `DB_PORT`(15432), `DB_USER`(aidocs), `DB_NAME`(aidocs), `DB_SCHEMA`(public)이다. 일반 PostgreSQL(3장의 격리 DB)에 붙일 때만 `DB_SERVER_ROLE=`(빈 값)을 더해 OpenProxy 전용 `SET SERVER ROLE` 문장을 뺀다.
+
+**주의:**
+
+- 다른 시나리오(`db-outage`, `worker-crash`)를 모두 끝낸 뒤 **마지막에** 실행한다.
+- 시험 동안 이 큐를 소비하는 **기존 Worker가 멈춘다.** 이 큐를 소비하는 Worker는 지정한 두 대뿐이어야 한다.
+- `external_circuit_breaker` 행은 모든 Worker가 공유한다. 같은 DB를 쓰는 다른 시험이나 업로드와 **동시에 돌리지 않는다.** 시작 전에 미종결 Job이 없고 breaker가 `CLOSED`인지 점검하고, 아니면 시작하지 않는다.
+- 정상 구간에도 스텁이 가짜 벡터를 돌려주므로 시험용 임베딩이 임시로 DB에 남는다.
+- 중단·실패로 정리되지 않았을 때는 아래 명령으로 복구한다.
+
+```bash
+docker rm -f embedding-test-worker embedding-test-stub; docker start aidocs-dev-worker-1 aidocs-dev-worker-2
+```
+
+### 실행
+
+저장소 루트에서 실행한다.
+
+```bash
+bash scripts/embedding-outage/embedding-backoff-recovery.sh --check-only   # DB·Worker 설정 점검과 스텁 이미지 받아 두기(Worker는 멈추지 않는다)
+bash scripts/embedding-outage/embedding-backoff-recovery.sh                # 429 → 5xx 순서로 시험
+bash scripts/embedding-outage/embedding-backoff-recovery.sh --modes 429    # 한 모드만
+```
+
+처음에는 `--check-only`로 접속과 설정 비교, 이미지 받기를 먼저 확인하고, 이어서 `--modes 429`로 한 모드만 돌려 본 뒤 전체를 돌리는 순서를 권한다.
+
+모드마다 `>>> 지금 웹에서 테스트 문서 하나를 업로드하세요 <<<`가 나오면 문서를 **하나만** 올린다. `--upload-command './upload.sh'`를 주면 그 명령으로 자동 업로드한다. 올린 뒤에는 Job 상태가 바뀔 때마다 한 줄씩 나오고, 스텁의 요청 로그(`docker logs -f`)가 같은 터미널에 섞여 나온다. 임시 Worker가 뜨기를 기다리는 데 처음에 최대 2분이 걸리고, 모드당 약 2~3분이다. 스텁이 한 건도 요청을 받지 못하면(임시 Worker가 스텁을 보지 못함) 판정하지 않고 종료 코드 2로 끝낸다.
+
+### 판정
+
+| 항목 | 기준 |
+|---|---|
+| 재시도 2회 이상 관측 | 부족하면 `판정 불가`(종료 코드 2). `--outage-seconds`를 늘려 다시 한다 |
+| attempt_count 증가 | `RETRY_WAIT`마다 시도 횟수가 늘어난다 |
+| 백오프 간격 | 대기 시간이 `base × 시도횟수 × 0.8~1.2`다. 429는 `Retry-After`(30초) 이상이다. 처음 관측이 실제 실패보다 늦은 만큼(폴링 간격 + 2초)을 허용한다 |
+| 오류 코드 | 429는 `RATE_LIMITED`와 breaker `CLOSED` 유지. 5xx는 오류 코드가 비어 있지 않다 |
+| 최종 | 같은 Job이 `COMPLETED`, `outcome=INDEXED`, 시도 5회 이내 |
+
+5xx에서 breaker 상태는 화면에 보이기만 하고 판정하지 않는다. 문서 한 건으로는 연속 실패 5건에 닿지 않아 열리지 않을 수 있기 때문이다. breaker `OPEN` 전이는 4장의 `5xx` 시험(문서 5개)으로 본다.
+
+종료 코드: 0=모두 PASS, 1=FAIL·환경 오류, 2=관측 부족으로 판정 불가, 130=중단.
+
+### 설정
+
+| 옵션·환경변수 | 기본 | 뜻 |
+|---|---|---|
+| `--outage-seconds` | 90 | 장애 구간. 첫 임베딩 요청부터 센다. 범위를 벗어나면 시작하지 않는다 |
+| `INDEXING_RETRY_BASE_DELAY` (`--base-delay`) | PT30S | **Worker와 같은 값**이어야 한다. 백오프 범위 계산에 쓴다. 복사한 Worker 환경변수에 같은 설정이 있으면 자동으로 비교해, 다르면 `--base-delay <값> 으로 다시 실행하세요`라고 알리고 시작하지 않는다(없으면 기본값으로 보고 통과) |
+| `INDEXING_QUEUE_POLL_INTERVAL` (`--queue-poll`) | PT30S | Worker와 같은 값(자동 비교). 장애 구간 하한 계산에 쓴다 |
+| `INDEXING_MAX_ATTEMPTS` (`--max-attempts`) | 5 | Worker와 같은 값(자동 비교) |
+| `WORKER1_CONTAINER` (`--worker1`) | aidocs-dev-worker-1 | 시험 동안 멈출 기존 Worker 1. 이 Worker의 이미지·환경변수·네트워크를 임시 Worker에 복사한다 |
+| `WORKER2_CONTAINER` (`--worker2`) | aidocs-dev-worker-2 | 시험 동안 멈출 기존 Worker 2. 1과 이미지가 같아야 한다 |
+| `STUB_IMAGE` (`--stub-image`) | python:3.12-slim | 스텁을 실행할 이미지. `python` 명령이 있으면 된다. 없으면 시작 전에 받는다 |
+| `--poll-interval` | 1 | DB 폴링 간격(초). 조회마다 새 접속을 만들고 OpenProxy를 다른 사람도 쓰므로 너무 짧게 하지 않는다 |
