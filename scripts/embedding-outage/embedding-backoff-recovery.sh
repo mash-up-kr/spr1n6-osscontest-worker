@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 매쉬업스프링YB
+# SPDX-License-Identifier: MIT
 # 임베딩 API 429·5xx 백오프 복구 시나리오. 실행 방법은 같은 폴더의 README.md 8장에 있다.
 # 스텁·임시 Worker 컨테이너를 띄워 429·5xx를 일으키고, 사람이 올린 문서의 Job이 백오프대로 재시도한 뒤 COMPLETED가 되는지 확인한다.
 # DB는 읽기만 한다. 옵션은 --help 로 본다. 같은 폴더의 embedding-stub.py 를 스텁 컨테이너에 실어 보낸다.
