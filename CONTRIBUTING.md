@@ -1,0 +1,53 @@
+[한국어](CONTRIBUTING.md) | [English](CONTRIBUTING_EN.md)
+
+# 기여 가이드
+
+이 저장소에서 작업할 때 지키는 절차입니다. 코드를 쓰는 기준은 [docs/CODE_CONVENTIONS.md](docs/CODE_CONVENTIONS.md)에, 개발 환경을 세팅하고 테스트를 실행하는 방법은 [README의 실행](README.md#실행)과 [검증과 문서](README.md#검증과-문서)에 있습니다.
+
+---
+
+## 기여 흐름
+
+1. [이슈](https://github.com/mash-up-kr/spr1n6-osscontest-worker/issues/new/choose)를 먼저 올립니다. 버그는 Bug report, 기능 제안은 Feature request 양식을 씁니다.
+2. 작업하려는 이슈에 댓글로 알린 뒤 `main`에서 브랜치를 만듭니다. 브랜치 이름에 이슈 번호를 넣습니다. (`fix/123-claim-timeout`)
+3. PR 본문의 Related Issue에 `Closes #123`을 적습니다. 머지되면 이슈가 함께 닫힙니다.
+
+오타나 문서 수정처럼 작은 변경은 이슈 없이 바로 PR을 올려도 됩니다.
+
+보안 취약점은 이슈로 올리지 않고 [보안 정책](SECURITY.md)에 따라 비공개로 신고합니다.
+
+## 브랜치
+
+| 브랜치          | 용도          |
+|--------------|-------------|
+| `main`       | 통합 브랜치      |
+| `feat/*`     | 기능 개발       |
+| `fix/*`      | 버그 수정       |
+| `refactor/*` | 리팩터링        |
+| `docs/*`     | 문서 작업       |
+| `chore/*`    | 설정, 빌드, 의존성 |
+
+작업 브랜치는 `main`에서 분기하고, 완료 후 PR로 `main`에 머지합니다.
+
+## 커밋 메시지
+
+제목은 `<type>: <subject>` 형식을 따릅니다. 바디는 자유롭게 작성합니다.
+
+```
+feat: 삭제된 문서의 INDEX Job을 정상 종결 처리
+fix: 장애 전환 중 연결이 풀에 남아 같은 오류가 반복되던 문제 수정
+docs: README의 DB 연결 설정 불일치 수정
+refactor: DB Job 기반 Worker 실행권·재시도 처리 통합
+test: 장애 처리 동작 검증 추가
+chore: 소스 파일에 MIT 헤더 추가
+```
+
+정리(주석 · 이름 · 죽은 코드) 커밋과 동작을 바꾸는 커밋을 섞지 않습니다. 섞이면 리뷰에서 이동인지 변경인지 가릴 수 없습니다.
+
+## Pull Request
+
+`.github/pull_request_template.md`를 따릅니다. 본문에는 무엇이 문제였는지, 어떻게 재현되는지, 무엇을 고쳤는지, 어떻게 검증했는지를 적습니다.
+
+원인이 다른 수정은 PR을 나눕니다. 서로 없으면 안 되는 변경만 하나로 묶습니다.
+
+설계를 두고 고민한 내용이나 대안을 검토한 과정은 코드 주석이 아니라 PR 본문에 남깁니다. 주석은 코드가 무엇을 하는지에 집중합니다.

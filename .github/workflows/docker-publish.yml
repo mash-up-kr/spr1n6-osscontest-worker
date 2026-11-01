@@ -3,9 +3,13 @@ name: Docker Publish
 on:
   push:
     branches: [main]
+    # 이미지에 들어가지 않는 문서·템플릿·시험 스크립트만 바뀐 push는 배포하지 않는다. ci.yml의 paths-ignore와 같은 기준이다.
     paths-ignore:
       - 'docs/**'
-      - '*.md'
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/pull_request_template.md'
+      - 'scripts/**'
 
 permissions:
   contents: read

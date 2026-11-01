@@ -94,8 +94,10 @@ class IndexingPipelineRunner(
                 log.warn("Job attempt ended: token={} status={} error={}", job.token, status, classified.code)
             }
         } catch (_: ExecutionCompletedException) {
+            // 같은 실행이 이미 끝났으므로 오류가 아니다. 상태를 다시 쓰지 않고 정리만 한다.
             log.info("Job already completed: {}", job.token)
         } catch (_: ExecutionLostException) {
+            // 외부 회수나 다른 실행이 소유권을 가져갔다. 실패를 기록하면 새 실행의 상태를 덮으므로 쓰지 않는다.
             log.info("Job execution lost: {}", job.token)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()

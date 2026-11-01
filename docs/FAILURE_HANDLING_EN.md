@@ -54,6 +54,7 @@ Guarded publication means ownership checks and idempotency in the save method. I
 Job and checks the token. `COMPLETED` under the same token returns without further writes.
 Otherwise it validates ownership/lease and UPSERTs retained results. A different owner's stale token
 is rejected. Chunks and Job completion are not committed in separate transactions.
+`publication` refers to this result-saving transaction.
 
 Claims capture the proposed token before UPDATE and resolve that claim after recovery.
 Failure commits clear the worker and lease, so replay resolves the released state separately from normal ownership
@@ -144,7 +145,7 @@ the searchable pointer back.
 | Quota exhaustion (429 insufficient_quota) | Opens the breaker immediately. The Job that received it spends one attempt and moves to `RETRY_WAIT` if attempts remain; other INDEX Jobs wait without consuming attempts while open |
 
 Unit and PostgreSQL integration tests are distinct. Validate SQL races and rollbacks against a dedicated
-database with all Server migrations applied, including [`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql).
+database with all Server migrations applied.
 This document does not claim that production migrations or integration tests have been completed.
 
 Metrics: `indexing_db_wait_total`, `indexing_retry_scheduled_total{errorCode}`,

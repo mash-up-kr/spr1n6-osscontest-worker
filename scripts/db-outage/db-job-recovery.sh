@@ -20,15 +20,20 @@ RECOVERY_TIMEOUT="${RECOVERY_TIMEOUT:-300}"
 COMPLETION_TIMEOUT="${COMPLETION_TIMEOUT:-600}"
 POLL="${POLL_INTERVAL:-1}"
 
-# 장애를 주입할 Patroni 노드의 SSH 접속 정보다. 실제 노드 매핑은 실행 전에 환경변수로 지정한다.
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/opensql.pem}"
-SSH_USER="${SSH_USER:-rocky}"
-DB1="${DB1:-13.124.25.248}"
-DB2="${DB2:-13.125.16.16}"
-DB3="${DB3:-13.124.25.248}"
+# 장애를 주입할 Patroni 노드의 SSH 접속 정보다. 주소·키 경로·사용자는 저장소에 두지 않으므로
+# DB1~DB3, SSH_KEY, SSH_USER를 환경변수로 반드시 지정한다.
+SSH_KEY="${SSH_KEY:-}"
+SSH_USER="${SSH_USER:-}"
+DB1="${DB1:-}"
+DB2="${DB2:-}"
+DB3="${DB3:-}"
 PATRONI_API_PORT="${PATRONI_API_PORT:-8008}"
 
 [[ "$DB_SCHEMA" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "DB_SCHEMA 형식 오류"; exit 1; }
+# 기본값이 없으므로 비어 있으면 장애를 주입하기 전에 멈춘다.
+for name in DB1 DB2 DB3 SSH_KEY SSH_USER; do
+  [ -n "${!name}" ] || { echo "$name 환경변수를 지정하세요. (DB1~DB3: Patroni 노드의 SSH 주소, SSH_KEY: 키 파일 경로, SSH_USER: SSH 사용자)"; exit 1; }
+done
 command -v psql >/dev/null || { echo "psql 명령이 필요합니다."; exit 1; }
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }

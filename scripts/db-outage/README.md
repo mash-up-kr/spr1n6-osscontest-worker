@@ -1,3 +1,5 @@
+[한국어](README.md) / [English](README_EN.md)
+
 # OpenSQL 장애 시나리오
 
 작업 처리 중 OpenSQL이 중단되었다가 복구되어도 저장된 작업 상태를 기반으로 미완료 작업의 처리를 재개하여 최종 완료할 수 있는지 확인하는 방법이다. 현재 Primary의 Patroni를 강제 종료하고, OpenProxy를 통한 DB 연결 실패·복구와 같은 Job의 최종 완료를 관찰한다.
@@ -87,15 +89,15 @@ export DB_HOST=localhost DB_PORT=15432 DB_USER=aidocs DB_NAME=aidocs DB_SCHEMA=p
 read -r -s -p 'DB 비밀번호: ' PGPASSWORD; echo
 export PGPASSWORD
 
-export SSH_KEY="$HOME/.ssh/opensql.pem"
-export SSH_USER=rocky
+export SSH_KEY='<SSH 키 파일 경로>'
+export SSH_USER='<SSH 사용자>'
 export DB1='<postgresql1의 SSH 접속 주소>'
 export DB2='<postgresql2의 SSH 접속 주소>'
 export DB3='<postgresql3의 SSH 접속 주소>'
 export PATRONI_API_PORT=8008
 ```
 
-`~/.pgpass`를 사용하면 비밀번호 입력을 생략할 수 있다. `DB1`·`DB2`·`DB3`는 DB 쿼리 접속 주소가 아니라 **각 Patroni 노드의 SSH 주소**다. 기본값에 기대지 말고 세 주소를 실제 환경에 맞게 지정한다. 스크립트의 기존 기본값에는 `DB1`과 `DB3`가 같은 주소로 들어 있다.
+`~/.pgpass`를 사용하면 비밀번호 입력을 생략할 수 있다. `DB1`·`DB2`·`DB3`는 DB 쿼리 접속 주소가 아니라 **각 Patroni 노드의 SSH 주소**다. `DB1`~`DB3`, `SSH_KEY`, `SSH_USER`는 기본값이 없으며, 하나라도 비어 있으면 스크립트가 장애를 주입하기 전에 멈춘다. 저장소 루트 `.env`의 같은 이름 항목에 적어 두었다면 `set -a; source .env; set +a`로 불러온다.
 
 `DB3`는 `/cluster` 조회용 접속점이다. 반환되는 이름 `postgresql1`, `postgresql2`, `postgresql3`와 위 주소 매핑이 일치해야 한다. 다른 이름을 쓰는 클러스터는 현재 스크립트로 실행할 수 없다.
 
@@ -149,8 +151,8 @@ echo "시험 종료 코드: $result"
 |---|---|---|
 | `DB_HOST`, `DB_PORT` | `localhost`, `15432` | OpenProxy 쿼리 접속 경로 |
 | `DB_USER`, `DB_NAME`, `DB_SCHEMA` | `aidocs`, `aidocs`, `public` | 조회 계정·DB·스키마 |
-| `SSH_KEY`, `SSH_USER` | `~/.ssh/opensql.pem`, `rocky` | Patroni 노드 SSH 접속 |
-| `DB1`, `DB2`, `DB3` | 기존 시험 환경 주소. 실행 전 세 값 모두 지정 | Patroni 노드 이름과 SSH 주소 매핑 |
+| `SSH_KEY`, `SSH_USER` | 없음. 실행 전 지정 | Patroni 노드 SSH 접속 |
+| `DB1`, `DB2`, `DB3` | 없음. 실행 전 세 값 모두 지정 | Patroni 노드 이름과 SSH 주소 매핑 |
 | `PATRONI_API_PORT` | `8008` | 원격 노드의 Patroni API 포트 |
 | `UPLOAD_TIMEOUT` | `300` | 새 Job 탐색 반복 횟수 |
 | `PROCESSING_TIMEOUT` | `300` | 처리 중 상태 관측 반복 횟수 |

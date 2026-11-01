@@ -30,13 +30,6 @@ Server는 업로드·권한·검색과 공용 DB 스키마를 소유합니다. �
 `INDEX` 또는 `DELETE` Job 등록은 생산자 측의 동일 트랜잭션에서 처리해야 합니다.
 Worker는 이미 등록된 Job을 실행하며 원본 Object Storage 삭제는 담당하지 않습니다.
 
-**배포 의존성:** 물리 스키마와 마이그레이션은 Server를 따릅니다. Worker는 Server 마이그레이션이 적용된
-공용 스키마를 전제로 동작하며 스키마를 변경하지 않습니다(`ddl-auto: none`).
-Worker가 요구하는 큐·circuit breaker 스키마는 Server 마이그레이션 [`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql)에 있습니다.
-이 저장소는 마이그레이션을 적용하지 않습니다. lease가 만료된 `PROCESSING` Job의 회수도 Worker 범위 밖입니다.
-Server의 Job 생산 경로와 과거 버전 재시도 제한도 별도 저장소에서 구현·검증해야 합니다.
-이 저장소의 수정으로 Server가 전환되지는 않습니다.
-
 관련 저장소: [Server](https://github.com/mash-up-kr/spr1n6-osscontest-server),
 [Web](https://github.com/mash-up-kr/spr1n6-osscontest-web).
 
@@ -72,7 +65,7 @@ Worker는 lease가 만료된 `PROCESSING` Job을 다시 claim하지 않습니다
 지원 형식은 PDF, DOCX, HWP(`application/x-hwp`, `application/haansofthwp`),
 TXT, Markdown입니다. 원문의 SHA-256 해시를 확인하며 청킹 전략은 `FIXED_TOKEN`,
 `PARAGRAPH`, `PARAGRAPH_OVERLAP` 중 선택합니다.
-OpenAI `text-embedding-3-small`의 1,536차원 결과와 Nori 키워드 토큰을 저장합니다.
+OpenAI `text-embedding-3-small`의 1,536차원 결과, Nori 키워드 토큰, JSONB 메타데이터를 저장합니다.
 청크는 `(document_version_id, chunk_no)` 기준으로 UPSERT합니다.
 
 `execution_epoch`는 Job 실행권의 세대입니다. 문서 버전의 `version_no`는 별도로
@@ -157,6 +150,14 @@ docker run --rm --name aidocs-worker --env-file .env osscontest-indexing-worker
 컨테이너에서 DB와 Object Storage에 접근할 수 있어야 합니다. 이미지는 non-root `worker`
 사용자로 실행되며 health check는 Java PID 1 생존 여부를 확인합니다.
 
+## 운영 참고
+
+- **Worker 여러 개 실행:** 인스턴스마다 `INDEXING_WORKER_ID`를 다르게 지정합니다. 인스턴스당 DB 연결은 Hikari 풀 최대 3개와 LISTEN 전용 1개로 최대 4개입니다. `application.yml`의 풀 크기(3)는 OpenProxy 풀 크기(10)를 넘지 않게 잡은 값입니다. Worker 2대면 최대 8개이므로, 3대 이상이거나 같은 풀을 쓰는 다른 서비스가 있으면 풀 크기를 먼저 확인합니다.
+- **로그:** 각 줄에 `[traceId]`가 붙습니다. 값은 `indexing_job.trace_id`이며 없으면 `-`입니다.
+- **메트릭:** Micrometer에 등록하지만 HTTP 서버와 exporter를 두지 않아 외부로 노출되지 않습니다. 이름은 [Failure Handling](docs/FAILURE_HANDLING.md)에 있습니다. 수집하려면 exporter 의존성을 추가해야 합니다.
+- **장애 주입:** `FAULT_INJECTION_ENABLED=true`이면 `FAULT_INJECTION_PHASE`로 지정한 단계에서 Job 실행이 멈추고 프로세스가 끝날 때까지 풀리지 않습니다. 현재 구현된 단계는 `EMBEDDING` 하나이며 장애 재현 시험 전용입니다. 운영에서는 켜지 않습니다.
+- **CI와 배포:** PR마다 `test`와 `integration-test`(pgvector PostgreSQL 17에 Server 마이그레이션 적용)가 실행됩니다. `docs/`, `*.md`, GitHub 템플릿만 바뀐 PR은 건너뜁니다. `main`에 push하면 테스트를 거쳐 `ghcr.io/mash-up-kr/spr1n6-osscontest-worker`에 `latest`와 커밋 SHA 태그(amd64, arm64)로 이미지를 올립니다. `docs/`, `*.md`, GitHub 템플릿, `scripts/`만 바뀐 push는 이미지를 만들지 않습니다.
+
 ## 검증과 문서
 
 ```bash
@@ -204,6 +205,8 @@ src/main/kotlin/com/osscontest/worker/indexing
 ├── pipeline/      # claim한 Job의 단계 조율과 재시도
 ├── publication/   # 청크 UPSERT와 원자적 완료 저장
 ├── deletion/      # DELETE Job의 청크 삭제와 완료 저장
+├── concurrent/    # 취소 가능한 작업 래퍼(ManagedTask)
+├── config/        # 설정 속성 등록과 공용 Bean
 └── fault/         # 환경변수 기반 장애 주입
 ```
 
@@ -214,8 +217,9 @@ jtokkit 1.1.0, Lucene Nori 9.11.1.
 
 ## Contributing / License
 
-[코드 규칙](docs/CODE_CONVENTIONS.md)과 공용 DB 계약을 확인하고 `./gradlew test`를 실행합니다.
-실제 DB 동작 변경은 전용 통합 DB에서 검증합니다. [MIT License](LICENSE)로 배포됩니다.
+[기여 가이드](CONTRIBUTING.md)와 [코드 규칙](docs/CODE_CONVENTIONS.md), 공용 DB 계약을 확인하고 `./gradlew test`를 실행합니다.
+실제 DB 동작 변경은 전용 통합 DB에서 검증합니다. 보안 취약점은 이슈로 올리지 않고 [보안 정책](SECURITY.md)에 따라 신고합니다.
+[MIT License](LICENSE)로 배포됩니다.
 
 ### 사용된 오픈소스
 

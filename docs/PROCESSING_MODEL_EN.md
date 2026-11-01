@@ -24,7 +24,7 @@ connection. Listener failures do not mark the work database unavailable or stop 
 The listener uses the work database URL, credentials, and Hikari initialization SQL directly.
 Proxies must preserve sessions and forward asynchronous notifications.
 Budget one additional database connection per Worker. Idle discovery of due retries and externally recovered Jobs
-without notifications can take approximately another 30 seconds. Disabling LISTEN retains fallback discovery.
+without notifications adds a discovery delay of up to about 30 seconds after the due time. Disabling LISTEN retains fallback discovery.
 
 A claim uses a short `FOR UPDATE SKIP LOCKED` transaction. Candidates are unowned `PENDING`
 or due `RETRY_WAIT` Jobs below the attempt limit. An earlier active Job for the same document

@@ -74,6 +74,7 @@ class ExternalApiOperations(
             // 결과를 기록하지 못하고 빠져나가면 받은 시험 호출을 반납한다.
             if (!recorded) {
                 try { database.execute { breaker.release(token, callId) } }
+                // 반납 중 인터럽트되면 반납을 포기하고 인터럽트 상태만 복원한다. 시험 호출은 TTL이 지나면 만료된다.
                 catch (_: InterruptedException) { Thread.currentThread().interrupt() }
             }
         }

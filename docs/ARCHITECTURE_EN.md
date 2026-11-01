@@ -56,11 +56,8 @@ Chunks UPSERT on `(document_version_id, chunk_no)` and store JSONB metadata, `ve
 and Nori `content_tokens`. Publication locks the Job and document rows and commits chunks,
 version state, searchable pointer, and Job completion together. External calls finish outside that transaction.
 
-## Deployment dependencies
+## Server producer contract
 
-The physical schema and migrations follow the Server; the Worker never changes the schema.
-The queue and breaker schema the Worker needs is in the Server migration [`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql).
-This repository never applies it. Stop Workers without fencing and drain `PROCESSING` Jobs first.
 The Worker does not include a recovery procedure for `PROCESSING` Jobs with expired leases.
 
 Server producers must lock the document and enqueue Jobs in the document mutation transaction.

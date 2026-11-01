@@ -1,3 +1,5 @@
+[한국어](README.md) / [English](README_EN.md)
+
 # Worker 비정상 종료 시나리오
 
 작업 처리 중인 Worker가 비정상 종료되면, lease 만료 후 해당 미완료 작업을 다른 Worker가 선점하여 최종 완료할 수 있는지 확인하는 방법이다. Worker 1을 `SIGKILL`하고, DB의 자동 회수와 Worker 2의 인계를 순서대로 관찰한다.
