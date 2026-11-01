@@ -152,7 +152,7 @@ the health check tests Java PID 1 liveness.
 - **Logs:** Every line carries `[traceId]`, taken from `indexing_job.trace_id`; it is `-` when absent.
 - **Metrics:** They are registered in Micrometer, but there is no HTTP server or exporter, so nothing is exposed externally. Names are listed in [Failure Handling](docs/FAILURE_HANDLING_EN.md). Add an exporter dependency to collect them.
 - **Fault injection:** With `FAULT_INJECTION_ENABLED=true`, Job execution blocks at the phase named by `FAULT_INJECTION_PHASE` until the process exits. `EMBEDDING` is the only implemented phase. It exists for failure reproduction tests; do not enable it in production.
-- **CI and delivery:** Every PR runs `test` and `integration-test` (pgvector PostgreSQL 17 with the Server migrations applied). A push to `main` runs the tests and then publishes `ghcr.io/mash-up-kr/spr1n6-osscontest-worker` with `latest` and commit-SHA tags (amd64, arm64). Pushes that change only `docs/` or `*.md` do not build an image.
+- **CI and delivery:** Every PR runs `test` and `integration-test` (pgvector PostgreSQL 17 with the Server migrations applied). PRs that change only `docs/`, `*.md`, or GitHub templates are skipped. A push to `main` runs the tests and then publishes `ghcr.io/mash-up-kr/spr1n6-osscontest-worker` with `latest` and commit-SHA tags (amd64, arm64). Pushes that change only `docs/`, `*.md`, GitHub templates, or `scripts/` do not build an image.
 
 ## Tests and documentation
 
@@ -213,8 +213,9 @@ Apache POI 5.3.0, hwplib 1.1.9, jtokkit 1.1.0, and Lucene Nori 9.11.1.
 
 ## Contributing / License
 
-Follow the [code conventions](docs/CODE_CONVENTIONS_EN.md) and shared DB contract, then run
+Follow the [contributing guide](CONTRIBUTING_EN.md), the [code conventions](docs/CODE_CONVENTIONS_EN.md), and the shared DB contract, then run
 `./gradlew test`. Validate actual database changes in a dedicated integration database.
+Report security vulnerabilities privately under the [security policy](SECURITY_EN.md), not as issues.
 Distributed under the [MIT License](LICENSE).
 
 ### Open-source software used

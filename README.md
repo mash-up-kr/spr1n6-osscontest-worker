@@ -156,7 +156,7 @@ docker run --rm --name aidocs-worker --env-file .env osscontest-indexing-worker
 - **로그:** 각 줄에 `[traceId]`가 붙습니다. 값은 `indexing_job.trace_id`이며 없으면 `-`입니다.
 - **메트릭:** Micrometer에 등록하지만 HTTP 서버와 exporter를 두지 않아 외부로 노출되지 않습니다. 이름은 [Failure Handling](docs/FAILURE_HANDLING.md)에 있습니다. 수집하려면 exporter 의존성을 추가해야 합니다.
 - **장애 주입:** `FAULT_INJECTION_ENABLED=true`이면 `FAULT_INJECTION_PHASE`로 지정한 단계에서 Job 실행이 멈추고 프로세스가 끝날 때까지 풀리지 않습니다. 현재 구현된 단계는 `EMBEDDING` 하나이며 장애 재현 시험 전용입니다. 운영에서는 켜지 않습니다.
-- **CI와 배포:** PR마다 `test`와 `integration-test`(pgvector PostgreSQL 17에 Server 마이그레이션 적용)가 실행됩니다. `main`에 push하면 테스트를 거쳐 `ghcr.io/mash-up-kr/spr1n6-osscontest-worker`에 `latest`와 커밋 SHA 태그(amd64, arm64)로 이미지를 올립니다. `docs/`와 `*.md`만 바뀐 push는 이미지를 만들지 않습니다.
+- **CI와 배포:** PR마다 `test`와 `integration-test`(pgvector PostgreSQL 17에 Server 마이그레이션 적용)가 실행됩니다. `docs/`, `*.md`, GitHub 템플릿만 바뀐 PR은 건너뜁니다. `main`에 push하면 테스트를 거쳐 `ghcr.io/mash-up-kr/spr1n6-osscontest-worker`에 `latest`와 커밋 SHA 태그(amd64, arm64)로 이미지를 올립니다. `docs/`, `*.md`, GitHub 템플릿, `scripts/`만 바뀐 push는 이미지를 만들지 않습니다.
 
 ## 검증과 문서
 
@@ -217,8 +217,9 @@ jtokkit 1.1.0, Lucene Nori 9.11.1.
 
 ## Contributing / License
 
-[코드 규칙](docs/CODE_CONVENTIONS.md)과 공용 DB 계약을 확인하고 `./gradlew test`를 실행합니다.
-실제 DB 동작 변경은 전용 통합 DB에서 검증합니다. [MIT License](LICENSE)로 배포됩니다.
+[기여 가이드](CONTRIBUTING.md)와 [코드 규칙](docs/CODE_CONVENTIONS.md), 공용 DB 계약을 확인하고 `./gradlew test`를 실행합니다.
+실제 DB 동작 변경은 전용 통합 DB에서 검증합니다. 보안 취약점은 이슈로 올리지 않고 [보안 정책](SECURITY.md)에 따라 신고합니다.
+[MIT License](LICENSE)로 배포됩니다.
 
 ### 사용된 오픈소스
 
