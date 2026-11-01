@@ -11,8 +11,11 @@ import java.time.Duration
 @ConfigurationProperties("indexing.circuit-breaker")
 data class CircuitBreakerProperties(
     val name: String = "embedding-api",
+    // 임베딩 API의 일시 실패가 이 횟수만큼 연속되면 연다.
     val failureThreshold: Int = 5,
+    // 연 뒤 시험 호출을 허용하기까지의 대기 시간이다.
     val openDuration: Duration = Duration.ofSeconds(60),
+    // 시험 호출의 TTL이다. 임베딩 요청 타임아웃(60초)보다 길어야 호출이 끝나기 전에 만료되지 않는다.
     val callDuration: Duration = Duration.ofSeconds(90),
 ) {
     init {

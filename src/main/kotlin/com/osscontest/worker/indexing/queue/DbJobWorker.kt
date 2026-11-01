@@ -226,8 +226,10 @@ class DbJobWorker(
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         } catch (_: ExecutionLostException) {
+            // runner가 처리하지 못한 경로에서 올라온 경우다. 소유권이 없으므로 상태를 쓰지 않고 슬롯만 정리한다.
             log.info("Job execution lost: {}", job.token)
         } catch (_: ExecutionCompletedException) {
+            // 같은 실행이 이미 완료했으므로 오류로 보지 않는다.
             log.info("Job already completed: {}", job.token)
         } catch (error: Exception) {
             log.error("Job execution exited unexpectedly: {}", job.token, error)
@@ -253,6 +255,7 @@ class DbJobWorker(
             }, { handle.heartbeatFinished(task); heartbeatSlots.release() })
             if (!handle.install(task)) task.cancel(true)
             else try { generation.heartbeatWorkers.execute(task); add(task) }
+            // 종료 중인 heartbeat 풀이 거절하면 이번 갱신만 취소한다. 실행이 살아 있으면 다음 주기에 다시 갱신한다.
             catch (_: RejectedExecutionException) { task.cancel(true) }
             catch (error: Exception) { task.cancel(true); throw error }
         }
