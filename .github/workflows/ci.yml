@@ -1,15 +1,27 @@
 name: CI
 
 on:
+  # 문서와 GitHub 템플릿만 바뀐 PR은 건너뛴다. docker-publish.yml의 paths-ignore와 같은 기준이다.
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/pull_request_template.md'
   workflow_call:
 
 permissions:
   contents: read
 
+# 같은 브랜치에 새로 push하면 이전 PR 실행을 취소한다. main push는 이미지 배포로 이어지므로 취소하지 않는다.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -23,8 +35,17 @@ jobs:
       - name: Test
         run: ./gradlew --no-daemon test
 
+      - name: 테스트 리포트 업로드
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: build/reports/tests/test
+          retention-days: 7
+
   integration-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         # Server와 운영(PostgreSQL 17, pgvector 0.8.1)에 맞춘 이미지다.
@@ -111,3 +132,11 @@ jobs:
 
       - name: Integration test
         run: ./gradlew --no-daemon integrationTest
+
+      - name: 통합 테스트 리포트 업로드
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-report
+          path: build/reports/tests/integrationTest
+          retention-days: 7
