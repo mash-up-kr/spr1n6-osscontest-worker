@@ -145,7 +145,7 @@ Server의 과거 버전 재시도 제한은 외부 의존성입니다. 문서-�
 | 결제 한도 초과(429 `insufficient_quota`) | breaker 즉시 OPEN. 오류를 받은 Job은 시도 1회를 쓰고 한도가 남았으면 `RETRY_WAIT`, 열린 동안 다른 INDEX Job은 시도 횟수 소비 없이 대기 |
 
 일반 테스트와 실제 PostgreSQL 통합 테스트를 구분합니다. SQL 경쟁·롤백 검증은
-전용 DB에 Server 마이그레이션([`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql) 포함)을 모두 적용한 뒤 실행해야 합니다.
+전용 DB에 Server 마이그레이션을 모두 적용한 뒤 실행해야 합니다.
 이 문서는 운영 DB 적용이나 통합 테스트 실행 완료를 의미하지 않습니다.
 
 메트릭: `indexing_db_wait_total`, `indexing_retry_scheduled_total{errorCode}`,

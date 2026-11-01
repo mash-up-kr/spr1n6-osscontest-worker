@@ -56,11 +56,8 @@ flowchart TD
 `vector(1536)`, Nori `content_tokens`를 저장합니다. 결과 저장은 Job 행과 문서 행을 잠그고
 청크·버전·검색 포인터·Job 완료를 같은 트랜잭션에서 확정합니다. 외부 요청은 그 밖에서 수행합니다.
 
-## 배포 의존성
+## Server 생산자 계약
 
-물리 스키마와 마이그레이션은 Server를 따르며 Worker는 스키마를 변경하지 않습니다.
-Worker가 요구하는 큐·breaker 스키마는 Server 마이그레이션 [`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql)에 있으며 이 저장소는 적용하지 않습니다.
-기존 실행권 없는 Worker를 중단하고 `PROCESSING` Job을 비운 뒤 적용해야 합니다.
 lease가 만료된 `PROCESSING` Job의 회수 절차는 Worker에 포함하지 않습니다.
 
 Server 생산자는 문서 변경 트랜잭션에서 문서 행을 잠그고 Job을 등록해야 합니다.

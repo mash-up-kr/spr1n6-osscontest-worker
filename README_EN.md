@@ -28,15 +28,7 @@ flowchart LR
 
 The Server owns uploads, permissions, search, and the shared schema. Producers must create
 `INDEX` or `DELETE` Jobs in the document mutation transaction. The Worker executes existing
-Jobs; removing source objects remains the Server's responsibility.
-
-**Deployment dependencies:** The physical schema and migrations follow the Server. The Worker assumes
-a shared schema migrated by the Server and never changes it (`ddl-auto: none`).
-The queue and circuit breaker schema the Worker needs is in the Server migration
-[`V20261012_001__add_db_queue_schema.sql`](https://github.com/mash-up-kr/spr1n6-osscontest-server/blob/main/src/main/resources/db/migration/V20261012_001__add_db_queue_schema.sql). This repository never applies migrations.
-Recovering `PROCESSING` Jobs with expired leases is also outside the Worker.
-Durable Job production and restrictions on historical version retries must be implemented
-and verified in the Server repository. Worker changes do not migrate the Server.
+Jobs and does not remove source objects.
 
 Related repositories: [Server](https://github.com/mash-up-kr/spr1n6-osscontest-server),
 [Web](https://github.com/mash-up-kr/spr1n6-osscontest-web).
@@ -92,6 +84,20 @@ set +a
 ./gradlew bootRun
 ```
 
+The default connection settings go through OpenProxy and run `SET SERVER ROLE TO 'default'` on every connection.
+To connect directly to plain PostgreSQL, run with an extra config that empties this init SQL.
+Use the shell that loaded `.env` above.
+
+```bash
+cat > /tmp/worker-postgres.yml <<'EOF'
+spring:
+  datasource:
+    hikari:
+      connection-init-sql: ""
+EOF
+SPRING_CONFIG_ADDITIONAL_LOCATION=/tmp/worker-postgres.yml ./gradlew bootRun
+```
+
 | Environment variables | Default or purpose |
 |---|---|
 | `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` | Required database connection |
@@ -105,11 +111,14 @@ set +a
 | `INDEXING_QUEUE_CLAIM_ERROR_DELAY` | `PT1S`; wait after unexpected claim errors |
 | `INDEXING_QUEUE_NOTIFICATIONS_ENABLED` | `true`; enables the LISTEN connection |
 | `INDEXING_QUEUE_NOTIFICATION_CHANNEL` | `indexing_job`; must match the API Server |
+| `INDEXING_WORKER_IDLE_TIMEOUT` | `PT60S`; time before an idle execution thread is released |
 | `INDEXING_LEASE_DURATION`, `INDEXING_HEARTBEAT_INTERVAL` | `PT60S`, `PT10S` |
 | `INDEXING_DB_CHECK_INTERVAL`, `INDEXING_DB_QUERY_TIMEOUT` | `PT5S`, `PT3S` |
-| `INDEXING_DB_CONNECTION_TIMEOUT_MS` | `3000`; pool connection acquisition |
+| `SPRING_DATASOURCE_HIKARI_CONNECTIONTIMEOUT` | `5000` ms; pool connection acquisition limit, overrides `spring.datasource.hikari.connection-timeout` |
 | `INDEXING_DB_CONNECT_TIMEOUT_SECONDS`, `INDEXING_DB_SOCKET_TIMEOUT_SECONDS` | `3`, `15`; PostgreSQL driver timeouts |
 | `INDEXING_MAX_ATTEMPTS`, `INDEXING_RETRY_BASE_DELAY` | `5`, `PT30S` |
+| `INDEXING_CIRCUIT_BREAKER_FAILURE_THRESHOLD`, `INDEXING_CIRCUIT_BREAKER_OPEN_DURATION` | `5`, `PT60S`; embedding API circuit breaker |
+| `INDEXING_CIRCUIT_BREAKER_CALL_DURATION` | `PT90S`; probe call TTL, must be longer than the embedding timeout (60 seconds) |
 | `INDEXING_CHUNKING_STRATEGY` | `FIXED_TOKEN` |
 | `INDEXING_MAX_TOKENS_PER_CHUNK`, `INDEXING_OVERLAP_TOKENS` | `512`, `64` |
 | `INDEXING_MAX_CHUNKS`, `INDEXING_MAX_TOTAL_TOKENS` | `5000`, `2000000` |
@@ -137,15 +146,25 @@ docker run --rm --name aidocs-worker --env-file .env osscontest-indexing-worker
 The container must reach the database and storage. It runs as the non-root `worker` user;
 the health check tests Java PID 1 liveness.
 
+## Operations notes
+
+- **Running several Workers:** Give each instance a different `INDEXING_WORKER_ID`. Each instance opens at most four database connections: up to three in the Hikari pool plus one dedicated LISTEN connection. The pool size in `application.yml` (3) is chosen to stay within the OpenProxy pool size (10). Two Workers use at most eight; with three or more Workers, or other services sharing the same pool, check the pool size first.
+- **Logs:** Every line carries `[traceId]`, taken from `indexing_job.trace_id`; it is `-` when absent.
+- **Metrics:** They are registered in Micrometer, but there is no HTTP server or exporter, so nothing is exposed externally. Names are listed in [Failure Handling](docs/FAILURE_HANDLING_EN.md). Add an exporter dependency to collect them.
+- **Fault injection:** With `FAULT_INJECTION_ENABLED=true`, Job execution blocks at the phase named by `FAULT_INJECTION_PHASE` until the process exits. `EMBEDDING` is the only implemented phase. It exists for failure reproduction tests; do not enable it in production.
+- **CI and delivery:** Every PR runs `test` and `integration-test` (pgvector PostgreSQL 17 with the Server migrations applied). A push to `main` runs the tests and then publishes `ghcr.io/mash-up-kr/spr1n6-osscontest-worker` with `latest` and commit-SHA tags (amd64, arm64). Pushes that change only `docs/` or `*.md` do not build an image.
+
 ## Tests and documentation
 
 ```bash
 ./gradlew test
+./gradlew databaseTest
 ./gradlew integrationTest
 ```
 
 Unit tests cover parsers, chunking, queue capacity, database waits, ownership, and the circuit breaker
-without external services. Integration tests require a dedicated PostgreSQL/pgvector database
+without external services. `databaseTest` verifies the application context with an embedded H2 database.
+Tests tagged `database` do not run under `test` or `integrationTest`. Integration tests require a dedicated PostgreSQL/pgvector database
 with all Server migrations applied. The Server installs `pgcrypto` and `pg_cron` outside its migrations,
 so create them first. Add `pg_cron` to `shared_preload_libraries`, set `cron.database_name` to the test
 database, and restart PostgreSQL. CI prepares this in its `Prepare PostgreSQL extensions` workflow step.
@@ -171,6 +190,7 @@ the key conditions in their test code are met.
 | [Architecture](docs/ARCHITECTURE_EN.md) | Components and shared database contract |
 | [Processing Model](docs/PROCESSING_MODEL_EN.md) | Claims, concurrency, heartbeat, deletion |
 | [Failure Handling](docs/FAILURE_HANDLING_EN.md) | Database waits, lease races, uncertain commits, 429 |
+| [Failure reproduction guide](scripts/README.md) | Reproducing and verifying embedding API outages, Worker crashes, and database outages (Korean only) |
 
 ```text
 src/main/kotlin/com/osscontest/worker/indexing
@@ -182,6 +202,8 @@ src/main/kotlin/com/osscontest/worker/indexing
 ├── pipeline/      # Claimed Job coordination and retries
 ├── publication/   # Chunk UPSERT and atomic completion
 ├── deletion/      # DELETE Job cleanup and completion
+├── concurrent/    # Cancellable task wrapper (ManagedTask)
+├── config/        # Configuration properties registration and shared beans
 └── fault/         # Environment-driven fault injection
 ```
 
